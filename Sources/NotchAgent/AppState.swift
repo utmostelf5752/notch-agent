@@ -132,6 +132,11 @@ final class AppState: ObservableObject {
     var notchHeight: CGFloat { notchSize.height }
     var notchWidth: CGFloat { notchSize.width }
 
+    // Outward flare at the notch's top corners for the standard and compact
+    // looks. Stealth stays stock-shaped — its whole point is to be
+    // indistinguishable from the bare notch.
+    var notchTopRadius: CGFloat { notchStyle == .stealth ? 0 : 8 }
+
     var collapsedFrame: NSRect { frame(for: notchSize) }
 
     // Hover activation range: hovering anywhere inside this rect (while idle)
@@ -172,6 +177,13 @@ final class AppState: ObservableObject {
     // gets a narrower working strip — it can only chat, so it earns less room
     // and its activity text is allowed to clip.
     private var notchContentSize: NSSize {
+        var size = rawNotchContentSize
+        // Room for the outward top-corner flares on either side of the body.
+        size.width += notchTopRadius * 2
+        return size
+    }
+
+    private var rawNotchContentSize: NSSize {
         let base = notchSize
         // Stealth: never grow sideways. Working is fully silent (stock notch);
         // alerts and completion only extend 3pt below the cutout so the

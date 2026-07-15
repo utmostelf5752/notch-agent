@@ -24,24 +24,43 @@ func acceptDroppedFiles(_ providers: [NSItemProvider]) -> Bool {
     return accepted
 }
 
-// Rectangle with rounded bottom corners only — the notch silhouette.
+// The notch silhouette: rounded bottom corners, and optionally top corners
+// that flare outward — the top edge is topRadius wider per side than the
+// body and curves down into it, the same fillet the physical notch has
+// against the menu bar. topRadius 0 is the plain stock rectangle.
 struct NotchShape: Shape {
     var radius: CGFloat
+    var topRadius: CGFloat = 0
 
     func path(in rect: CGRect) -> Path {
+        let left = rect.minX + topRadius
+        let right = rect.maxX - topRadius
         var p = Path()
         p.move(to: CGPoint(x: rect.minX, y: rect.minY))
         p.addLine(to: CGPoint(x: rect.maxX, y: rect.minY))
-        p.addLine(to: CGPoint(x: rect.maxX, y: rect.maxY - radius))
+        if topRadius > 0 {
+            p.addQuadCurve(
+                to: CGPoint(x: right, y: rect.minY + topRadius),
+                control: CGPoint(x: right, y: rect.minY)
+            )
+        }
+        p.addLine(to: CGPoint(x: right, y: rect.maxY - radius))
         p.addQuadCurve(
-            to: CGPoint(x: rect.maxX - radius, y: rect.maxY),
-            control: CGPoint(x: rect.maxX, y: rect.maxY)
+            to: CGPoint(x: right - radius, y: rect.maxY),
+            control: CGPoint(x: right, y: rect.maxY)
         )
-        p.addLine(to: CGPoint(x: rect.minX + radius, y: rect.maxY))
+        p.addLine(to: CGPoint(x: left + radius, y: rect.maxY))
         p.addQuadCurve(
-            to: CGPoint(x: rect.minX, y: rect.maxY - radius),
-            control: CGPoint(x: rect.minX, y: rect.maxY)
+            to: CGPoint(x: left, y: rect.maxY - radius),
+            control: CGPoint(x: left, y: rect.maxY)
         )
+        if topRadius > 0 {
+            p.addLine(to: CGPoint(x: left, y: rect.minY + topRadius))
+            p.addQuadCurve(
+                to: CGPoint(x: rect.minX, y: rect.minY),
+                control: CGPoint(x: left, y: rect.minY)
+            )
+        }
         p.closeSubpath()
         return p
     }
@@ -66,7 +85,7 @@ struct NotchTargetView: View {
 
     var body: some View {
         ZStack {
-            NotchShape(radius: radius).fill(Color.black)
+            NotchShape(radius: radius, topRadius: state.notchTopRadius).fill(Color.black)
             content
         }
         // Dragging a file onto the notch attaches it and opens the panel.
@@ -425,12 +444,12 @@ struct ChatRootView: View {
         // Stealth dims every color in the panel toward black; the background
         // itself goes translucent near-black so it reads as a shadow layer.
         .opacity(state.stealthMode ? 0.6 : 1)
-        .background(NotchShape(radius: cornerRadius).fill(panelBackground))
-        .clipShape(NotchShape(radius: cornerRadius))
+        .background(NotchShape(radius: cornerRadius, topRadius: state.notchTopRadius).fill(panelBackground))
+        .clipShape(NotchShape(radius: cornerRadius, topRadius: state.notchTopRadius))
         .overlay(alignment: .top) { topStrip.opacity(state.stealthMode ? 0.4 : 1) }
         .overlay {
             if state.dropTargeted {
-                NotchShape(radius: cornerRadius)
+                NotchShape(radius: cornerRadius, topRadius: state.notchTopRadius)
                     .fill(Color.white.opacity(0.06))
                     .overlay {
                         VStack(spacing: 6) {
@@ -457,7 +476,7 @@ struct ChatRootView: View {
         // fades in place instead — a layer over the UI, not an extension.
         .mask {
             GeometryReader { geo in
-                NotchShape(radius: cornerRadius)
+                NotchShape(radius: cornerRadius, topRadius: state.notchTopRadius)
                     .frame(height: state.expanded || state.stealthMode ? geo.size.height : 0)
             }
         }

@@ -18,6 +18,22 @@ final class AppState: ObservableObject {
     // which must not trigger the click-outside auto-collapse.
     @Published var showSettings = false { didSet { updatePopoverSuspend() } }
     @Published var showHistory = false { didSet { updatePopoverSuspend() } }
+
+    // Stealth mode: the notch renders nothing while a turn runs, alerts and
+    // completion compress to a hairline sliver, and the panel becomes a
+    // near-black overlay locked to the notch's width. Persisted.
+    @Published var stealthMode: Bool {
+        didSet {
+            UserDefaults.standard.set(stealthMode, forKey: "stealthMode")
+            stealthComposerOpen = true
+            syncNotchFrame(animated: true)
+            if expanded { chatPanel?.setFrame(expandedFrame, display: true) }
+        }
+    }
+    // In stealth the composer is hidden so a short panel stays readable;
+    // clicking the history area pulls it up / puts it away.
+    @Published var stealthComposerOpen = true
+
     let session = AgentSession()
 
     private func updatePopoverSuspend() {
@@ -60,6 +76,7 @@ final class AppState: ObservableObject {
 
     private init() {
         let defaults = UserDefaults.standard
+        stealthMode = defaults.bool(forKey: "stealthMode")
         let w = defaults.double(forKey: "panelWidth")
         if w > 0 { panelWidthOverride = CGFloat(w) }
         let h = defaults.double(forKey: "panelHeight")
@@ -132,6 +149,17 @@ final class AppState: ObservableObject {
     // and its activity text is allowed to clip.
     private var notchContentSize: NSSize {
         let base = notchSize
+        // Stealth: never grow sideways. Working is fully silent (stock notch);
+        // alerts and completion only extend 3pt below the cutout so the
+        // hairline sliver has visible pixels to land on.
+        if stealthMode {
+            switch notchMode {
+            case .idle, .working:
+                return base
+            case .permission, .question, .completed:
+                return NSSize(width: base.width, height: base.height + 3)
+            }
+        }
         switch notchMode {
         case .idle:
             return base
@@ -179,11 +207,12 @@ final class AppState: ObservableObject {
             completedTimer = nil
         } else if !expanded, session.messages.last?.role == .assistant {
             // A real answer landed while collapsed: show the pill, then let it
-            // dismiss itself.
+            // dismiss itself. Stealth holds its sliver a little longer since
+            // it's the only completion signal there is.
             showingCompleted = true
             completedStartedAt = Date()
             completedTimer?.invalidate()
-            completedTimer = Timer.scheduledTimer(withTimeInterval: completedDuration, repeats: false) { [weak self] _ in
+            completedTimer = Timer.scheduledTimer(withTimeInterval: stealthMode ? 5 : completedDuration, repeats: false) { [weak self] _ in
                 self?.showingCompleted = false
                 self?.syncNotchFrame(animated: true)
             }
@@ -208,7 +237,8 @@ final class AppState: ObservableObject {
     }
 
     private func updateClockTimer() {
-        let ticking = notchMode == .working
+        // Stealth shows no elapsed-time label, so nothing needs the tick.
+        let ticking = notchMode == .working && !stealthMode
         if ticking, clockTimer == nil {
             clockTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
                 self?.clockTick = Date()
@@ -219,15 +249,19 @@ final class AppState: ObservableObject {
         }
     }
 
-    // Resize limits: minimum width is the original default width; minimum
-    // height is half the original default height.
+    // Resize limits: minimum width is the original default width; height has
+    // no practical floor — the panel can shrink to barely more than the notch
+    // row, with the history scrolling inside whatever room is left.
     var minPanelWidth: CGFloat { max(notchSize.width + 120, 300) }
-    var minPanelHeight: CGFloat { 140 }
+    var minPanelHeight: CGFloat { notchHeight + 6 }
     var maxPanelWidth: CGFloat { screen.frame.width - 80 }
     var maxPanelHeight: CGFloat { screen.frame.height * 0.85 }
 
     var panelWidth: CGFloat {
-        min(max(panelWidthOverride ?? minPanelWidth, minPanelWidth), maxPanelWidth)
+        // Stealth locks the panel to the notch's width so it reads as the
+        // notch being taller, not as a floating app.
+        if stealthMode { return notchWidth }
+        return min(max(panelWidthOverride ?? minPanelWidth, minPanelWidth), maxPanelWidth)
     }
     var panelHeight: CGFloat {
         min(max(panelHeightOverride ?? 280, minPanelHeight), maxPanelHeight)
@@ -289,6 +323,8 @@ final class AppState: ObservableObject {
         }
         if takeKeyboard {
             panel.makeKeyAndOrderFront(nil)
+            // Opening with typing intent pulls the stealth composer up.
+            if stealthMode { stealthComposerOpen = true }
         }
     }
 

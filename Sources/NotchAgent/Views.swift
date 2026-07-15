@@ -79,6 +79,7 @@ struct NotchTargetView: View {
     }
 
     private var radius: CGFloat {
+        if state.stealthMode { return 8 }
         switch state.notchMode {
         case .idle: return 8
         case .working, .completed: return 12
@@ -87,19 +88,58 @@ struct NotchTargetView: View {
     }
 
     @ViewBuilder private var content: some View {
-        switch state.notchMode {
-        case .idle: idleContent
-        case .working: workingContent
-        case .completed: completedContent
-        case .permission: alertBand(
-            title: "Permission needed", tint: amber,
-            detail: session.pendingPermission?.detail ?? "",
-            trailing: AnyView(permissionButtons))
-        case .question: alertBand(
-            title: "Needs your answer", tint: questionBlue,
-            detail: session.pendingQuestion?.current.question ?? "",
-            trailing: AnyView(answerButton))
+        if state.stealthMode {
+            stealthContent
+        } else {
+            switch state.notchMode {
+            case .idle: idleContent
+            case .working: workingContent
+            case .completed: completedContent
+            case .permission: alertBand(
+                title: "Permission needed", tint: amber,
+                detail: session.pendingPermission?.detail ?? "",
+                trailing: AnyView(permissionButtons))
+            case .question: alertBand(
+                title: "Needs your answer", tint: questionBlue,
+                detail: session.pendingQuestion?.current.question ?? "",
+                trailing: AnyView(answerButton))
+            }
         }
+    }
+
+    // MARK: Stealth — nothing at all while idle or working (no size change,
+    // no animation); alerts and completion compress to a hairline sliver
+    // hugging the notch's bottom edge. The whole area stays a click target.
+    @ViewBuilder private var stealthContent: some View {
+        switch state.notchMode {
+        case .idle, .working:
+            Color.clear
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .contentShape(Rectangle())
+                .onTapGesture { state.expand(takeKeyboard: true) }
+        case .completed:
+            stealthSliver(green, pulsing: false)
+        case .permission:
+            stealthSliver(amber, pulsing: true)
+        case .question:
+            stealthSliver(questionBlue, pulsing: true)
+        }
+    }
+
+    private func stealthSliver(_ color: Color, pulsing: Bool) -> some View {
+        // Paused when not pulsing so the completed sliver costs no frames.
+        TimelineView(.animation(minimumInterval: nil, paused: !pulsing)) { ctx in
+            let t = ctx.date.timeIntervalSinceReferenceDate
+            let phase = pulsing ? (sin(t * 3.6) + 1) / 2 : 1
+            Capsule()
+                .fill(color)
+                .frame(height: 2)
+                .padding(.horizontal, 22)
+                .opacity(0.25 + 0.65 * phase)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
+        .contentShape(Rectangle())
+        .onTapGesture { state.expand(takeKeyboard: true) }
     }
 
     // MARK: Idle — the original hover-sparkle click target.
@@ -328,12 +368,20 @@ struct ChatRootView: View {
             Color.clear.frame(height: state.notchHeight + 2)
             messagesList
             questionSheet
-            composer
+            // A pending approval overrides the stealth hide — the composer is
+            // where the Deny/Allow buttons live.
+            if !state.stealthMode || state.stealthComposerOpen || session.pendingPermission != nil {
+                composer
+            }
         }
+        .animation(.easeOut(duration: 0.2), value: state.stealthComposerOpen)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(NotchShape(radius: cornerRadius).fill(Color.black))
+        // Stealth dims every color in the panel toward black; the background
+        // itself goes translucent near-black so it reads as a shadow layer.
+        .opacity(state.stealthMode ? 0.6 : 1)
+        .background(NotchShape(radius: cornerRadius).fill(panelBackground))
         .clipShape(NotchShape(radius: cornerRadius))
-        .overlay(alignment: .top) { topStrip }
+        .overlay(alignment: .top) { topStrip.opacity(state.stealthMode ? 0.4 : 1) }
         .overlay {
             if state.dropTargeted {
                 NotchShape(radius: cornerRadius)
@@ -353,18 +401,21 @@ struct ChatRootView: View {
         .onDrop(of: [UTType.fileURL], isTargeted: $state.dropTargeted) { providers in
             acceptDroppedFiles(providers)
         }
-        .overlay(alignment: .leading) { sideResizeHandle(sign: -1) }
-        .overlay(alignment: .trailing) { sideResizeHandle(sign: 1) }
+        // Width is locked to the notch in stealth, so no side handles there.
+        .overlay(alignment: .leading) { if !state.stealthMode { sideResizeHandle(sign: -1) } }
+        .overlay(alignment: .trailing) { if !state.stealthMode { sideResizeHandle(sign: 1) } }
         .overlay(alignment: .bottom) { bottomResizeHandle }
         // Reveal, not movement: the content is laid out in place and a
         // top-anchored mask wipes downward over it, so the panel appears to
-        // be uncovered rather than to slide.
+        // be uncovered rather than to slide. Stealth skips the wipe and
+        // fades in place instead — a layer over the UI, not an extension.
         .mask {
             GeometryReader { geo in
                 NotchShape(radius: cornerRadius)
-                    .frame(height: state.expanded ? geo.size.height : 0)
+                    .frame(height: state.expanded || state.stealthMode ? geo.size.height : 0)
             }
         }
+        .opacity(state.stealthMode && !state.expanded ? 0 : 1)
         .padding(.horizontal, AppState.panelMargin)
         .padding(.bottom, AppState.panelBottomMargin)
         .preferredColorScheme(.dark)
@@ -381,6 +432,19 @@ struct ChatRootView: View {
                 inputFocused = false
             }
         }
+        // Pulling the stealth composer up while the panel is key should put
+        // the caret in it immediately.
+        .onChange(of: state.stealthComposerOpen) { open in
+            if open && state.panelIsKey {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { inputFocused = true }
+            }
+        }
+    }
+
+    private var panelBackground: Color {
+        state.stealthMode
+            ? Color(red: 0.01, green: 0.01, blue: 0.02).opacity(0.94)
+            : .black
     }
 
     // Edge-drag resizing. Width is symmetric (the panel stays centered on the
@@ -639,6 +703,13 @@ struct ChatRootView: View {
                     emptyState
                 }
             }
+            // Stealth: clicking the history pulls the composer up; clicking
+            // again puts it away so a short panel shows only the chat text.
+            .contentShape(Rectangle())
+            .onTapGesture {
+                guard state.stealthMode else { return }
+                state.stealthComposerOpen.toggle()
+            }
         }
     }
 
@@ -712,10 +783,26 @@ struct ChatRootView: View {
             HStack(spacing: 6) {
                 attachButton
                 contextChip
+                stealthEyeButton
                 Spacer(minLength: 4)
                 sendButton
             }
         }
+    }
+
+    // Eye next to the model/permissions chip: enters stealth from normal
+    // mode, exits it from stealth (where this composer row is the only
+    // always-reachable control).
+    private var stealthEyeButton: some View {
+        Button { state.stealthMode.toggle() } label: {
+            Image(systemName: state.stealthMode ? "eye" : "eye.slash")
+                .font(.system(size: 11, weight: .medium))
+                .foregroundStyle(.white.opacity(0.55))
+        }
+        .buttonStyle(.plain)
+        .help(state.stealthMode
+              ? "Exit stealth mode"
+              : "Stealth mode — silent notch, dim notch-width panel")
     }
 
     // P4 "composer morph": the composer becomes the approval while the agent
@@ -1322,6 +1409,15 @@ struct SettingsView: View {
                 VStack(alignment: .leading, spacing: 1) {
                     Text("Keep panel pinned").font(.system(size: 12.5))
                     Text("Stay open while using other apps")
+                        .font(.system(size: 10.5)).foregroundStyle(.secondary)
+                }
+            }
+            .toggleStyle(.switch)
+
+            Toggle(isOn: $state.stealthMode) {
+                VStack(alignment: .leading, spacing: 1) {
+                    Text("Stealth mode").font(.system(size: 12.5))
+                    Text("Silent notch; near-black notch-width panel, composer on click")
                         .font(.system(size: 10.5)).foregroundStyle(.secondary)
                 }
             }

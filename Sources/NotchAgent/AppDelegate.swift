@@ -145,6 +145,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 AppState.shared.collapse()
             } else if cmd == "expand" {
                 AppState.shared.expand(takeKeyboard: false)
+            } else if cmd.hasPrefix("stealth:") {
+                AppState.shared.stealthMode = cmd.dropFirst(8) == "on"
+            } else if cmd.hasPrefix("fake:") {
+                // Simulate a completed turn without a CLI, to exercise the
+                // background-mode UI (working strip, completion signal).
+                let text = String(cmd.dropFirst(5))
+                session.isRunning = true
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1) {
+                    session.messages.append(ChatMessage(role: .assistant, text: text))
+                    session.isRunning = false
+                }
             } else if cmd == "pending" {
                 var out = "expanded=\(AppState.shared.expanded)\n"
                 out += "running=\(session.isRunning)\n"

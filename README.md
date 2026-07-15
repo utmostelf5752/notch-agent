@@ -5,6 +5,16 @@ the notch or press Option+Space and a Liquid Glass chat panel bounces out of
 the camera housing; messages go to the `claude` or `codex` CLI running
 headlessly, or to your signed-in chatgpt.com session via browser automation.
 
+## Download
+
+[**Download NotchAgent.dmg**](https://github.com/utmostelf5752/notch-agent/releases/latest/download/NotchAgent.dmg)
+— always the newest build from `main`, published automatically by CI.
+
+The app is ad-hoc signed (no Apple Developer ID), so the first launch is
+blocked by Gatekeeper. After dragging it to Applications, right-click the app
+and choose **Open**, then confirm — or run `xattr -dr com.apple.quarantine
+/Applications/NotchAgent.app`.
+
 UI: solid black, rounded bottom corners, no borders or shadows (ChatGPT-popup
 feel). Top strip flanking the notch cutout holds settings (left) and
 pin + new-chat (right); provider and folder are dropdown pills inside the

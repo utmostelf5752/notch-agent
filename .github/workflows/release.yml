@@ -1,0 +1,41 @@
+name: Build and publish DMG
+
+# Every push to main rebuilds the app and republishes it to the "latest"
+# release, so the download URL below always serves the newest build:
+#   https://github.com/utmostelf5752/notch-agent/releases/latest/download/NotchAgent.dmg
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-main
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build app
+        run: ./build.sh
+
+      - name: Package DMG
+        run: ./make-dmg.sh
+
+      - name: Publish to latest release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # Rolling "latest" release: delete the old one (and its tag) so the
+          # tag moves to this commit, then recreate with the fresh DMG.
+          gh release delete latest --yes --cleanup-tag || true
+          gh release create latest build/NotchAgent.dmg \
+            --title "Latest build" \
+            --target "$GITHUB_SHA" \
+            --latest \
+            --notes "Automated build from ${GITHUB_SHA:0:7}. Download NotchAgent.dmg below."

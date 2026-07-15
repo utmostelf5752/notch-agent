@@ -111,6 +111,9 @@ struct ChatRootView: View {
         .onDrop(of: [UTType.fileURL], isTargeted: $state.dropTargeted) { providers in
             acceptDroppedFiles(providers)
         }
+        .overlay(alignment: .leading) { sideResizeHandle(sign: -1) }
+        .overlay(alignment: .trailing) { sideResizeHandle(sign: 1) }
+        .overlay(alignment: .bottom) { bottomResizeHandle }
         // Reveal, not movement: the content is laid out in place and a
         // top-anchored mask wipes downward over it, so the panel appears to
         // be uncovered rather than to slide.
@@ -136,6 +139,63 @@ struct ChatRootView: View {
                 inputFocused = false
             }
         }
+    }
+
+    // Edge-drag resizing. Width is symmetric (the panel stays centered on the
+    // notch, so pulling one side grows both); height grows downward. Deltas
+    // come from NSEvent.mouseLocation (screen coords) so the math stays
+    // stable while the window frame changes mid-drag.
+    private func sideResizeHandle(sign: CGFloat) -> some View {
+        Color.clear
+            .frame(width: 10)
+            .frame(maxHeight: .infinity)
+            .contentShape(Rectangle())
+            .onHover { hovering in
+                if hovering { NSCursor.resizeLeftRight.push() } else { NSCursor.pop() }
+            }
+            .gesture(
+                DragGesture(minimumDistance: 1)
+                    .onChanged { _ in
+                        let mouse = NSEvent.mouseLocation
+                        if state.resizeStart == nil {
+                            state.resizeStart = (mouse, NSSize(width: state.panelWidth, height: state.panelHeight))
+                        }
+                        guard let start = state.resizeStart else { return }
+                        let dx = (mouse.x - start.mouse.x) * sign
+                        state.applyPanelResize(width: start.size.width + dx * 2)
+                    }
+                    .onEnded { _ in
+                        state.resizeStart = nil
+                        state.persistPanelSize()
+                    }
+            )
+    }
+
+    private var bottomResizeHandle: some View {
+        Color.clear
+            .frame(height: 10)
+            .frame(maxWidth: .infinity)
+            .contentShape(Rectangle())
+            .onHover { hovering in
+                if hovering { NSCursor.resizeUpDown.push() } else { NSCursor.pop() }
+            }
+            .gesture(
+                DragGesture(minimumDistance: 1)
+                    .onChanged { _ in
+                        let mouse = NSEvent.mouseLocation
+                        if state.resizeStart == nil {
+                            state.resizeStart = (mouse, NSSize(width: state.panelWidth, height: state.panelHeight))
+                        }
+                        guard let start = state.resizeStart else { return }
+                        // AppKit screen coords grow upward; dragging down is negative.
+                        let dy = start.mouse.y - mouse.y
+                        state.applyPanelResize(height: start.size.height + dy)
+                    }
+                    .onEnded { _ in
+                        state.resizeStart = nil
+                        state.persistPanelSize()
+                    }
+            )
     }
 
     // Buttons live in the black strip flanking the physical notch cutout:

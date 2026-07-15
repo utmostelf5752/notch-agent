@@ -101,6 +101,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 try? out.write(toFile: "/tmp/notchagent-msgs.txt", atomically: true, encoding: .utf8)
             } else if cmd == "dump" {
                 ChatGPTWeb.shared.dumpState(to: "/tmp/notchagent-dom.txt")
+            } else if cmd.hasPrefix("resize:") {
+                let parts = cmd.dropFirst(7).split(separator: ",").compactMap { Double($0) }
+                if parts.count == 2 {
+                    AppState.shared.applyPanelResize(width: CGFloat(parts[0]), height: CGFloat(parts[1]))
+                }
+            } else if cmd == "geom" {
+                let s = AppState.shared
+                let out = """
+                panelWidth=\(s.panelWidth) panelHeight=\(s.panelHeight)
+                min=\(s.minPanelWidth)x\(s.minPanelHeight) max=\(s.maxPanelWidth)x\(s.maxPanelHeight)
+                expandedFrame=\(NSStringFromRect(s.expandedFrame))
+                windowFrame=\(NSStringFromRect(s.chatPanel?.frame ?? .zero))
+                """
+                try? out.write(toFile: "/tmp/notchagent-geom.txt", atomically: true, encoding: .utf8)
             }
         }
     }

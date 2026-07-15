@@ -31,7 +31,23 @@ final class AppState: ObservableObject {
     var suspendCollapse = false
     var lastExpandAt = Date.distantPast
 
+    // Edge-drag resize state: (mouse position, panel size) at drag start.
+    // Screen coordinates, so the math stays stable while the window resizes.
+    var resizeStart: (mouse: NSPoint, size: NSSize)?
+
+    // User-chosen panel size, persisted. nil = defaults.
+    @Published var panelWidthOverride: CGFloat?
+    @Published var panelHeightOverride: CGFloat?
+
     private var notchWatchTimer: Timer?
+
+    private init() {
+        let defaults = UserDefaults.standard
+        let w = defaults.double(forKey: "panelWidth")
+        if w > 0 { panelWidthOverride = CGFloat(w) }
+        let h = defaults.double(forKey: "panelHeight")
+        if h > 0 { panelHeightOverride = CGFloat(h) }
+    }
 
     // Window margins around the panel content so the drop shadow (if any)
     // and popovers have room inside the borderless window.
@@ -59,11 +75,40 @@ final class AppState: ObservableObject {
 
     var collapsedFrame: NSRect { frame(for: notchSize) }
 
+    // Resize limits: minimum width is the original default width; minimum
+    // height is half the original default height.
+    var minPanelWidth: CGFloat { max(notchSize.width + 120, 300) }
+    var minPanelHeight: CGFloat { 140 }
+    var maxPanelWidth: CGFloat { screen.frame.width - 80 }
+    var maxPanelHeight: CGFloat { screen.frame.height * 0.85 }
+
+    var panelWidth: CGFloat {
+        min(max(panelWidthOverride ?? minPanelWidth, minPanelWidth), maxPanelWidth)
+    }
+    var panelHeight: CGFloat {
+        min(max(panelHeightOverride ?? 280, minPanelHeight), maxPanelHeight)
+    }
+
     var expandedFrame: NSRect {
         frame(for: NSSize(
-            width: max(notchSize.width + 120, 300) + Self.panelMargin * 2,
-            height: 280 + Self.panelBottomMargin
+            width: panelWidth + Self.panelMargin * 2,
+            height: panelHeight + Self.panelBottomMargin
         ))
+    }
+
+    // Live-apply during an edge drag. Width changes are symmetric because the
+    // frame stays centered on the notch; height grows downward because the
+    // frame is anchored to the top of the screen.
+    func applyPanelResize(width: CGFloat? = nil, height: CGFloat? = nil) {
+        if let width { panelWidthOverride = min(max(width, minPanelWidth), maxPanelWidth) }
+        if let height { panelHeightOverride = min(max(height, minPanelHeight), maxPanelHeight) }
+        chatPanel?.setFrame(expandedFrame, display: true)
+    }
+
+    func persistPanelSize() {
+        let defaults = UserDefaults.standard
+        if let w = panelWidthOverride { defaults.set(Double(w), forKey: "panelWidth") }
+        if let h = panelHeightOverride { defaults.set(Double(h), forKey: "panelHeight") }
     }
 
     private func frame(for size: NSSize) -> NSRect {

@@ -443,9 +443,11 @@ struct ChatRootView: View {
         }
         .animation(.easeOut(duration: 0.2), value: state.stealthComposerOpen)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        // Stealth dims everything toward black; glass just takes the text
-        // down from full white so it sits into the pane.
-        .opacity(state.stealthMode ? 0.6 : (state.glassPanel ? 0.8 : 1))
+        // Stealth dims everything toward black. Glass multiplies all content
+        // toward grey instead — white text becomes mid-grey, which stays
+        // slightly visible over white content and dark content alike.
+        .opacity(state.stealthMode ? 0.6 : 1)
+        .colorMultiply(state.glassPanel && !state.stealthMode ? Color(white: 0.6) : .white)
         .background(panelBackdrop)
         .clipShape(NotchShape(radius: cornerRadius, topRadius: state.notchTopRadius))
         .overlay(alignment: .top) { topStrip.opacity(state.stealthMode ? 0.4 : 1) }

@@ -47,30 +47,271 @@ struct NotchShape: Shape {
     }
 }
 
-// The always-on click target drawn over the physical notch.
+// The always-on click target drawn over the physical notch. While the panel
+// is collapsed it doubles as "background mode": the notch grows sideways to
+// narrate the running turn (activity + elapsed/tokens) and grows downward into
+// an alert band when the agent needs a permission or an answer. The camera
+// cutout stays clear — working content lives in the wings on either side, and
+// alerts sit in a band below the camera row.
 // Hover state lives on AppState (mouse poll) because SwiftUI onHover is
 // unreliable on a window that can never become key.
 struct NotchTargetView: View {
     @ObservedObject var state: AppState
+    @ObservedObject var session: AgentSession
+
+    private let accent = Color(red: 10/255, green: 132/255, blue: 1)
+    private let amber = Color(red: 232/255, green: 182/255, blue: 76/255)
+    private let questionBlue = Color(red: 125/255, green: 184/255, blue: 1)
+    private let green = Color(red: 52/255, green: 211/255, blue: 153/255)
 
     var body: some View {
-        NotchShape(radius: 8)
-            .fill(Color.black)
-            .overlay(alignment: .bottom) {
-                Image(systemName: "sparkle")
-                    .font(.system(size: 9, weight: .semibold))
-                    .foregroundStyle(.white.opacity(state.notchHovering ? 0.85 : 0))
-                    .padding(.bottom, 3)
-                    .animation(.easeOut(duration: 0.15), value: state.notchHovering)
-            }
+        ZStack {
+            NotchShape(radius: radius).fill(Color.black)
+            content
+        }
+        // Dragging a file onto the notch attaches it and opens the panel.
+        .onDrop(of: [UTType.fileURL], isTargeted: nil) { providers in
+            let accepted = acceptDroppedFiles(providers)
+            if accepted { state.expand(takeKeyboard: true) }
+            return accepted
+        }
+        .animation(.timingCurve(0.16, 1, 0.3, 1, duration: 0.4), value: state.notchMode)
+    }
+
+    private var radius: CGFloat {
+        switch state.notchMode {
+        case .idle: return 8
+        case .working, .completed: return 12
+        case .permission, .question: return 20
+        }
+    }
+
+    @ViewBuilder private var content: some View {
+        switch state.notchMode {
+        case .idle: idleContent
+        case .working: workingContent
+        case .completed: completedContent
+        case .permission: alertBand(
+            title: "Permission needed", tint: amber,
+            detail: session.pendingPermission?.detail ?? "",
+            trailing: AnyView(permissionButtons))
+        case .question: alertBand(
+            title: "Needs your answer", tint: questionBlue,
+            detail: session.pendingQuestion?.current.question ?? "",
+            trailing: AnyView(answerButton))
+        }
+    }
+
+    // MARK: Idle — the original hover-sparkle click target.
+    private var idleContent: some View {
+        Image(systemName: "sparkle")
+            .font(.system(size: 9, weight: .semibold))
+            .foregroundStyle(.white.opacity(state.notchHovering ? 0.85 : 0))
+            .frame(maxHeight: .infinity, alignment: .bottom)
+            .padding(.bottom, 3)
+            .animation(.easeOut(duration: 0.15), value: state.notchHovering)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
             .contentShape(Rectangle())
             .onTapGesture { state.expand(takeKeyboard: true) }
-            // Dragging a file onto the notch attaches it and opens the panel.
-            .onDrop(of: [UTType.fileURL], isTargeted: nil) { providers in
-                let accepted = acceptDroppedFiles(providers)
-                if accepted { state.expand(takeKeyboard: true) }
-                return accepted
+    }
+
+    // MARK: Working — activity in the left wing, tokens/time in the right,
+    // camera-width gap kept clear in the middle.
+    private var workingContent: some View {
+        HStack(spacing: 0) {
+            HStack(spacing: 6) {
+                Image(systemName: activity.icon)
+                    .font(.system(size: 10))
+                    .foregroundStyle(.white.opacity(0.6))
+                Text(activity.text)
+                    .font(.system(size: 11.5))
+                    .foregroundStyle(.white.opacity(0.85))
+                    .lineLimit(1)
+                    .truncationMode(.tail)
             }
+            .padding(.leading, 15)
+            .frame(maxWidth: .infinity, alignment: .leading)
+
+            Color.clear.frame(width: state.notchWidth) // camera safe zone
+
+            HStack(spacing: 6) {
+                LiveDot(color: accent)
+                if session.provider != .chatgpt {
+                    Text(tokenText)
+                        .font(.system(size: 11, design: .monospaced))
+                        .foregroundStyle(.white.opacity(0.8))
+                    Text("·").foregroundStyle(.white.opacity(0.3))
+                }
+                Text(elapsedText)
+                    .font(.system(size: 11, design: .monospaced))
+                    .foregroundStyle(.white.opacity(0.55))
+            }
+            .fixedSize()
+            .padding(.trailing, 15)
+            .frame(maxWidth: .infinity, alignment: .trailing)
+        }
+        .contentShape(Rectangle())
+        .onTapGesture { state.expand(takeKeyboard: true) }
+    }
+
+    // MARK: Completed — a brief "Done" pill with a draining bar that dismisses
+    // itself. Same wing layout as working; a green check replaces the activity.
+    private var completedContent: some View {
+        ZStack(alignment: .bottom) {
+            HStack(spacing: 0) {
+                HStack(spacing: 6) {
+                    Image(systemName: "checkmark.circle.fill")
+                        .font(.system(size: 12))
+                        .foregroundStyle(green)
+                    Text("Done")
+                        .font(.system(size: 11.5, weight: .semibold))
+                        .foregroundStyle(green)
+                }
+                .padding(.leading, 15)
+                .frame(maxWidth: .infinity, alignment: .leading)
+
+                Color.clear.frame(width: state.notchWidth)
+
+                HStack(spacing: 6) {
+                    Text(tokenText)
+                        .font(.system(size: 11, design: .monospaced))
+                        .foregroundStyle(.white.opacity(0.7))
+                    Text("·").foregroundStyle(.white.opacity(0.3))
+                    Text(completedTimeText)
+                        .font(.system(size: 11, design: .monospaced))
+                        .foregroundStyle(.white.opacity(0.55))
+                }
+                .fixedSize()
+                .padding(.trailing, 15)
+                .frame(maxWidth: .infinity, alignment: .trailing)
+            }
+            drainBar
+                .padding(.horizontal, 15)
+                .padding(.bottom, 3)
+        }
+        .contentShape(Rectangle())
+        .onTapGesture { state.expand(takeKeyboard: true) }
+    }
+
+    // Thin bar that empties over the pill's lifetime, mirroring the countdown to
+    // auto-dismiss. TimelineView drives it without @State.
+    private var drainBar: some View {
+        TimelineView(.animation) { ctx in
+            let elapsed = ctx.date.timeIntervalSince(state.completedStartedAt)
+            let p = max(0, min(1, 1 - elapsed / state.completedDuration))
+            GeometryReader { geo in
+                ZStack(alignment: .leading) {
+                    Capsule().fill(Color.white.opacity(0.12))
+                    Capsule().fill(green).frame(width: geo.size.width * p)
+                }
+            }
+            .frame(height: 2)
+        }
+    }
+
+    // MARK: Alert band — permission or question, below the camera row.
+    private func alertBand(title: String, tint: Color, detail: String, trailing: AnyView) -> some View {
+        VStack(spacing: 0) {
+            Color.clear.frame(height: state.notchHeight) // camera row
+            HStack(spacing: 10) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(title)
+                        .font(.system(size: 11.5, weight: .semibold))
+                        .foregroundStyle(tint)
+                    Text(detail)
+                        .font(.system(size: 10.5, design: .monospaced))
+                        .foregroundStyle(.white.opacity(0.7))
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
+                Spacer(minLength: 6)
+                trailing
+            }
+            .padding(.horizontal, 15)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
+    }
+
+    private var permissionButtons: some View {
+        HStack(spacing: 6) {
+            Button { session.respondPermission(.deny) } label: {
+                Text("Deny")
+                    .font(.system(size: 11.5, weight: .semibold))
+                    .foregroundStyle(Color(red: 224/255, green: 122/255, blue: 106/255))
+                    .padding(.vertical, 5).padding(.horizontal, 9)
+                    .background(Capsule().fill(Color.white.opacity(0.08)))
+            }
+            .buttonStyle(.plain)
+            Button { session.respondPermission(.allow) } label: {
+                Text("Allow")
+                    .font(.system(size: 11.5, weight: .semibold))
+                    .foregroundStyle(.black)
+                    .padding(.vertical, 5).padding(.horizontal, 11)
+                    .background(Capsule().fill(amber))
+            }
+            .buttonStyle(.plain)
+        }
+    }
+
+    // Multiple choice needs the real UI, so Answer just opens the panel.
+    private var answerButton: some View {
+        Button { state.expand(takeKeyboard: true) } label: {
+            HStack(spacing: 3) {
+                Text("Answer")
+                Image(systemName: "chevron.right").font(.system(size: 8, weight: .bold))
+            }
+            .font(.system(size: 11.5, weight: .semibold))
+            .foregroundStyle(.white)
+            .padding(.vertical, 5).padding(.horizontal, 11)
+            .background(Capsule().fill(accent))
+        }
+        .buttonStyle(.plain)
+    }
+
+    // MARK: Derived labels
+
+    private var activity: (icon: String, text: String) {
+        guard let last = session.messages.last else { return ("sparkle", "Starting") }
+        switch last.role {
+        case .tool: return (last.icon ?? "wrench.fill", last.text)
+        case .assistant: return ("text.alignleft", "Responding")
+        default: return ("sparkle", "Thinking")
+        }
+    }
+
+    private var tokenText: String {
+        let toks = session.turnChars / 4
+        if toks < 1000 { return "\(toks) tok" }
+        return String(format: "%.1fk tok", Double(toks) / 1000)
+    }
+
+    private var elapsedText: String {
+        guard let start = session.turnStartedAt else { return "0:00" }
+        let s = max(0, Int(state.clockTick.timeIntervalSince(start)))
+        return "\(s / 60):" + String(format: "%02d", s % 60)
+    }
+
+    private var completedTimeText: String {
+        let s = max(0, Int(session.lastTurnDuration))
+        return "\(s / 60):" + String(format: "%02d", s % 60)
+    }
+}
+
+// A softly pulsing dot — the only motion in the working strip, standing in for
+// the old spinner. TimelineView drives it so it needs no @State (unavailable
+// in this build; see AgentSession).
+struct LiveDot: View {
+    let color: Color
+    var body: some View {
+        TimelineView(.animation) { ctx in
+            let t = ctx.date.timeIntervalSinceReferenceDate
+            let phase = (sin(t * 2.6) + 1) / 2
+            Circle()
+                .fill(color)
+                .frame(width: 7, height: 7)
+                .opacity(0.45 + 0.55 * phase)
+                .shadow(color: color.opacity(0.6), radius: 3)
+        }
     }
 }
 
@@ -86,6 +327,7 @@ struct ChatRootView: View {
         VStack(spacing: 0) {
             Color.clear.frame(height: state.notchHeight + 2)
             messagesList
+            questionSheet
             composer
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -287,47 +529,13 @@ struct ChatRootView: View {
     }
 
     private var settingsButton: some View {
-        Button { state.showSettings.toggle() } label: {
+        Button { state.openSettings() } label: {
             Image(systemName: "gearshape")
                 .font(.system(size: 11, weight: .medium))
                 .foregroundStyle(.white.opacity(0.55))
         }
         .buttonStyle(.plain)
         .help("Settings")
-        .popover(isPresented: $state.showSettings, arrowEdge: .bottom) {
-            settingsView
-        }
-    }
-
-    private var settingsView: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Toggle(isOn: $session.autoEdit) {
-                VStack(alignment: .leading, spacing: 1) {
-                    Text("Auto-edit")
-                        .font(.system(size: 12))
-                    Text("Let the agent change files without asking")
-                        .font(.system(size: 9.5))
-                        .foregroundStyle(.secondary)
-                }
-            }
-            .toggleStyle(.switch)
-            .controlSize(.small)
-            Divider()
-            HStack {
-                Text("Toggle panel")
-                    .font(.system(size: 12))
-                Spacer()
-                Text("⌥ Space")
-                    .font(.system(size: 11))
-                    .foregroundStyle(.secondary)
-            }
-            Divider()
-            Button("Quit NotchAgent") { NSApp.terminate(nil) }
-                .font(.system(size: 12))
-                .controlSize(.small)
-        }
-        .padding(12)
-        .frame(width: 240)
     }
 
     private var newChatButton: some View {
@@ -457,7 +665,38 @@ struct ChatRootView: View {
         }
     }
 
+    private let amber = Color(red: 232/255, green: 182/255, blue: 76/255)
+
     private var composer: some View {
+        Group {
+            if let request = session.pendingPermission {
+                permissionComposer(request)
+            } else {
+                standardComposer
+            }
+        }
+        .padding(.horizontal, 10)
+        .padding(.top, 9)
+        .padding(.bottom, 7)
+        .background(
+            RoundedRectangle(cornerRadius: 16)
+                .fill(session.pendingPermission != nil
+                      ? AnyShapeStyle(amber.opacity(0.06))
+                      : AnyShapeStyle(Color.white.opacity(0.08)))
+        )
+        .overlay {
+            // Amber while an approval is pending or a mode that skips
+            // permission prompts is active.
+            if session.pendingPermission != nil || currentMode.dangerous {
+                RoundedRectangle(cornerRadius: 16)
+                    .strokeBorder(Color.orange.opacity(0.45), lineWidth: 1)
+            }
+        }
+        .padding(.horizontal, 10)
+        .padding(.bottom, 10)
+    }
+
+    private var standardComposer: some View {
         VStack(alignment: .leading, spacing: 8) {
             if !session.attachments.isEmpty {
                 attachmentChips
@@ -472,20 +711,224 @@ struct ChatRootView: View {
                 .onSubmit(sendDraft)
             HStack(spacing: 6) {
                 attachButton
-                providerMenu
-                if session.provider != .chatgpt {
-                    folderMenu
-                }
+                contextChip
                 Spacer(minLength: 4)
                 sendButton
             }
         }
+    }
+
+    // P4 "composer morph": the composer becomes the approval while the agent
+    // waits. Deny left; Always + Allow (Return) right. Esc denies.
+    private func permissionComposer(_ request: PermissionRequest) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 6) {
+                Image(systemName: "shield.fill")
+                    .font(.system(size: 11))
+                    .foregroundStyle(amber)
+                Text(request.title)
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(Color(red: 240/255, green: 224/255, blue: 192/255))
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+            }
+            if !request.detail.isEmpty {
+                Text(request.detail)
+                    .font(.system(size: 11, design: .monospaced))
+                    .foregroundStyle(.white.opacity(0.85))
+                    .lineLimit(3)
+                    .truncationMode(.middle)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 6)
+                    .background(RoundedRectangle(cornerRadius: 8).fill(Color.white.opacity(0.07)))
+            }
+            HStack(spacing: 6) {
+                Button {
+                    session.respondPermission(.deny)
+                } label: {
+                    Text("Deny")
+                        .font(.system(size: 11.5, weight: .semibold))
+                        .foregroundStyle(Color(red: 224/255, green: 122/255, blue: 106/255))
+                        .padding(.vertical, 5)
+                        .padding(.horizontal, 8)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                Spacer(minLength: 4)
+                if request.canAlways {
+                    Button {
+                        session.respondPermission(.always)
+                    } label: {
+                        Text("Always")
+                            .font(.system(size: 11.5, weight: .semibold))
+                            .foregroundStyle(.white.opacity(0.85))
+                            .padding(.vertical, 5)
+                            .padding(.horizontal, 11)
+                            .background(Capsule().fill(Color.white.opacity(0.1)))
+                    }
+                    .buttonStyle(.plain)
+                }
+                Button {
+                    session.respondPermission(.allow)
+                } label: {
+                    HStack(spacing: 4) {
+                        Text("Allow")
+                        Image(systemName: "return")
+                            .font(.system(size: 9, weight: .bold))
+                    }
+                    .font(.system(size: 11.5, weight: .semibold))
+                    .foregroundStyle(.black)
+                    .padding(.vertical, 5)
+                    .padding(.horizontal, 11)
+                    .background(Capsule().fill(amber))
+                }
+                .buttonStyle(.plain)
+            }
+        }
+    }
+
+    // Q2 "docked sheet": the model's question slides in between the chat and
+    // the composer, one question at a time. Single-select answers on click;
+    // multi-select collects checkmarks behind an Answer button. The text
+    // field takes a custom answer either way.
+    @ViewBuilder
+    private var questionSheet: some View {
+        if let request = session.pendingQuestion {
+            questionSheetContent(request)
+        }
+    }
+
+    private func questionSheetContent(_ request: QuestionRequest) -> some View {
+        let question = request.current
+        return VStack(alignment: .leading, spacing: 8) {
+            questionHeader(request, question)
+            // Fits naturally when short; once the question + options are taller
+            // than the room available, the body scrolls in place like the chat
+            // history above it. Header and answer field stay pinned.
+            ViewThatFits(in: .vertical) {
+                questionBody(question)
+                ScrollView { questionBody(question) }.frame(maxHeight: 260)
+            }
+            questionFooter(question)
+        }
+        .padding(10)
+        .background(
+            RoundedRectangle(cornerRadius: 14)
+                .fill(Color.white.opacity(0.06))
+                .overlay(RoundedRectangle(cornerRadius: 14)
+                    .strokeBorder(Color.white.opacity(0.14), lineWidth: 1))
+        )
         .padding(.horizontal, 10)
-        .padding(.top, 9)
-        .padding(.bottom, 7)
-        .background(RoundedRectangle(cornerRadius: 16).fill(Color.white.opacity(0.08)))
-        .padding(.horizontal, 10)
-        .padding(.bottom, 10)
+        .padding(.bottom, 6)
+    }
+
+    // The scrollable portion of the question sheet: the prompt text and the
+    // option rows. Pulled out so ViewThatFits can render it either plainly or
+    // wrapped in a ScrollView.
+    private func questionBody(_ question: AgentQuestion) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text(question.question)
+                .font(.system(size: 12.5))
+                .foregroundStyle(.white.opacity(0.9))
+                .fixedSize(horizontal: false, vertical: true)
+            VStack(spacing: 2) {
+                ForEach(question.options) { option in
+                    questionOptionRow(option, multiSelect: question.multiSelect)
+                }
+            }
+        }
+    }
+
+    private func questionHeader(_ request: QuestionRequest, _ question: AgentQuestion) -> some View {
+        HStack(spacing: 6) {
+            Image(systemName: "questionmark.circle.fill")
+                .font(.system(size: 11))
+                .foregroundStyle(accent)
+            Text(question.header)
+                .font(.system(size: 10, weight: .semibold))
+                .foregroundStyle(.white.opacity(0.5))
+                .textCase(.uppercase)
+            Spacer()
+            if request.questions.count > 1 {
+                Text("\(request.index + 1) of \(request.questions.count)")
+                    .font(.system(size: 10))
+                    .foregroundStyle(.white.opacity(0.35))
+            }
+        }
+    }
+
+    private func questionOptionRow(_ option: AgentQuestionOption, multiSelect: Bool) -> some View {
+        let selected = session.questionSelection.contains(option.label)
+        let icon = multiSelect ? (selected ? "checkmark.square.fill" : "square") : "circle"
+        return Button {
+            if multiSelect {
+                if selected {
+                    session.questionSelection.remove(option.label)
+                } else {
+                    session.questionSelection.insert(option.label)
+                }
+            } else {
+                session.answerQuestion(option.label)
+            }
+        } label: {
+            HStack(alignment: .top, spacing: 8) {
+                Image(systemName: icon)
+                    .font(.system(size: 11))
+                    .foregroundStyle(selected ? AnyShapeStyle(accent) : AnyShapeStyle(.white.opacity(0.4)))
+                    .padding(.top, 1)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(option.label)
+                        .font(.system(size: 12))
+                        .foregroundStyle(.white.opacity(0.88))
+                    if !option.description.isEmpty {
+                        Text(option.description)
+                            .font(.system(size: 10))
+                            .foregroundStyle(.white.opacity(0.42))
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+                Spacer(minLength: 0)
+            }
+            .padding(.horizontal, 7)
+            .padding(.vertical, 5)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
+
+    private func questionFooter(_ question: AgentQuestion) -> some View {
+        HStack(spacing: 6) {
+            TextField("Something else…", text: $session.questionDraft)
+                .textFieldStyle(.plain)
+                .font(.system(size: 11.5))
+                .foregroundStyle(.white)
+                .tint(accent)
+                .onSubmit {
+                    let custom = session.questionDraft.trimmingCharacters(in: .whitespaces)
+                    if !custom.isEmpty { session.answerQuestion(custom) }
+                }
+            if question.multiSelect {
+                Button {
+                    // Keep the option order stable regardless of click order.
+                    var parts = question.options.map(\.label)
+                        .filter(session.questionSelection.contains)
+                    let custom = session.questionDraft.trimmingCharacters(in: .whitespaces)
+                    if !custom.isEmpty { parts.append(custom) }
+                    session.answerQuestion(parts.joined(separator: ", "))
+                } label: {
+                    Text("Answer")
+                        .font(.system(size: 11.5, weight: .semibold))
+                        .foregroundStyle(.black)
+                        .padding(.vertical, 4)
+                        .padding(.horizontal, 10)
+                        .background(Capsule().fill(accent))
+                }
+                .buttonStyle(.plain)
+                .disabled(session.questionSelection.isEmpty
+                          && session.questionDraft.trimmingCharacters(in: .whitespaces).isEmpty)
+            }
+        }
     }
 
     private var attachmentChips: some View {
@@ -584,8 +1027,10 @@ struct ChatRootView: View {
         panel.canChooseFiles = true
         panel.canChooseDirectories = false
         panel.allowsMultipleSelection = true
-        // Hold the panel open while the Finder dialog has focus.
+        // Our panel sits at .statusBar level, above the open dialog, so hide it
+        // while the chooser is up and bring it back once a file is picked.
         state.suspendCollapse = true
+        state.chatPanel?.orderOut(nil)
         NSApp.activate(ignoringOtherApps: true)
         let response = panel.runModal()
         state.suspendCollapse = false
@@ -595,43 +1040,107 @@ struct ChatRootView: View {
         }
     }
 
-    private var providerMenu: some View {
+    // The whole session context — model, permission mode, working folder —
+    // lives in one chip so the composer row stays two controls wide.
+    // Claude and Codex expand into model submenus; picking a model also
+    // switches to that provider. ChatGPT has no model choice, so it stays flat.
+    private var contextChip: some View {
         Menu {
-            ForEach(AgentProvider.allCases) { provider in
-                Button {
-                    session.provider = provider
-                } label: {
-                    if provider == session.provider {
-                        Label(provider.label, systemImage: "checkmark")
+            Menu("Model") {
+                ForEach(AgentProvider.allCases) { provider in
+                    if provider.models.isEmpty {
+                        Button {
+                            session.provider = provider
+                        } label: {
+                            if provider == session.provider {
+                                Label(provider.label, systemImage: "checkmark")
+                            } else {
+                                Text(provider.label)
+                            }
+                        }
                     } else {
-                        Text(provider.label)
+                        Menu(provider.label) {
+                            ForEach(provider.models) { model in
+                                Button {
+                                    session.provider = provider
+                                    if let value = model.value {
+                                        session.modelChoice[provider] = value
+                                    } else {
+                                        session.modelChoice.removeValue(forKey: provider)
+                                    }
+                                } label: {
+                                    if session.modelChoice[provider] == model.value {
+                                        Label(model.label, systemImage: "checkmark")
+                                    } else {
+                                        Text(model.label)
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
             }
+            if session.provider.hasCLIOptions {
+                Menu("Permissions") {
+                    ForEach(session.provider.permissionModes) { mode in
+                        Button {
+                            if let value = mode.value {
+                                session.modeChoice[session.provider] = value
+                            } else {
+                                session.modeChoice.removeValue(forKey: session.provider)
+                            }
+                        } label: {
+                            if session.modeChoice[session.provider] == mode.value {
+                                Label(mode.label, systemImage: "checkmark")
+                            } else {
+                                Text(mode.label)
+                            }
+                        }
+                    }
+                }
+                Menu("Folder") {
+                    Button("Choose Folder…", action: pickFolder)
+                    Divider()
+                    Text(session.workingDirectory.path)
+                }
+            }
         } label: {
-            pill(session.provider.label)
+            pill(chipText)
         }
         .menuStyle(.button)
         .buttonStyle(.plain)
         .menuIndicator(.hidden)
-        .fixedSize()
         .disabled(session.isRunning)
+        .help(chipHelp)
     }
 
-    private var folderMenu: some View {
-        Menu {
-            Button("Choose Folder…", action: pickFolder)
-            Divider()
-            Text(session.workingDirectory.path)
-        } label: {
-            pill(session.workingDirectory.lastPathComponent, icon: "folder")
-        }
-        .menuStyle(.button)
-        .buttonStyle(.plain)
-        .menuIndicator(.hidden)
-        .fixedSize()
-        .disabled(session.isRunning)
-        .help("Working directory: \(session.workingDirectory.path)")
+    // "Sonnet 5 · Edits · notch-agent"; just "ChatGPT" for the web provider.
+    private var chipText: String {
+        guard session.provider.hasCLIOptions else { return session.provider.label }
+        return "\(modelPillText) · \(currentMode.short) · \(session.workingDirectory.lastPathComponent)"
+    }
+
+    private var chipHelp: String {
+        guard session.provider.hasCLIOptions else { return session.provider.label }
+        return "Model: \(modelPillText) · Permissions: \(currentMode.label) · Folder: \(session.workingDirectory.path)"
+    }
+
+    // A chosen model replaces the provider name ("Sonnet 5" instead of
+    // "Claude"); the provider name only shows on Default.
+    private var modelPillText: String {
+        let provider = session.provider
+        guard let value = session.modelChoice[provider],
+              let model = provider.models.first(where: { $0.value == value })
+        else { return provider.label }
+        return model.short
+    }
+
+    private var currentMode: AgentOption {
+        let provider = session.provider
+        let modes = provider.permissionModes
+        return modes.first { $0.value == session.modeChoice[provider] }
+            ?? modes.first
+            ?? AgentOption(label: "Default", short: "Default", value: nil)
     }
 
     private func pill(_ text: String, icon: String? = nil) -> some View {
@@ -688,7 +1197,10 @@ struct ChatRootView: View {
         panel.canChooseFiles = false
         panel.allowsMultipleSelection = false
         panel.directoryURL = session.workingDirectory
+        // Our panel sits at .statusBar level, above the open dialog, so hide it
+        // while the chooser is up and bring it back once a folder is picked.
         state.suspendCollapse = true
+        state.chatPanel?.orderOut(nil)
         NSApp.activate(ignoringOtherApps: true)
         let response = panel.runModal()
         state.suspendCollapse = false
@@ -747,7 +1259,7 @@ struct MessageBubble: View {
                     .background(RoundedRectangle(cornerRadius: 15).fill(Color.white.opacity(0.14)))
             }
         case .assistant:
-            Text(message.text)
+            Text(MathText.render(message.text))
                 .font(.system(size: 13))
                 .foregroundStyle(.white.opacity(0.92))
                 .textSelection(.enabled)
@@ -773,4 +1285,292 @@ struct MessageBubble: View {
                 .background(RoundedRectangle(cornerRadius: 12).fill(Color(red: 1, green: 0.3, blue: 0.3).opacity(0.12)))
         }
     }
+}
+
+// Settings surface shown in its own window, opened from the panel's gear
+// button and the menu-bar item. A standalone view (not a popover) so both
+// entry points can present it and it survives the panel collapsing.
+struct SettingsView: View {
+    @ObservedObject var state: AppState
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            HStack(spacing: 8) {
+                Image(systemName: "sparkle")
+                Text("NotchAgent").font(.system(size: 15, weight: .semibold))
+                Spacer()
+                Text("v0.1").font(.system(size: 11)).foregroundStyle(.secondary)
+            }
+
+            Divider()
+
+            HStack {
+                Text("Toggle panel")
+                Spacer()
+                Text("⌥ Space").foregroundStyle(.secondary)
+            }
+            .font(.system(size: 12.5))
+
+            HStack {
+                Text("Close panel")
+                Spacer()
+                Text("Esc").foregroundStyle(.secondary)
+            }
+            .font(.system(size: 12.5))
+
+            Toggle(isOn: $state.pinned) {
+                VStack(alignment: .leading, spacing: 1) {
+                    Text("Keep panel pinned").font(.system(size: 12.5))
+                    Text("Stay open while using other apps")
+                        .font(.system(size: 10.5)).foregroundStyle(.secondary)
+                }
+            }
+            .toggleStyle(.switch)
+
+            Divider()
+
+            HStack {
+                Text("Hover the notch or press ⌥Space to open.")
+                    .font(.system(size: 11)).foregroundStyle(.secondary)
+                Spacer()
+                Button("Quit") { NSApp.terminate(nil) }
+                    .controlSize(.small)
+            }
+        }
+        .padding(20)
+        .frame(width: 340)
+    }
+}
+
+// Lightweight LaTeX-to-Unicode so model math reads properly without a
+// typesetting engine (this build has no package deps). It finds math spans
+// ($…$, $$…$$, \(…\), \[…\]) and rewrites the common constructs — \frac,
+// \sqrt, super/subscripts, greek letters, operators — into Unicode. It is not
+// a real typesetter: anything it can't map degrades to linear text rather than
+// showing raw backslashes.
+enum MathText {
+    static func render(_ raw: String) -> String {
+        guard raw.contains("$") || raw.contains("\\(") || raw.contains("\\[") else { return raw }
+        return convertDelimited(raw)
+    }
+
+    // Walk the string, converting the inside of each math span and leaving the
+    // surrounding prose untouched. An unclosed delimiter is treated as literal.
+    private static func convertDelimited(_ s: String) -> String {
+        let c = Array(s)
+        let n = c.count
+        var out = ""
+        var i = 0
+        func span(_ open: [Character], _ close: [Character], _ from: Int) -> (String, Int)? {
+            guard from + open.count <= n else { return nil }
+            for k in 0..<open.count where c[from + k] != open[k] { return nil }
+            var j = from + open.count
+            var inner = ""
+            while j < n {
+                if j + close.count <= n {
+                    var hit = true
+                    for k in 0..<close.count where c[j + k] != close[k] { hit = false; break }
+                    if hit { return (inner, j + close.count) }
+                }
+                inner.append(c[j]); j += 1
+            }
+            return nil
+        }
+        while i < n {
+            if let m = span(["$", "$"], ["$", "$"], i) { out += convertMath(m.0); i = m.1; continue }
+            if let m = span(["\\", "["], ["\\", "]"], i) { out += convertMath(m.0); i = m.1; continue }
+            if let m = span(["\\", "("], ["\\", ")"], i) { out += convertMath(m.0); i = m.1; continue }
+            if c[i] == "$", let m = span(["$"], ["$"], i) { out += convertMath(m.0); i = m.1; continue }
+            out.append(c[i]); i += 1
+        }
+        return out
+    }
+
+    private static func convertMath(_ math: String) -> String {
+        var s = math
+        s = s.replacingOccurrences(of: "\\\\", with: "\n")
+        for junk in ["\\left", "\\right", "\\,", "\\;", "\\!", "\\:", "\\displaystyle"] {
+            s = s.replacingOccurrences(of: junk, with: "")
+        }
+        for space in ["\\quad", "\\qquad"] { s = s.replacingOccurrences(of: space, with: " ") }
+        s = stripWrappers(s, ["text", "mathrm", "mathbf", "mathit", "mathsf", "operatorname",
+                              "boldsymbol", "vec", "hat", "bar", "dot", "tilde", "overline", "underline"])
+        s = loop(s, replaceFrac)
+        s = loop(s, replaceSqrt)
+        s = replaceCommands(s)
+        s = replaceScripts(s)
+        return s.replacingOccurrences(of: "{", with: "").replacingOccurrences(of: "}", with: "")
+    }
+
+    // Re-run a pass until it stops changing, so nested \frac{\frac…} resolve.
+    private static func loop(_ s: String, _ f: (String) -> String) -> String {
+        var cur = s
+        for _ in 0..<8 { let next = f(cur); if next == cur { break }; cur = next }
+        return cur
+    }
+
+    private static func matches(_ c: [Character], _ i: Int, _ token: String) -> Bool {
+        let t = Array(token)
+        guard i + t.count <= c.count else { return false }
+        for k in 0..<t.count where c[i + k] != t[k] { return false }
+        return true
+    }
+
+    private static func readBrace(_ c: [Character], _ start: Int) -> (String, Int)? {
+        guard start < c.count, c[start] == "{" else { return nil }
+        var depth = 0, j = start
+        var inner = ""
+        while j < c.count {
+            let ch = c[j]
+            if ch == "{" { depth += 1; if depth == 1 { j += 1; continue } }
+            else if ch == "}" { depth -= 1; if depth == 0 { return (inner, j + 1) } }
+            inner.append(ch); j += 1
+        }
+        return nil
+    }
+
+    private static func skipSpaces(_ c: [Character], _ i: Int) -> Int {
+        var j = i; while j < c.count, c[j] == " " { j += 1 }; return j
+    }
+
+    private static func needsParens(_ s: String) -> Bool {
+        s.count > 1 && s.contains(where: { "+-*/ ".contains($0) })
+    }
+    private static func wrap(_ s: String) -> String { needsParens(s) ? "(\(s))" : s }
+
+    private static func replaceFrac(_ s: String) -> String {
+        let c = Array(s)
+        var out = "", i = 0
+        while i < c.count {
+            if matches(c, i, "\\frac") {
+                let a = readBrace(c, skipSpaces(c, i + 5))
+                if let g1 = a, let g2 = readBrace(c, skipSpaces(c, g1.1)) {
+                    out += wrap(g1.0) + "/" + wrap(g2.0)
+                    i = g2.1
+                    continue
+                }
+            }
+            out.append(c[i]); i += 1
+        }
+        return out
+    }
+
+    private static func replaceSqrt(_ s: String) -> String {
+        let c = Array(s)
+        var out = "", i = 0
+        while i < c.count {
+            if matches(c, i, "\\sqrt") {
+                var j = skipSpaces(c, i + 5)
+                // drop an optional [n] root index
+                if j < c.count, c[j] == "[" { while j < c.count, c[j] != "]" { j += 1 }; if j < c.count { j += 1 } }
+                if let g = readBrace(c, skipSpaces(c, j)) {
+                    out += "√" + wrap(g.0)
+                    i = g.1
+                    continue
+                }
+            }
+            out.append(c[i]); i += 1
+        }
+        return out
+    }
+
+    private static func stripWrappers(_ s: String, _ cmds: [String]) -> String {
+        return loop(s) { input in
+            let c = Array(input)
+            var out = "", i = 0
+            while i < c.count {
+                var hit = false
+                for cmd in cmds where matches(c, i, "\\" + cmd) {
+                    if let g = readBrace(c, skipSpaces(c, i + cmd.count + 1)) {
+                        out += g.0; i = g.1; hit = true; break
+                    }
+                }
+                if hit { continue }
+                out.append(c[i]); i += 1
+            }
+            return out
+        }
+    }
+
+    // \command -> symbol; unknown commands drop the backslash and keep the name.
+    private static func replaceCommands(_ s: String) -> String {
+        let c = Array(s)
+        var out = "", i = 0
+        while i < c.count {
+            if c[i] == "\\", i + 1 < c.count, c[i + 1].isLetter {
+                var j = i + 1
+                var name = ""
+                while j < c.count, c[j].isLetter { name.append(c[j]); j += 1 }
+                out += symbols[name] ?? name
+                i = j
+            } else {
+                out.append(c[i]); i += 1
+            }
+        }
+        return out
+    }
+
+    private static func replaceScripts(_ s: String) -> String {
+        let c = Array(s)
+        var out = "", i = 0
+        while i < c.count {
+            if c[i] == "^" || c[i] == "_" {
+                let sup = c[i] == "^"
+                var content = "", j = i + 1
+                if let g = readBrace(c, j) { content = g.0; j = g.1 }
+                else if j < c.count { content = String(c[j]); j += 1 }
+                out += mapScript(content, sup: sup)
+                i = j
+            } else {
+                out.append(c[i]); i += 1
+            }
+        }
+        return out
+    }
+
+    private static func mapScript(_ content: String, sup: Bool) -> String {
+        let map = sup ? superscripts : subscripts
+        var mapped = ""
+        for ch in content {
+            guard let u = map[ch] else {
+                let body = content.count > 1 ? "(\(content))" : content
+                return (sup ? "^" : "_") + body
+            }
+            mapped.append(u)
+        }
+        return mapped
+    }
+
+    private static let superscripts: [Character: Character] = [
+        "0": "⁰", "1": "¹", "2": "²", "3": "³", "4": "⁴", "5": "⁵", "6": "⁶", "7": "⁷", "8": "⁸", "9": "⁹",
+        "+": "⁺", "-": "⁻", "=": "⁼", "(": "⁽", ")": "⁾", "n": "ⁿ", "i": "ⁱ",
+    ]
+    private static let subscripts: [Character: Character] = [
+        "0": "₀", "1": "₁", "2": "₂", "3": "₃", "4": "₄", "5": "₅", "6": "₆", "7": "₇", "8": "₈", "9": "₉",
+        "+": "₊", "-": "₋", "=": "₌", "(": "₍", ")": "₎",
+        "a": "ₐ", "e": "ₑ", "o": "ₒ", "x": "ₓ", "h": "ₕ", "k": "ₖ", "l": "ₗ", "m": "ₘ", "n": "ₙ",
+        "p": "ₚ", "s": "ₛ", "t": "ₜ", "i": "ᵢ", "j": "ⱼ", "r": "ᵣ", "u": "ᵤ", "v": "ᵥ",
+    ]
+    private static let symbols: [String: String] = [
+        "alpha": "α", "beta": "β", "gamma": "γ", "delta": "δ", "epsilon": "ε", "varepsilon": "ε",
+        "zeta": "ζ", "eta": "η", "theta": "θ", "vartheta": "ϑ", "iota": "ι", "kappa": "κ",
+        "lambda": "λ", "mu": "μ", "nu": "ν", "xi": "ξ", "omicron": "ο", "pi": "π", "rho": "ρ",
+        "sigma": "σ", "tau": "τ", "upsilon": "υ", "phi": "φ", "varphi": "φ", "chi": "χ", "psi": "ψ", "omega": "ω",
+        "Gamma": "Γ", "Delta": "Δ", "Theta": "Θ", "Lambda": "Λ", "Xi": "Ξ", "Pi": "Π",
+        "Sigma": "Σ", "Upsilon": "Υ", "Phi": "Φ", "Psi": "Ψ", "Omega": "Ω",
+        "times": "×", "cdot": "·", "div": "÷", "pm": "±", "mp": "∓", "ast": "∗", "star": "⋆",
+        "leq": "≤", "le": "≤", "geq": "≥", "ge": "≥", "neq": "≠", "ne": "≠", "approx": "≈",
+        "equiv": "≡", "sim": "∼", "simeq": "≃", "cong": "≅", "propto": "∝", "ll": "≪", "gg": "≫",
+        "infty": "∞", "partial": "∂", "nabla": "∇", "sum": "∑", "prod": "∏", "int": "∫", "oint": "∮",
+        "to": "→", "rightarrow": "→", "Rightarrow": "⇒", "leftarrow": "←", "Leftarrow": "⇐",
+        "leftrightarrow": "↔", "mapsto": "↦", "implies": "⟹", "iff": "⟺",
+        "in": "∈", "notin": "∉", "ni": "∋", "subset": "⊂", "subseteq": "⊆", "supset": "⊃", "supseteq": "⊇",
+        "cup": "∪", "cap": "∩", "setminus": "∖", "forall": "∀", "exists": "∃", "nexists": "∄",
+        "emptyset": "∅", "varnothing": "∅", "ldots": "…", "cdots": "⋯", "vdots": "⋮", "dots": "…",
+        "angle": "∠", "perp": "⊥", "parallel": "∥", "langle": "⟨", "rangle": "⟩",
+        "hbar": "ℏ", "ell": "ℓ", "Re": "ℜ", "Im": "ℑ", "aleph": "ℵ", "deg": "°", "circ": "∘",
+        "prime": "′", "wedge": "∧", "vee": "∨", "oplus": "⊕", "otimes": "⊗",
+        "sqrt": "√", "surd": "√", "lfloor": "⌊", "rfloor": "⌋", "lceil": "⌈", "rceil": "⌉",
+        "quad": " ", "qquad": " ",
+    ]
 }

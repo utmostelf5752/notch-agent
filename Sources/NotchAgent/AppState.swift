@@ -1,5 +1,6 @@
 import AppKit
 import SwiftUI
+import Combine
 
 // Main-thread only. Not @MainActor-annotated so it can be reached from the
 // Carbon hotkey callback via DispatchQueue.main without strict-concurrency friction.
@@ -27,6 +28,7 @@ final class AppState: ObservableObject {
     // and an un-ordered NSWindow held only weakly gets deallocated.
     var chatPanel: NSPanel?
     var targetWindow: NSWindow?
+    var settingsWindow: NSWindow?
 
     var suspendCollapse = false
     var lastExpandAt = Date.distantPast
@@ -40,6 +42,21 @@ final class AppState: ObservableObject {
     @Published var panelHeightOverride: CGFloat?
 
     private var notchWatchTimer: Timer?
+
+    // Background mode: while the panel is collapsed and a turn is in flight
+    // (or waiting on the user), the notch itself grows to show status. The
+    // clock ticks the elapsed-time label; the subscriptions resize the target
+    // window as the session's state changes.
+    @Published var clockTick = Date()
+    private var clockTimer: Timer?
+    private var cancellables: Set<AnyCancellable> = []
+
+    // A brief "Done" pill shown after a turn finishes while collapsed, then it
+    // dismisses itself. completedStartedAt anchors the draining progress bar.
+    @Published var showingCompleted = false
+    var completedStartedAt = Date()
+    let completedDuration: TimeInterval = 3
+    private var completedTimer: Timer?
 
     private init() {
         let defaults = UserDefaults.standard
@@ -72,8 +89,135 @@ final class AppState: ObservableObject {
     }
 
     var notchHeight: CGFloat { notchSize.height }
+    var notchWidth: CGFloat { notchSize.width }
 
     var collapsedFrame: NSRect { frame(for: notchSize) }
+
+    // Hover activation range: hovering anywhere inside this rect (while idle)
+    // hover-expands the panel. It's the current notch window frame, widened
+    // horizontally by `activationInset` so the edges are easy to hit, and
+    // extended above the screen top by `activationTopOvershoot`. The overshoot
+    // matters: when you fling the cursor to the very top the pointer pins to
+    // the screen's top row (y == maxY), and NSRect.contains treats the top edge
+    // as outside — so without headroom above maxY, that top row never triggers.
+    var activationInset: CGFloat = 4
+    var activationTopOvershoot: CGFloat = 8
+    func activationFrame(for notch: NSRect) -> NSRect {
+        let base = notch.insetBy(dx: -activationInset, dy: 0)
+        return NSRect(x: base.minX, y: base.minY,
+                      width: base.width, height: base.height + activationTopOvershoot)
+    }
+    var activationFrame: NSRect {
+        activationFrame(for: targetWindow?.frame ?? collapsedFrame)
+    }
+
+    // MARK: - Background mode (the notch grows while collapsed)
+
+    // Which shape the always-on notch window should take right now. When the
+    // panel is expanded it stays idle (the panel covers the notch anyway).
+    enum NotchMode: Equatable { case idle, working, permission, question, completed }
+
+    var notchMode: NotchMode {
+        if expanded { return .idle }
+        if session.pendingPermission != nil { return .permission }
+        if session.pendingQuestion != nil { return .question }
+        if session.isRunning { return .working }
+        if showingCompleted { return .completed }
+        return .idle
+    }
+
+    // Content size per mode. Working grows sideways into the menu-bar wings;
+    // permission/question grow downward into a band below the camera. ChatGPT
+    // gets a narrower working strip — it can only chat, so it earns less room
+    // and its activity text is allowed to clip.
+    private var notchContentSize: NSSize {
+        let base = notchSize
+        switch notchMode {
+        case .idle:
+            return base
+        case .working:
+            let extra: CGFloat = session.provider == .chatgpt ? 170 : 300
+            return NSSize(width: min(base.width + extra, maxPanelWidth), height: base.height + 1)
+        case .permission:
+            return NSSize(width: min(base.width + 220, maxPanelWidth), height: base.height + 66)
+        case .question:
+            return NSSize(width: min(base.width + 190, maxPanelWidth), height: base.height + 56)
+        case .completed:
+            return NSSize(width: min(base.width + 200, maxPanelWidth), height: base.height + 4)
+        }
+    }
+
+    var notchTargetFrame: NSRect { frame(for: notchContentSize) }
+
+    // Called once at launch after the target window exists. Any change to the
+    // session state that affects the notch shape re-syncs the window frame;
+    // async so the @Published value has settled before we read notchMode.
+    func startBackgroundObservers() {
+        let resync: () -> Void = { [weak self] in
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.syncNotchFrame(animated: true)
+                self.updateClockTimer()
+            }
+        }
+        // isRunning also drives the transient "Done" pill, so it gets its own
+        // handler rather than the plain resync.
+        session.$isRunning.dropFirst().sink { [weak self] _ in
+            DispatchQueue.main.async { self?.handleRunningChanged() }
+        }.store(in: &cancellables)
+        session.$pendingPermission.dropFirst().sink { _ in resync() }.store(in: &cancellables)
+        session.$pendingQuestion.dropFirst().sink { _ in resync() }.store(in: &cancellables)
+        session.$provider.dropFirst().sink { _ in resync() }.store(in: &cancellables)
+        $expanded.dropFirst().sink { _ in resync() }.store(in: &cancellables)
+    }
+
+    private func handleRunningChanged() {
+        if session.isRunning {
+            // A new turn cancels any lingering completed pill.
+            showingCompleted = false
+            completedTimer?.invalidate()
+            completedTimer = nil
+        } else if !expanded, session.messages.last?.role == .assistant {
+            // A real answer landed while collapsed: show the pill, then let it
+            // dismiss itself.
+            showingCompleted = true
+            completedStartedAt = Date()
+            completedTimer?.invalidate()
+            completedTimer = Timer.scheduledTimer(withTimeInterval: completedDuration, repeats: false) { [weak self] _ in
+                self?.showingCompleted = false
+                self?.syncNotchFrame(animated: true)
+            }
+        }
+        syncNotchFrame(animated: true)
+        updateClockTimer()
+    }
+
+    private func syncNotchFrame(animated: Bool) {
+        guard let window = targetWindow else { return }
+        let frame = notchTargetFrame
+        guard frame != window.frame else { return }
+        if animated {
+            NSAnimationContext.runAnimationGroup { ctx in
+                ctx.duration = 0.32
+                ctx.timingFunction = CAMediaTimingFunction(controlPoints: 0.16, 1, 0.3, 1)
+                window.animator().setFrame(frame, display: true)
+            }
+        } else {
+            window.setFrame(frame, display: true)
+        }
+    }
+
+    private func updateClockTimer() {
+        let ticking = notchMode == .working
+        if ticking, clockTimer == nil {
+            clockTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
+                self?.clockTick = Date()
+            }
+        } else if !ticking {
+            clockTimer?.invalidate()
+            clockTimer = nil
+        }
+    }
 
     // Resize limits: minimum width is the original default width; minimum
     // height is half the original default height.
@@ -162,6 +306,27 @@ final class AppState: ObservableObject {
         }
     }
 
+    // Opens (or focuses) the Settings window. Lazily built and reused. The app
+    // is an accessory, so activate it too or the window opens unfocused behind
+    // whatever the user was in.
+    func openSettings() {
+        if settingsWindow == nil {
+            let win = NSWindow(
+                contentRect: NSRect(x: 0, y: 0, width: 340, height: 260),
+                styleMask: [.titled, .closable],
+                backing: .buffered,
+                defer: false
+            )
+            win.title = "NotchAgent Settings"
+            win.isReleasedWhenClosed = false
+            win.center()
+            win.contentView = NSHostingView(rootView: SettingsView(state: self))
+            settingsWindow = win
+        }
+        NSApp.activate(ignoringOtherApps: true)
+        settingsWindow?.makeKeyAndOrderFront(nil)
+    }
+
     // Clicking anywhere that is not one of our windows collapses the panel
     // (unless pinned). Global monitors cover clicks in other apps; the local
     // monitor covers clicks on our own windows. Neither needs accessibility
@@ -202,15 +367,18 @@ final class AppState: ObservableObject {
     func startNotchWatch() {
         notchWatchTimer?.invalidate()
         notchWatchTimer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in
-            guard let self, let target = self.targetWindow else { return }
-            let inside = target.frame.insetBy(dx: -4, dy: 0).contains(NSEvent.mouseLocation)
+            guard let self, self.targetWindow != nil else { return }
+            let inside = self.activationFrame.contains(NSEvent.mouseLocation)
             guard inside != self.notchHovering else { return }
             self.notchHovering = inside
             guard inside else { return }
-            // Short dwell so flybys toward the menu bar don't open it.
+            // Short dwell so flybys toward the menu bar don't open it. Only the
+            // idle notch hover-expands; in a background state (working alert /
+            // permission / question) hovering must not steal the click aimed at
+            // the notch's own buttons.
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [weak self] in
                 guard let self else { return }
-                if self.notchHovering && !self.expanded {
+                if self.notchHovering && !self.expanded && self.notchMode == .idle {
                     NSLog("NotchAgent: hover-expanding")
                     self.expand(takeKeyboard: false)
                 }

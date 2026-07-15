@@ -10,6 +10,14 @@ final class NotchPanel: NSPanel {
     override var canBecomeMain: Bool { false }
 }
 
+// The always-on notch window never becomes key, so without this a click on one
+// of its SwiftUI buttons (Deny / Allow / Answer in background mode) is consumed
+// just to bring the window forward and the button doesn't fire until a second
+// click. Accepting first mouse makes a single click act immediately.
+final class FirstMouseHostingView<Content: View>: NSHostingView<Content> {
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+}
+
 final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private var hotKeyRef: EventHotKeyRef?
     private var statusItem: NSStatusItem?
@@ -29,6 +37,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         installSignalTriggers()
         state.startNotchWatch()
         state.installOutsideClickMonitors()
+        state.startBackgroundObservers()
         state.logGeometry()
     }
 
@@ -115,6 +124,43 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 windowFrame=\(NSStringFromRect(s.chatPanel?.frame ?? .zero))
                 """
                 try? out.write(toFile: "/tmp/notchagent-geom.txt", atomically: true, encoding: .utf8)
+            } else if cmd.hasPrefix("mode:") {
+                let value = String(cmd.dropFirst(5))
+                if value == "default" {
+                    session.modeChoice.removeValue(forKey: session.provider)
+                } else {
+                    session.modeChoice[session.provider] = value
+                }
+            } else if cmd == "allow" {
+                session.respondPermission(.allow)
+            } else if cmd == "always" {
+                session.respondPermission(.always)
+            } else if cmd == "deny" {
+                session.respondPermission(.deny)
+            } else if cmd.hasPrefix("answer:") {
+                session.answerQuestion(String(cmd.dropFirst(7)))
+            } else if cmd == "settings" {
+                AppState.shared.openSettings()
+            } else if cmd == "collapse" {
+                AppState.shared.collapse()
+            } else if cmd == "expand" {
+                AppState.shared.expand(takeKeyboard: false)
+            } else if cmd == "pending" {
+                var out = "expanded=\(AppState.shared.expanded)\n"
+                out += "running=\(session.isRunning)\n"
+                if let p = session.pendingPermission {
+                    out += "permission: \(p.title) | \(p.detail) | always=\(p.canAlways)\n"
+                }
+                if let q = session.pendingQuestion {
+                    let question = q.current
+                    out += "question(\(q.index + 1)/\(q.questions.count)): [\(question.header)] "
+                        + "\(question.question) multi=\(question.multiSelect) "
+                        + "options=\(question.options.map(\.label).joined(separator: "; "))\n"
+                }
+                if session.pendingPermission == nil && session.pendingQuestion == nil {
+                    out += "pending: none\n"
+                }
+                try? out.write(toFile: "/tmp/notchagent-state.txt", atomically: true, encoding: .utf8)
             }
         }
     }
@@ -127,6 +173,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         let toggle = NSMenuItem(title: "Toggle Panel", action: #selector(togglePanel), keyEquivalent: "")
         toggle.target = self
         menu.addItem(toggle)
+        let settings = NSMenuItem(title: "Settings…", action: #selector(openSettings), keyEquivalent: ",")
+        settings.target = self
+        menu.addItem(settings)
         let hint = NSMenuItem(title: "Hover the notch or press ⌥Space", action: nil, keyEquivalent: "")
         hint.isEnabled = false
         menu.addItem(hint)
@@ -158,6 +207,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         AppState.shared.toggle()
     }
 
+    @objc private func openSettings() {
+        AppState.shared.openSettings()
+    }
+
     @objc private func quitApp() {
         NSApp.terminate(nil)
     }
@@ -177,7 +230,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         window.isOpaque = false
         window.hasShadow = false
         window.isMovable = false
-        window.contentView = NSHostingView(rootView: NotchTargetView(state: state))
+        window.contentView = FirstMouseHostingView(rootView: NotchTargetView(state: state, session: state.session))
         window.setFrame(state.collapsedFrame, display: true)
         window.orderFrontRegardless()
         state.targetWindow = window
@@ -198,9 +251,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         panel.isMovable = false
         panel.hidesOnDeactivate = false
         panel.delegate = self
-        panel.contentView = NSHostingView(
+        let hosting = NSHostingView(
             rootView: ChatRootView(state: state, session: state.session)
         )
+        // The window frame is owned by AppState's resize math. Without this,
+        // the hosting view constrains the window to the content's minimum
+        // size, and shrinking past it makes AppKit re-expand the frame
+        // rightward instead of clamping.
+        hosting.sizingOptions = []
+        panel.contentView = hosting
         state.chatPanel = panel
         // Not ordered in until first expand.
     }
@@ -223,6 +282,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private func installKeyMonitor() {
         NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
             let state = AppState.shared
+            // A pending approval captures Return (allow) and Escape (deny).
+            if state.expanded, state.session.pendingPermission != nil {
+                if event.keyCode == 36 { // Return
+                    state.session.respondPermission(.allow)
+                    return nil
+                }
+                if event.keyCode == 53 { // Escape
+                    state.session.respondPermission(.deny)
+                    return nil
+                }
+            }
             if event.keyCode == 53, state.expanded { // Escape
                 state.collapse()
                 return nil

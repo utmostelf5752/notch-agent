@@ -18,6 +18,7 @@ swiftc -O -o "$APP/Contents/MacOS/NotchAgent" \
     Sources/NotchAgent/AppDelegate.swift \
     Sources/NotchAgent/AppState.swift \
     Sources/NotchAgent/AgentSession.swift \
+    Sources/NotchAgent/CodexAppServer.swift \
     Sources/NotchAgent/ChatGPTWeb.swift \
     Sources/NotchAgent/Views.swift
 

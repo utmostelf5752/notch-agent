@@ -146,7 +146,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             } else if cmd == "expand" {
                 AppState.shared.expand(takeKeyboard: false)
             } else if cmd.hasPrefix("stealth:") {
-                AppState.shared.stealthMode = cmd.dropFirst(8) == "on"
+                AppState.shared.notchStyle = cmd.dropFirst(8) == "on" ? .stealth : .standard
+            } else if cmd.hasPrefix("style:"),
+                      let style = AppState.NotchStyle(rawValue: String(cmd.dropFirst(6))) {
+                AppState.shared.notchStyle = style
             } else if cmd.hasPrefix("fake:") {
                 // Simulate a completed turn without a CLI, to exercise the
                 // background-mode UI (working strip, completion signal).

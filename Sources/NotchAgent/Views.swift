@@ -79,7 +79,7 @@ struct NotchTargetView: View {
     }
 
     private var radius: CGFloat {
-        if state.stealthMode { return 8 }
+        if state.notchStyle != .standard { return 8 }
         switch state.notchMode {
         case .idle: return 8
         case .working, .completed: return 12
@@ -88,9 +88,12 @@ struct NotchTargetView: View {
     }
 
     @ViewBuilder private var content: some View {
-        if state.stealthMode {
+        switch state.notchStyle {
+        case .stealth:
             stealthContent
-        } else {
+        case .compact:
+            compactContent
+        case .standard:
             switch state.notchMode {
             case .idle: idleContent
             case .working: workingContent
@@ -105,6 +108,49 @@ struct NotchTargetView: View {
                 trailing: AnyView(answerButton))
             }
         }
+    }
+
+    // MARK: Compact — every background state is the same sweeping hairline
+    // under the notch; only the color says what's happening. White = working,
+    // amber = permission, blue = question; green sweeps 3 times on done and
+    // the notch snaps back (the completed timer expires with the third sweep).
+    @ViewBuilder private var compactContent: some View {
+        switch state.notchMode {
+        case .idle: idleContent
+        case .working: compactSliver(.white)
+        case .permission: compactSliver(amber)
+        case .question: compactSliver(questionBlue)
+        case .completed: compactSliver(green, sweepsFromCompletion: 3)
+        }
+    }
+
+    // One sweep per second: a bright band travels the dim track left to right.
+    // sweepsFromCompletion anchors time to the pill's start so done runs
+    // exactly N sweeps; nil sweeps forever.
+    private func compactSliver(_ color: Color, sweepsFromCompletion: Int? = nil) -> some View {
+        TimelineView(.animation) { ctx in
+            let t = sweepsFromCompletion != nil
+                ? ctx.date.timeIntervalSince(state.completedStartedAt)
+                : ctx.date.timeIntervalSinceReferenceDate
+            let stopped = sweepsFromCompletion.map { t >= Double($0) } ?? false
+            let progress = stopped ? 1.0 : max(0, t).truncatingRemainder(dividingBy: 1)
+            GeometryReader { geo in
+                let bandWidth = geo.size.width * 0.4
+                ZStack(alignment: .leading) {
+                    Capsule().fill(color.opacity(0.22))
+                    Capsule()
+                        .fill(color.opacity(0.9))
+                        .frame(width: bandWidth)
+                        .offset(x: (geo.size.width + bandWidth) * progress - bandWidth)
+                }
+                .clipShape(Capsule())
+            }
+            .frame(height: 2)
+            .padding(.horizontal, 22)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
+        .contentShape(Rectangle())
+        .onTapGesture { state.expand(takeKeyboard: true) }
     }
 
     // MARK: Stealth — nothing at all while idle or working (no size change,
@@ -794,7 +840,7 @@ struct ChatRootView: View {
     // mode, exits it from stealth (where this composer row is the only
     // always-reachable control).
     private var stealthEyeButton: some View {
-        Button { state.stealthMode.toggle() } label: {
+        Button { state.toggleStealth() } label: {
             Image(systemName: state.stealthMode ? "eye" : "eye.slash")
                 .font(.system(size: 11, weight: .medium))
                 .foregroundStyle(.white.opacity(0.55))
@@ -1380,6 +1426,14 @@ struct MessageBubble: View {
 struct SettingsView: View {
     @ObservedObject var state: AppState
 
+    private var styleCaption: String {
+        switch state.notchStyle {
+        case .standard: return "Live activity text and buttons around the notch"
+        case .compact: return "A hairline sliver under the notch — color shows what's happening"
+        case .stealth: return "Silent while working; dim notch-width panel, composer on click"
+        }
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
             HStack(spacing: 8) {
@@ -1414,14 +1468,18 @@ struct SettingsView: View {
             }
             .toggleStyle(.switch)
 
-            Toggle(isOn: $state.stealthMode) {
-                VStack(alignment: .leading, spacing: 1) {
-                    Text("Stealth mode").font(.system(size: 12.5))
-                    Text("Silent notch; near-black notch-width panel, composer on click")
-                        .font(.system(size: 10.5)).foregroundStyle(.secondary)
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Notch activity").font(.system(size: 12.5))
+                Picker("Notch activity", selection: $state.notchStyle) {
+                    Text("Standard").tag(AppState.NotchStyle.standard)
+                    Text("Compact").tag(AppState.NotchStyle.compact)
+                    Text("Stealth").tag(AppState.NotchStyle.stealth)
                 }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                Text(styleCaption)
+                    .font(.system(size: 10.5)).foregroundStyle(.secondary)
             }
-            .toggleStyle(.switch)
 
             Divider()
 

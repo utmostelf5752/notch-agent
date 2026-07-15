@@ -19,15 +19,34 @@ final class AppState: ObservableObject {
     @Published var showSettings = false { didSet { updatePopoverSuspend() } }
     @Published var showHistory = false { didSet { updatePopoverSuspend() } }
 
-    // Stealth mode: the notch renders nothing while a turn runs, alerts and
-    // completion compress to a hairline sliver, and the panel becomes a
-    // near-black overlay locked to the notch's width. Persisted.
-    @Published var stealthMode: Bool {
+    // How the notch narrates background activity.
+    //   standard — live text, tokens, and buttons around the notch.
+    //   compact  — every state is the same hairline sliver under the notch,
+    //              colored by what's happening; done sweeps 3 times and stops.
+    //   stealth  — nothing while working, slivers for alerts/done, and the
+    //              panel becomes a near-black overlay at the notch's width.
+    enum NotchStyle: String, CaseIterable { case standard, compact, stealth }
+
+    @Published var notchStyle: NotchStyle {
         didSet {
-            UserDefaults.standard.set(stealthMode, forKey: "stealthMode")
+            UserDefaults.standard.set(notchStyle.rawValue, forKey: "notchStyle")
             stealthComposerOpen = true
             syncNotchFrame(animated: true)
             if expanded { chatPanel?.setFrame(expandedFrame, display: true) }
+        }
+    }
+
+    var stealthMode: Bool { notchStyle == .stealth }
+
+    // The eye button toggles stealth without forgetting whether the user was
+    // on standard or compact before.
+    private var styleBeforeStealth: NotchStyle = .standard
+    func toggleStealth() {
+        if stealthMode {
+            notchStyle = styleBeforeStealth
+        } else {
+            styleBeforeStealth = notchStyle
+            notchStyle = .stealth
         }
     }
     // In stealth the composer is hidden so a short panel stays readable;
@@ -76,7 +95,12 @@ final class AppState: ObservableObject {
 
     private init() {
         let defaults = UserDefaults.standard
-        stealthMode = defaults.bool(forKey: "stealthMode")
+        if let raw = defaults.string(forKey: "notchStyle"), let style = NotchStyle(rawValue: raw) {
+            notchStyle = style
+        } else {
+            // Migrate the earlier boolean stealth preference.
+            notchStyle = defaults.bool(forKey: "stealthMode") ? .stealth : .standard
+        }
         let w = defaults.double(forKey: "panelWidth")
         if w > 0 { panelWidthOverride = CGFloat(w) }
         let h = defaults.double(forKey: "panelHeight")
@@ -160,6 +184,11 @@ final class AppState: ObservableObject {
                 return NSSize(width: base.width, height: base.height + 3)
             }
         }
+        // Compact: every background state is a sliver, so the notch only ever
+        // grows the 3pt the hairline needs.
+        if notchStyle == .compact, notchMode != .idle {
+            return NSSize(width: base.width, height: base.height + 3)
+        }
         switch notchMode {
         case .idle:
             return base
@@ -237,8 +266,8 @@ final class AppState: ObservableObject {
     }
 
     private func updateClockTimer() {
-        // Stealth shows no elapsed-time label, so nothing needs the tick.
-        let ticking = notchMode == .working && !stealthMode
+        // Only standard shows an elapsed-time label that needs the tick.
+        let ticking = notchMode == .working && notchStyle == .standard
         if ticking, clockTimer == nil {
             clockTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
                 self?.clockTick = Date()

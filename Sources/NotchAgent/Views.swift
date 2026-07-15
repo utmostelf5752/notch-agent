@@ -443,10 +443,10 @@ struct ChatRootView: View {
         }
         .animation(.easeOut(duration: 0.2), value: state.stealthComposerOpen)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        // Stealth dims every color in the panel toward black; the background
-        // itself goes translucent near-black so it reads as a shadow layer.
-        .opacity(state.stealthMode ? 0.6 : 1)
-        .background(NotchShape(radius: cornerRadius, topRadius: state.notchTopRadius).fill(panelBackground))
+        // Stealth dims everything toward black; glass just takes the text
+        // down from full white so it sits into the pane.
+        .opacity(state.stealthMode ? 0.6 : (state.glassPanel ? 0.8 : 1))
+        .background(panelBackdrop)
         .clipShape(NotchShape(radius: cornerRadius, topRadius: state.notchTopRadius))
         .overlay(alignment: .top) { topStrip.opacity(state.stealthMode ? 0.4 : 1) }
         .overlay {
@@ -508,10 +508,26 @@ struct ChatRootView: View {
         }
     }
 
-    private var panelBackground: Color {
-        state.stealthMode
-            ? Color(red: 0.01, green: 0.01, blue: 0.02).opacity(0.94)
-            : .black
+    // Solid black normally; near-black in stealth; in glass a clear pane —
+    // faint white sheen falling to a whisper of dark tint, with a hairline
+    // edge. The real blur behind it comes from the CGS window blur.
+    @ViewBuilder private var panelBackdrop: some View {
+        let shape = NotchShape(radius: cornerRadius, topRadius: state.notchTopRadius)
+        if state.stealthMode {
+            shape.fill(Color(red: 0.01, green: 0.01, blue: 0.02).opacity(0.94))
+        } else if state.glassPanel {
+            shape
+                .fill(LinearGradient(
+                    stops: [
+                        .init(color: .white.opacity(0.05), location: 0),
+                        .init(color: .white.opacity(0.01), location: 0.25),
+                        .init(color: Color(red: 0.03, green: 0.03, blue: 0.05).opacity(0.12), location: 1),
+                    ],
+                    startPoint: .top, endPoint: .bottom))
+                .overlay(shape.stroke(Color.white.opacity(0.25), lineWidth: 1))
+        } else {
+            shape.fill(Color.black)
+        }
     }
 
     // Edge-drag resizing. Width is symmetric (the panel stays centered on the
@@ -1501,6 +1517,15 @@ struct SettingsView: View {
                 Text(styleCaption)
                     .font(.system(size: 10.5)).foregroundStyle(.secondary)
             }
+
+            Toggle(isOn: $state.glassPanel) {
+                VStack(alignment: .leading, spacing: 1) {
+                    Text("Glass panel").font(.system(size: 12.5))
+                    Text("Clear pane — the panel shows what's behind it")
+                        .font(.system(size: 10.5)).foregroundStyle(.secondary)
+                }
+            }
+            .toggleStyle(.switch)
 
             Divider()
 

@@ -150,6 +150,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             } else if cmd.hasPrefix("style:"),
                       let style = AppState.NotchStyle(rawValue: String(cmd.dropFirst(6))) {
                 AppState.shared.notchStyle = style
+            } else if cmd.hasPrefix("glass:") {
+                AppState.shared.glassPanel = cmd.dropFirst(6) == "on"
             } else if cmd.hasPrefix("fake:") {
                 // Simulate a completed turn without a CLI, to exercise the
                 // background-mode UI (working strip, completion signal).

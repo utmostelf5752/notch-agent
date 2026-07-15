@@ -2,6 +2,19 @@ import AppKit
 import SwiftUI
 import Combine
 
+// SkyLight SPI: Gaussian-blurs whatever is behind a window's translucent
+// pixels. Every NSVisualEffectView material is far too frosted for a clear
+// pane — this is the only way to get a genuine ~3pt glass blur. Fully
+// transparent pixels (the window margins) stay unblurred.
+private typealias CGSConnectionID = UInt32
+@_silgen_name("CGSDefaultConnectionForThread")
+private func CGSDefaultConnectionForThread() -> CGSConnectionID
+@discardableResult
+@_silgen_name("CGSSetWindowBackgroundBlurRadius")
+private func CGSSetWindowBackgroundBlurRadius(
+    _ cid: CGSConnectionID, _ wid: UInt32, _ radius: Int32
+) -> Int32
+
 // Main-thread only. Not @MainActor-annotated so it can be reached from the
 // Carbon hotkey callback via DispatchQueue.main without strict-concurrency friction.
 final class AppState: ObservableObject {
@@ -32,11 +45,29 @@ final class AppState: ObservableObject {
             UserDefaults.standard.set(notchStyle.rawValue, forKey: "notchStyle")
             stealthComposerOpen = true
             syncNotchFrame(animated: true)
+            applyPanelBlur()
             if expanded { chatPanel?.setFrame(expandedFrame, display: true) }
         }
     }
 
     var stealthMode: Bool { notchStyle == .stealth }
+
+    // Glass panel: the expanded panel becomes a clear pane — a real 3pt blur
+    // of whatever is behind the window, a whisper of tint, and a hairline
+    // edge. Stealth ignores it (glass edges catch light; stealth hides).
+    @Published var glassPanel: Bool {
+        didSet {
+            UserDefaults.standard.set(glassPanel, forKey: "glassPanel")
+            applyPanelBlur()
+        }
+    }
+
+    func applyPanelBlur() {
+        guard let panel = chatPanel, panel.windowNumber > 0 else { return }
+        let radius: Int32 = glassPanel && !stealthMode ? 3 : 0
+        CGSSetWindowBackgroundBlurRadius(
+            CGSDefaultConnectionForThread(), UInt32(panel.windowNumber), radius)
+    }
 
     // The eye button toggles stealth without forgetting whether the user was
     // on standard or compact before.
@@ -101,6 +132,7 @@ final class AppState: ObservableObject {
             // Migrate the earlier boolean stealth preference.
             notchStyle = defaults.bool(forKey: "stealthMode") ? .stealth : .standard
         }
+        glassPanel = defaults.bool(forKey: "glassPanel")
         let w = defaults.double(forKey: "panelWidth")
         if w > 0 { panelWidthOverride = CGFloat(w) }
         let h = defaults.double(forKey: "panelHeight")
@@ -360,6 +392,7 @@ final class AppState: ObservableObject {
             expanded = true
             lastExpandAt = Date()
             panel.orderFrontRegardless()
+            applyPanelBlur()
             NSLog("NotchAgent: expand(takeKeyboard=\(takeKeyboard)) frame=\(NSStringFromRect(panel.frame)) visible=\(panel.isVisible)")
         }
         if takeKeyboard {

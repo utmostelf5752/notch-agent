@@ -1,0 +1,252 @@
+import AppKit
+import SwiftUI
+import Combine
+import Carbon.HIToolbox
+
+// Borderless panel that can take keyboard focus without activating the app,
+// so typing works while the previous app stays "active" (Spotlight-style).
+final class NotchPanel: NSPanel {
+    override var canBecomeKey: Bool { true }
+    override var canBecomeMain: Bool { false }
+}
+
+final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
+    private var hotKeyRef: EventHotKeyRef?
+    private var statusItem: NSStatusItem?
+    private var runningObserver: AnyCancellable?
+
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        // Our windows must never participate in window tabbing; also silences
+        // "Cannot index window tabs due to missing main bundle identifier".
+        NSWindow.allowsAutomaticWindowTabbing = false
+        let state = AppState.shared
+        setUpTargetWindow(state: state)
+        setUpChatPanel(state: state)
+        setUpStatusItem(state: state)
+        setUpMainMenu()
+        installHotKey()
+        installKeyMonitor()
+        installSignalTriggers()
+        state.startNotchWatch()
+        state.installOutsideClickMonitors()
+        state.logGeometry()
+    }
+
+    // An accessory app has no menu bar, but key equivalents still route
+    // through NSApp.mainMenu — without this Edit menu, Cmd+A/C/V/X/Z are dead.
+    private func setUpMainMenu() {
+        let main = NSMenu()
+
+        let appItem = NSMenuItem()
+        let appMenu = NSMenu()
+        appMenu.addItem(NSMenuItem(title: "Quit NotchAgent", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
+        appItem.submenu = appMenu
+        main.addItem(appItem)
+
+        let editItem = NSMenuItem()
+        let edit = NSMenu(title: "Edit")
+        edit.addItem(withTitle: "Undo", action: Selector(("undo:")), keyEquivalent: "z")
+        edit.addItem(withTitle: "Redo", action: Selector(("redo:")), keyEquivalent: "Z")
+        edit.addItem(.separator())
+        edit.addItem(withTitle: "Cut", action: #selector(NSText.cut(_:)), keyEquivalent: "x")
+        edit.addItem(withTitle: "Copy", action: #selector(NSText.copy(_:)), keyEquivalent: "c")
+        edit.addItem(withTitle: "Paste", action: #selector(NSText.paste(_:)), keyEquivalent: "v")
+        edit.addItem(withTitle: "Select All", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
+        editItem.submenu = edit
+        main.addItem(editItem)
+
+        NSApp.mainMenu = main
+    }
+
+    // Debug hooks: `kill -USR1 <pid>` toggles the panel. `kill -USR2 <pid>`
+    // executes commands from /tmp/notchagent-cmd (one per line):
+    //   provider:<claude|codex|chatgpt>   switch provider
+    //   send:<text>                       send a message
+    //   msgs                              write transcript to /tmp/notchagent-msgs.txt
+    //   dump                              write ChatGPT web view state to /tmp/notchagent-dom.txt
+    // With no command file, USR2 just logs geometry.
+    private var signalSources: [DispatchSourceSignal] = []
+    private func installSignalTriggers() {
+        for (sig, handler) in [
+            (SIGUSR1, { AppState.shared.toggle() }),
+            (SIGUSR2, { AppDelegate.handleDebugCommands() }),
+        ] {
+            signal(sig, SIG_IGN)
+            let source = DispatchSource.makeSignalSource(signal: sig, queue: .main)
+            source.setEventHandler(handler: handler)
+            source.resume()
+            signalSources.append(source)
+        }
+    }
+
+    private static func handleDebugCommands() {
+        let path = "/tmp/notchagent-cmd"
+        guard let raw = try? String(contentsOfFile: path, encoding: .utf8) else {
+            AppState.shared.logGeometry()
+            return
+        }
+        try? FileManager.default.removeItem(atPath: path)
+        let session = AppState.shared.session
+        for line in raw.split(separator: "\n") {
+            let cmd = line.trimmingCharacters(in: .whitespaces)
+            if cmd.hasPrefix("provider:"), let p = AgentProvider(rawValue: String(cmd.dropFirst(9))) {
+                session.provider = p
+            } else if cmd.hasPrefix("send:") {
+                AppState.shared.expand(takeKeyboard: false)
+                session.send(String(cmd.dropFirst(5)))
+            } else if cmd == "msgs" {
+                let out = session.messages
+                    .map { "[\($0.role)] \($0.text)" }
+                    .joined(separator: "\n---\n")
+                try? out.write(toFile: "/tmp/notchagent-msgs.txt", atomically: true, encoding: .utf8)
+            } else if cmd == "dump" {
+                ChatGPTWeb.shared.dumpState(to: "/tmp/notchagent-dom.txt")
+            }
+        }
+    }
+
+    private func setUpStatusItem(state: AppState) {
+        let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
+        item.button?.image = Self.statusImage(running: false)
+
+        let menu = NSMenu()
+        let toggle = NSMenuItem(title: "Toggle Panel", action: #selector(togglePanel), keyEquivalent: "")
+        toggle.target = self
+        menu.addItem(toggle)
+        let hint = NSMenuItem(title: "Hover the notch or press ⌥Space", action: nil, keyEquivalent: "")
+        hint.isEnabled = false
+        menu.addItem(hint)
+        menu.addItem(.separator())
+        let quit = NSMenuItem(title: "Quit NotchAgent", action: #selector(quitApp), keyEquivalent: "q")
+        quit.target = self
+        menu.addItem(quit)
+        item.menu = menu
+        statusItem = item
+
+        runningObserver = state.session.$isRunning
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] running in
+                self?.statusItem?.button?.image = Self.statusImage(running: running)
+            }
+    }
+
+    private static func statusImage(running: Bool) -> NSImage? {
+        let name = running ? "sparkles" : "sparkle"
+        let image = NSImage(
+            systemSymbolName: name,
+            accessibilityDescription: running ? "NotchAgent (working)" : "NotchAgent"
+        )
+        image?.isTemplate = true
+        return image
+    }
+
+    @objc private func togglePanel() {
+        AppState.shared.toggle()
+    }
+
+    @objc private func quitApp() {
+        NSApp.terminate(nil)
+    }
+
+    // Always-visible click target sitting exactly over the notch. Borderless
+    // NSWindow never becomes key, so it can't steal keyboard focus.
+    private func setUpTargetWindow(state: AppState) {
+        let window = NSWindow(
+            contentRect: state.collapsedFrame,
+            styleMask: [.borderless],
+            backing: .buffered,
+            defer: false
+        )
+        window.level = .statusBar
+        window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary]
+        window.backgroundColor = .clear
+        window.isOpaque = false
+        window.hasShadow = false
+        window.isMovable = false
+        window.contentView = NSHostingView(rootView: NotchTargetView(state: state))
+        window.setFrame(state.collapsedFrame, display: true)
+        window.orderFrontRegardless()
+        state.targetWindow = window
+    }
+
+    private func setUpChatPanel(state: AppState) {
+        let panel = NotchPanel(
+            contentRect: state.expandedFrame,
+            styleMask: [.borderless, .nonactivatingPanel],
+            backing: .buffered,
+            defer: false
+        )
+        panel.level = .statusBar
+        panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary]
+        panel.backgroundColor = .clear
+        panel.isOpaque = false
+        panel.hasShadow = false
+        panel.isMovable = false
+        panel.hidesOnDeactivate = false
+        panel.delegate = self
+        panel.contentView = NSHostingView(
+            rootView: ChatRootView(state: state, session: state.session)
+        )
+        state.chatPanel = panel
+        // Not ordered in until first expand.
+    }
+
+    func windowDidBecomeKey(_ notification: Notification) {
+        AppState.shared.panelIsKey = true
+    }
+
+    func applicationWillTerminate(_ notification: Notification) {
+        // Keep the in-progress conversation across restarts.
+        AppState.shared.session.archiveCurrentIfNeeded()
+    }
+
+    // Losing key status alone no longer collapses the panel (the outside-click
+    // monitors decide that) — it only drops the input focus state.
+    func windowDidResignKey(_ notification: Notification) {
+        AppState.shared.panelIsKey = false
+    }
+
+    private func installKeyMonitor() {
+        NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
+            let state = AppState.shared
+            if event.keyCode == 53, state.expanded { // Escape
+                state.collapse()
+                return nil
+            }
+            if event.modifierFlags.contains(.command),
+               let chars = event.charactersIgnoringModifiers {
+                if chars == "q" {
+                    NSApp.terminate(nil)
+                    return nil
+                }
+                if chars == "w", state.expanded {
+                    state.collapse()
+                    return nil
+                }
+            }
+            return event
+        }
+    }
+
+    // Carbon hotkey: works globally without accessibility permission.
+    private func installHotKey() {
+        var eventType = EventTypeSpec(
+            eventClass: OSType(kEventClassKeyboard),
+            eventKind: UInt32(kEventHotKeyPressed)
+        )
+        InstallEventHandler(GetApplicationEventTarget(), { _, _, _ in
+            DispatchQueue.main.async { AppState.shared.toggle() }
+            return noErr
+        }, 1, &eventType, nil, nil)
+
+        let hotKeyID = EventHotKeyID(signature: OSType(0x4E474E54), id: 1) // 'NGNT'
+        RegisterEventHotKey(
+            UInt32(kVK_Space),
+            UInt32(optionKey),
+            hotKeyID,
+            GetApplicationEventTarget(),
+            0,
+            &hotKeyRef
+        )
+    }
+}

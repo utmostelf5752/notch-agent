@@ -1,0 +1,6 @@
+build/
+bin/
+.build/
+.DS_Store
+Support/chatgpt-bridge/node_modules/
+Support/AppIcon.iconset/

@@ -135,7 +135,7 @@ final class AppState: ObservableObject {
     // Outward flare at the notch's top corners for the standard and compact
     // looks. Stealth stays stock-shaped — its whole point is to be
     // indistinguishable from the bare notch.
-    var notchTopRadius: CGFloat { notchStyle == .stealth ? 0 : 8 }
+    var notchTopRadius: CGFloat { notchStyle == .stealth ? 0 : 10 }
 
     var collapsedFrame: NSRect { frame(for: notchSize) }
 

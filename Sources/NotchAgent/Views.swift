@@ -98,10 +98,12 @@ struct NotchTargetView: View {
     }
 
     private var radius: CGFloat {
-        if state.notchStyle != .standard { return 8 }
+        // Stealth mimics the bare hardware notch, so it keeps the stock 8.
+        if state.notchStyle == .stealth { return 8 }
+        if state.notchStyle == .compact { return 10 }
         switch state.notchMode {
-        case .idle: return 8
-        case .working, .completed: return 12
+        case .idle: return 10
+        case .working, .completed: return 14
         case .permission, .question: return 20
         }
     }

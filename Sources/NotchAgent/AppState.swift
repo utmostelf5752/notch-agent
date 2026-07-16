@@ -36,8 +36,10 @@ final class AppState: ObservableObject {
     //   standard — live text, tokens, and buttons around the notch.
     //   compact  — every state is the same hairline sliver under the notch,
     //              colored by what's happening; done sweeps 3 times and stops.
-    //   stealth  — nothing while working, slivers for alerts/done, and the
-    //              panel becomes a near-black overlay at the notch's width.
+    //   stealth  — silent while working; a permission/question announces
+    //              itself with a brief 2-sweep dark sliver and then hides;
+    //              the panel becomes a near-black overlay at the notch's
+    //              width.
     enum NotchStyle: String, CaseIterable { case standard, compact, stealth }
 
     @Published var notchStyle: NotchStyle {
@@ -52,19 +54,30 @@ final class AppState: ObservableObject {
 
     var stealthMode: Bool { notchStyle == .stealth }
 
-    // Glass panel: the expanded panel becomes a clear pane — a real 3pt blur
-    // of whatever is behind the window, a whisper of tint, and a hairline
-    // edge. Stealth ignores it (glass edges catch light; stealth hides).
-    @Published var glassPanel: Bool {
+    // What the expanded panel is made of.
+    //   black — solid, the original look.
+    //   smoke — dark liquid glass: an NSVisualEffectView diffuses what's
+    //           behind the window under a smoked tint.
+    //   clear — a genuinely clear pane: the faint CGS blur and near-no tint.
+    // Smoke uses NSVisualEffectView rather than the CGS blur because the
+    // CGS radius applies to the window's whole rectangle — at liquid-glass
+    // strengths the transparent margins around the panel show as a blurred
+    // band, and the region lags the reveal/resize animations. The effect
+    // view is an ordinary layer, so it clips and animates with the panel
+    // shape. Stealth honors only the clear pane (drawn without its rim
+    // there); smoke falls back to the near-black overlay.
+    enum PanelStyle: String, CaseIterable { case black, smoke, clear }
+
+    @Published var panelStyle: PanelStyle {
         didSet {
-            UserDefaults.standard.set(glassPanel, forKey: "glassPanel")
+            UserDefaults.standard.set(panelStyle.rawValue, forKey: "panelStyle")
             applyPanelBlur()
         }
     }
 
     func applyPanelBlur() {
         guard let panel = chatPanel, panel.windowNumber > 0 else { return }
-        let radius: Int32 = glassPanel && !stealthMode ? 3 : 0
+        let radius: Int32 = panelStyle == .clear ? 3 : 0
         CGSSetWindowBackgroundBlurRadius(
             CGSDefaultConnectionForThread(), UInt32(panel.windowNumber), radius)
     }
@@ -95,9 +108,17 @@ final class AppState: ObservableObject {
     var chatPanel: NSPanel?
     var targetWindow: NSWindow?
     var settingsWindow: NSWindow?
+    // The panel was open when Settings opened, so reopen it once Settings closes.
+    private var reopenPanelAfterSettings = false
 
     var suspendCollapse = false
     var lastExpandAt = Date.distantPast
+
+    // Push-to-close: while the panel is open, shoving the cursor into the top
+    // edge between the flanking icons closes it. Armed only once the cursor has
+    // left the zone since opening, so a hover-expand (which leaves the cursor
+    // right there) doesn't immediately close again.
+    var topCloseArmed = false
 
     // Edge-drag resize state: (mouse position, panel size) at drag start.
     // Screen coordinates, so the math stays stable while the window resizes.
@@ -124,6 +145,13 @@ final class AppState: ObservableObject {
     let completedDuration: TimeInterval = 3
     private var completedTimer: Timer?
 
+    // Stealth announces a pending permission/question with a sliver that
+    // sweeps exactly twice (1s per sweep) and then hides again — the notch
+    // returns to stock size until the alert is answered.
+    @Published var stealthAlertSliverVisible = false
+    var stealthAlertStartedAt = Date()
+    private var stealthAlertTimer: Timer?
+
     private init() {
         let defaults = UserDefaults.standard
         if let raw = defaults.string(forKey: "notchStyle"), let style = NotchStyle(rawValue: raw) {
@@ -132,7 +160,15 @@ final class AppState: ObservableObject {
             // Migrate the earlier boolean stealth preference.
             notchStyle = defaults.bool(forKey: "stealthMode") ? .stealth : .standard
         }
-        glassPanel = defaults.bool(forKey: "glassPanel")
+        if let raw = defaults.string(forKey: "panelStyle"), let style = PanelStyle(rawValue: raw) {
+            panelStyle = style
+        } else if defaults.string(forKey: "panelStyle") == "frost" {
+            // Frost was removed; smoke is the closest survivor.
+            panelStyle = .smoke
+        } else {
+            // Migrate the earlier boolean glass preference.
+            panelStyle = defaults.bool(forKey: "glassPanel") ? .clear : .black
+        }
         let w = defaults.double(forKey: "panelWidth")
         if w > 0 { panelWidthOverride = CGFloat(w) }
         let h = defaults.double(forKey: "panelHeight")
@@ -189,6 +225,22 @@ final class AppState: ObservableObject {
         activationFrame(for: targetWindow?.frame ?? collapsedFrame)
     }
 
+    // The open panel's top-edge close target: the camera-cutout-width gap along
+    // the top strip, between the left (history/settings) and right (pin/new)
+    // icon clusters. Extended above the screen top by activationTopOvershoot so
+    // the pinned top row (y == maxY) counts as inside — same reason as
+    // activationFrame's overshoot.
+    var topCloseZone: NSRect {
+        guard let frame = chatPanel?.frame else { return .zero }
+        let width = notchWidth
+        return NSRect(
+            x: frame.midX - width / 2,
+            y: frame.maxY - notchHeight,
+            width: width,
+            height: notchHeight + activationTopOvershoot
+        )
+    }
+
     // MARK: - Background mode (the notch grows while collapsed)
 
     // Which shape the always-on notch window should take right now. When the
@@ -217,14 +269,18 @@ final class AppState: ObservableObject {
 
     private var rawNotchContentSize: NSSize {
         let base = notchSize
-        // Stealth: never grow sideways. Working is fully silent (stock notch);
-        // alerts and completion only extend 3pt below the cutout so the
-        // hairline sliver has visible pixels to land on.
+        // Stealth: never grow sideways, and working is fully silent (stock
+        // notch). Alerts extend 3pt below the cutout only while their
+        // 2-sweep announcement is on screen; completion holds its sliver.
         if stealthMode {
             switch notchMode {
             case .idle, .working:
                 return base
-            case .permission, .question, .completed:
+            case .permission, .question:
+                return stealthAlertSliverVisible
+                    ? NSSize(width: base.width, height: base.height + 3)
+                    : base
+            case .completed:
                 return NSSize(width: base.width, height: base.height + 3)
             }
         }
@@ -266,10 +322,38 @@ final class AppState: ObservableObject {
         session.$isRunning.dropFirst().sink { [weak self] _ in
             DispatchQueue.main.async { self?.handleRunningChanged() }
         }.store(in: &cancellables)
-        session.$pendingPermission.dropFirst().sink { _ in resync() }.store(in: &cancellables)
-        session.$pendingQuestion.dropFirst().sink { _ in resync() }.store(in: &cancellables)
+        // Alerts also drive the stealth announcement sliver's lifecycle.
+        let alertResync: () -> Void = { [weak self] in
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.updateStealthAlertSliver()
+                self.syncNotchFrame(animated: true)
+                self.updateClockTimer()
+            }
+        }
+        session.$pendingPermission.dropFirst().sink { _ in alertResync() }.store(in: &cancellables)
+        session.$pendingQuestion.dropFirst().sink { _ in alertResync() }.store(in: &cancellables)
         session.$provider.dropFirst().sink { _ in resync() }.store(in: &cancellables)
         $expanded.dropFirst().sink { _ in resync() }.store(in: &cancellables)
+    }
+
+    // Restarts the 2-sweep announcement whenever a new alert lands (a new
+    // question in a multi-question request re-announces too), and clears it
+    // the moment the alert is answered.
+    private func updateStealthAlertSliver() {
+        let active = session.pendingPermission != nil || session.pendingQuestion != nil
+        stealthAlertTimer?.invalidate()
+        stealthAlertTimer = nil
+        guard active else {
+            stealthAlertSliverVisible = false
+            return
+        }
+        stealthAlertStartedAt = Date()
+        stealthAlertSliverVisible = true
+        stealthAlertTimer = Timer.scheduledTimer(withTimeInterval: 2, repeats: false) { [weak self] _ in
+            self?.stealthAlertSliverVisible = false
+            self?.syncNotchFrame(animated: true)
+        }
     }
 
     private func handleRunningChanged() {
@@ -280,12 +364,12 @@ final class AppState: ObservableObject {
             completedTimer = nil
         } else if !expanded, session.messages.last?.role == .assistant {
             // A real answer landed while collapsed: show the pill, then let it
-            // dismiss itself. Stealth holds its sliver a little longer since
-            // it's the only completion signal there is.
+            // dismiss itself. Stealth's 2-sweep announcement takes 2s, so the
+            // mode ends exactly when the sweeps do.
             showingCompleted = true
             completedStartedAt = Date()
             completedTimer?.invalidate()
-            completedTimer = Timer.scheduledTimer(withTimeInterval: stealthMode ? 5 : completedDuration, repeats: false) { [weak self] _ in
+            completedTimer = Timer.scheduledTimer(withTimeInterval: stealthMode ? 2 : completedDuration, repeats: false) { [weak self] _ in
                 self?.showingCompleted = false
                 self?.syncNotchFrame(animated: true)
             }
@@ -431,8 +515,20 @@ final class AppState: ObservableObject {
             win.isReleasedWhenClosed = false
             win.center()
             win.contentView = NSHostingView(rootView: SettingsView(state: self))
+            // Reopen the notch panel when Settings closes, if it was open.
+            NotificationCenter.default.addObserver(
+                forName: NSWindow.willCloseNotification, object: win, queue: .main
+            ) { [weak self] _ in
+                guard let self, self.reopenPanelAfterSettings else { return }
+                self.reopenPanelAfterSettings = false
+                self.expand(takeKeyboard: true)
+            }
             settingsWindow = win
         }
+        // The panel sits at .statusBar level, above the settings window, so
+        // collapse it while Settings is up and restore it on close.
+        reopenPanelAfterSettings = expanded
+        if expanded { collapse() }
         NSApp.activate(ignoringOtherApps: true)
         settingsWindow?.makeKeyAndOrderFront(nil)
     }
@@ -478,17 +574,40 @@ final class AppState: ObservableObject {
         notchWatchTimer?.invalidate()
         notchWatchTimer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in
             guard let self, self.targetWindow != nil else { return }
-            let inside = self.activationFrame.contains(NSEvent.mouseLocation)
+            let mouse = NSEvent.mouseLocation
+
+            // While open: pushing into the top-edge gap between the icons closes
+            // the panel. Only after the cursor has left that zone at least once
+            // since opening (topCloseArmed) — otherwise a hover-expand, which
+            // leaves the cursor sitting in the zone, would slam it shut again.
+            if self.expanded {
+                if self.topCloseZone.contains(mouse) {
+                    if self.topCloseArmed, !self.pinned, !self.suspendCollapse {
+                        // Mark as hovering so the collapse doesn't instantly
+                        // hover-expand: the transition guard below only fires on
+                        // a fresh outside->inside move.
+                        self.notchHovering = true
+                        self.collapse()
+                    }
+                } else {
+                    self.topCloseArmed = true
+                }
+                return
+            }
+            self.topCloseArmed = false
+
+            let inside = self.activationFrame.contains(mouse)
             guard inside != self.notchHovering else { return }
             self.notchHovering = inside
             guard inside else { return }
             // Short dwell so flybys toward the menu bar don't open it. Only the
             // idle notch hover-expands; in a background state (working alert /
             // permission / question) hovering must not steal the click aimed at
-            // the notch's own buttons.
+            // the notch's own buttons. Stealth has no notch buttons, so it
+            // hover-expands in every state.
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [weak self] in
                 guard let self else { return }
-                if self.notchHovering && !self.expanded && self.notchMode == .idle {
+                if self.notchHovering && !self.expanded && (self.notchMode == .idle || self.stealthMode) {
                     NSLog("NotchAgent: hover-expanding")
                     self.expand(takeKeyboard: false)
                 }

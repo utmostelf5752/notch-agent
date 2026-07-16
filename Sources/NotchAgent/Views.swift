@@ -66,6 +66,28 @@ struct NotchShape: Shape {
     }
 }
 
+// The diffusion layer of the liquid-glass materials: a behind-window
+// NSVisualEffectView. Unlike the CGS window blur (a radius on the whole
+// window rectangle), this is an ordinary layer — it clips to the panel
+// shape, tracks resizes, and rides the reveal mask like any other view,
+// and its materials add the saturation boost the CGS blur lacks.
+struct VisualEffectBackdrop: NSViewRepresentable {
+    var material: NSVisualEffectView.Material
+    var appearance: NSAppearance.Name
+
+    func makeNSView(context: Context) -> NSVisualEffectView {
+        let view = NSVisualEffectView()
+        view.blendingMode = .behindWindow
+        view.state = .active
+        return view
+    }
+
+    func updateNSView(_ view: NSVisualEffectView, context: Context) {
+        view.material = material
+        view.appearance = NSAppearance(named: appearance)
+    }
+}
+
 // The always-on click target drawn over the physical notch. While the panel
 // is collapsed it doubles as "background mode": the notch grows sideways to
 // narrate the running turn (activity + elapsed/tokens) and grows downward into
@@ -85,7 +107,13 @@ struct NotchTargetView: View {
 
     var body: some View {
         ZStack {
-            NotchShape(radius: radius, topRadius: state.notchTopRadius).fill(Color.black)
+            // Transparent until there's something to show: an idle notch (and a
+            // silent stealth-working one) is exactly notch-sized, so a black fill
+            // is invisible against the hardware notch in person but its rounded
+            // bottom corners poke out as black nubs in screenshots. Only paint
+            // the backing once the window has grown to hold content.
+            NotchShape(radius: radius, topRadius: state.notchTopRadius)
+                .fill(showsBackground ? Color.black : Color.clear)
             content
         }
         // Dragging a file onto the notch attaches it and opens the panel.
@@ -95,6 +123,21 @@ struct NotchTargetView: View {
             return accepted
         }
         .animation(.timingCurve(0.16, 1, 0.3, 1, duration: 0.4), value: state.notchMode)
+    }
+
+    // Whether the notch backing should be painted: only when the window has
+    // grown past the bare notch. A notch-sized black fill is invisible in
+    // person but its rounded bottom corners poke out in screenshots, so
+    // stealth stays unpainted while working and after its announcement
+    // sliver has hidden.
+    private var showsBackground: Bool {
+        switch state.notchMode {
+        case .idle: return false
+        case .working: return !state.stealthMode
+        case .permission, .question:
+            return !state.stealthMode || state.stealthAlertSliverVisible
+        case .completed: return true
+        }
     }
 
     private var radius: CGFloat {
@@ -141,19 +184,22 @@ struct NotchTargetView: View {
         case .working: compactSliver(.white)
         case .permission: compactSliver(amber)
         case .question: compactSliver(questionBlue)
-        case .completed: compactSliver(green, sweepsFromCompletion: 3)
+        case .completed: compactSliver(green, sweeps: 3, anchor: state.completedStartedAt)
         }
     }
 
     // One sweep per second: a bright band travels the dim track left to right.
-    // sweepsFromCompletion anchors time to the pill's start so done runs
-    // exactly N sweeps; nil sweeps forever.
-    private func compactSliver(_ color: Color, sweepsFromCompletion: Int? = nil) -> some View {
+    // sweeps anchors time to `anchor` and runs exactly N sweeps — the band
+    // then parks at the right, or the whole sliver vanishes with
+    // hidesWhenDone; nil sweeps forever.
+    private func compactSliver(
+        _ color: Color, sweeps: Int? = nil, anchor: Date = .distantPast, hidesWhenDone: Bool = false
+    ) -> some View {
         TimelineView(.animation) { ctx in
-            let t = sweepsFromCompletion != nil
-                ? ctx.date.timeIntervalSince(state.completedStartedAt)
+            let t = sweeps != nil
+                ? ctx.date.timeIntervalSince(anchor)
                 : ctx.date.timeIntervalSinceReferenceDate
-            let stopped = sweepsFromCompletion.map { t >= Double($0) } ?? false
+            let stopped = sweeps.map { t >= Double($0) } ?? false
             let progress = stopped ? 1.0 : max(0, t).truncatingRemainder(dividingBy: 1)
             GeometryReader { geo in
                 let bandWidth = geo.size.width * 0.4
@@ -168,15 +214,17 @@ struct NotchTargetView: View {
             }
             .frame(height: 2)
             .padding(.horizontal, 22)
+            .opacity(hidesWhenDone && stopped ? 0 : 1)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
         .contentShape(Rectangle())
         .onTapGesture { state.expand(takeKeyboard: true) }
     }
 
-    // MARK: Stealth — nothing at all while idle or working (no size change,
-    // no animation); alerts and completion compress to a hairline sliver
-    // hugging the notch's bottom edge. The whole area stays a click target.
+    // MARK: Stealth — nothing at all while idle or working. Alerts and
+    // completion both announce themselves the same way: a near-black sliver
+    // sweeps twice and disappears. The whole area stays a click target
+    // throughout.
     @ViewBuilder private var stealthContent: some View {
         switch state.notchMode {
         case .idle, .working:
@@ -184,29 +232,22 @@ struct NotchTargetView: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .contentShape(Rectangle())
                 .onTapGesture { state.expand(takeKeyboard: true) }
+        case .permission, .question:
+            if state.stealthAlertSliverVisible {
+                compactSliver(
+                    Color(white: 0.25), sweeps: 2,
+                    anchor: state.stealthAlertStartedAt, hidesWhenDone: true)
+            } else {
+                Color.clear
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .contentShape(Rectangle())
+                    .onTapGesture { state.expand(takeKeyboard: true) }
+            }
         case .completed:
-            stealthSliver(green, pulsing: false)
-        case .permission:
-            stealthSliver(amber, pulsing: true)
-        case .question:
-            stealthSliver(questionBlue, pulsing: true)
+            compactSliver(
+                Color(white: 0.25), sweeps: 2,
+                anchor: state.completedStartedAt, hidesWhenDone: true)
         }
-    }
-
-    private func stealthSliver(_ color: Color, pulsing: Bool) -> some View {
-        // Paused when not pulsing so the completed sliver costs no frames.
-        TimelineView(.animation(minimumInterval: nil, paused: !pulsing)) { ctx in
-            let t = ctx.date.timeIntervalSinceReferenceDate
-            let phase = pulsing ? (sin(t * 3.6) + 1) / 2 : 1
-            Capsule()
-                .fill(color)
-                .frame(height: 2)
-                .padding(.horizontal, 22)
-                .opacity(0.25 + 0.65 * phase)
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
-        .contentShape(Rectangle())
-        .onTapGesture { state.expand(takeKeyboard: true) }
     }
 
     // MARK: Idle — the original hover-sparkle click target.
@@ -430,24 +471,35 @@ struct ChatRootView: View {
     private let cornerRadius: CGFloat = 24
     private let accent = Color(red: 10/255, green: 132/255, blue: 1)
 
+    // Stealth shrinks the whole panel UI: the panel is locked to the notch's
+    // width there, so smaller text and controls buy back real room.
+    private var s: CGFloat { state.stealthMode ? 0.85 : 1 }
+
     var body: some View {
         VStack(spacing: 0) {
             Color.clear.frame(height: state.notchHeight + 2)
             messagesList
-            questionSheet
-            // A pending approval overrides the stealth hide — the composer is
-            // where the Deny/Allow buttons live.
-            if !state.stealthMode || state.stealthComposerOpen || session.pendingPermission != nil {
-                composer
-            }
+                // The composer floats over the chat: its translucent box
+                // lets messages show through as they scroll underneath, and
+                // the safe-area inset stops the scroll's end above it so the
+                // last message is never trapped behind the box.
+                .safeAreaInset(edge: .bottom, spacing: 0) {
+                    VStack(spacing: 0) {
+                        questionSheet
+                        // A pending approval overrides the stealth hide —
+                        // the composer is where the Deny/Allow buttons live.
+                        if !state.stealthMode || state.stealthComposerOpen || session.pendingPermission != nil {
+                            composer
+                        }
+                    }
+                }
         }
         .animation(.easeOut(duration: 0.2), value: state.stealthComposerOpen)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        // Stealth dims everything toward black. Glass multiplies all content
-        // toward grey instead — white text becomes mid-grey, which stays
-        // slightly visible over white content and dark content alike.
-        .opacity(state.stealthMode ? 0.6 : 1)
-        .colorMultiply(state.glassPanel && !state.stealthMode ? Color(white: 0.6) : .white)
+        // Only stealth dims: translucent glyphs that let what's behind the
+        // pane show through them. Every normal mode keeps content at full
+        // strength, whatever the material.
+        .opacity(state.stealthMode ? 0.45 : 1)
         .background(panelBackdrop)
         .clipShape(NotchShape(radius: cornerRadius, topRadius: state.notchTopRadius))
         .overlay(alignment: .top) { topStrip.opacity(state.stealthMode ? 0.4 : 1) }
@@ -467,24 +519,35 @@ struct ChatRootView: View {
                     .allowsHitTesting(false)
             }
         }
+        // Stealth is colorless: one desaturation pass turns every accent —
+        // send blue, permission amber, error red — to greyscale.
+        // 0.9999, not 1: at exactly 1 SwiftUI removes the saturation effect
+        // layer entirely, and on the stealth→normal transition that teardown
+        // leaves the AppKit-backed views (text field, menus) and some text
+        // unrendered until the panel is reopened. Keeping the effect active
+        // in both states sidesteps it; 0.9999 is visually identical to 1.
+        .saturation(state.stealthMode ? 0 : 0.9999)
         .onDrop(of: [UTType.fileURL], isTargeted: $state.dropTargeted) { providers in
             acceptDroppedFiles(providers)
         }
-        // Width is locked to the notch in stealth, so no side handles there.
-        .overlay(alignment: .leading) { if !state.stealthMode { sideResizeHandle(sign: -1) } }
-        .overlay(alignment: .trailing) { if !state.stealthMode { sideResizeHandle(sign: 1) } }
-        .overlay(alignment: .bottom) { bottomResizeHandle }
         // Reveal, not movement: the content is laid out in place and a
         // top-anchored mask wipes downward over it, so the panel appears to
-        // be uncovered rather than to slide. Stealth skips the wipe and
-        // fades in place instead — a layer over the UI, not an extension.
+        // be uncovered rather than to slide. Stealth folds out the same way.
         .mask {
             GeometryReader { geo in
                 NotchShape(radius: cornerRadius, topRadius: state.notchTopRadius)
-                    .frame(height: state.expanded || state.stealthMode ? geo.size.height : 0)
+                    .frame(height: state.expanded ? geo.size.height : 0)
             }
         }
-        .opacity(state.stealthMode && !state.expanded ? 0 : 1)
+        // Resize handles sit AFTER the mask so they aren't clipped to the panel
+        // shape — they intentionally straddle the visible edge, extending out
+        // into the window's transparent margin. Width is locked to the notch in
+        // stealth, so the side/corner handles only exist when not stealth.
+        .overlay(alignment: .leading) { if !state.stealthMode { sideResizeHandle(sign: -1) } }
+        .overlay(alignment: .trailing) { if !state.stealthMode { sideResizeHandle(sign: 1) } }
+        .overlay(alignment: .bottom) { bottomResizeHandle }
+        .overlay(alignment: .bottomLeading) { if !state.stealthMode { cornerResizeHandle(sign: -1) } }
+        .overlay(alignment: .bottomTrailing) { if !state.stealthMode { cornerResizeHandle(sign: 1) } }
         .padding(.horizontal, AppState.panelMargin)
         .padding(.bottom, AppState.panelBottomMargin)
         .preferredColorScheme(.dark)
@@ -510,26 +573,68 @@ struct ChatRootView: View {
         }
     }
 
-    // Solid black normally; near-black in stealth; in glass a clear pane —
-    // faint white sheen falling to a whisper of dark tint, with a hairline
-    // edge. The real blur behind it comes from the CGS window blur.
+    // Near-black in stealth; otherwise per panelStyle. Smoke is built from
+    // an NSVisualEffectView (real diffusion of what's behind the window,
+    // with Apple's saturation boost) under a smoked tint; the clear pane
+    // keeps the faint CGS window blur set in AppState.applyPanelBlur.
     @ViewBuilder private var panelBackdrop: some View {
         let shape = NotchShape(radius: cornerRadius, topRadius: state.notchTopRadius)
         if state.stealthMode {
-            shape.fill(Color(red: 0.01, green: 0.01, blue: 0.02).opacity(0.94))
-        } else if state.glassPanel {
-            shape
-                .fill(LinearGradient(
-                    stops: [
-                        .init(color: .white.opacity(0.05), location: 0),
-                        .init(color: .white.opacity(0.01), location: 0.25),
-                        .init(color: Color(red: 0.03, green: 0.03, blue: 0.05).opacity(0.12), location: 1),
-                    ],
-                    startPoint: .top, endPoint: .bottom))
-                .overlay(shape.stroke(Color.white.opacity(0.25), lineWidth: 1))
+            // Stealth honors only the clear material; smoke falls back to
+            // the near-black overlay. Neither draws a stroke — a lit rim
+            // would trace the panel's corners, which is exactly what
+            // stealth is hiding.
+            if state.panelStyle == .clear {
+                clearPane(shape)
+            } else {
+                shape.fill(Color(red: 0.01, green: 0.01, blue: 0.02).opacity(0.94))
+            }
         } else {
-            shape.fill(Color.black)
+            switch state.panelStyle {
+            case .black:
+                shape.fill(Color.black)
+            case .smoke:
+                smokeGlass(shape: shape)
+            case .clear:
+                clearPane(shape)
+                    .overlay(shape.stroke(Color.white.opacity(0.25), lineWidth: 1))
+            }
         }
+    }
+
+    private func clearPane(_ shape: NotchShape) -> some View {
+        shape.fill(LinearGradient(
+            stops: [
+                .init(color: .white.opacity(0.05), location: 0),
+                .init(color: .white.opacity(0.01), location: 0.25),
+                .init(color: Color(red: 0.03, green: 0.03, blue: 0.05).opacity(0.12), location: 1),
+            ],
+            startPoint: .top, endPoint: .bottom))
+    }
+
+    // Smoked liquid glass: a dark vibrancy backdrop diffuses what's behind
+    // the window under a smoked tint, with only dark edge shading for depth
+    // — no specular rim or corner glows, so the edges never catch light.
+    private func smokeGlass(shape: NotchShape) -> some View {
+        ZStack {
+            VisualEffectBackdrop(material: .hudWindow, appearance: .vibrantDark)
+            LinearGradient(
+                stops: [
+                    .init(color: Color(white: 0.30).opacity(0.10), location: 0),
+                    .init(color: .black.opacity(0.26), location: 0.5),
+                    .init(color: .black.opacity(0.40), location: 1),
+                ],
+                startPoint: .top, endPoint: .bottom)
+            // Depth: the pane darkens slightly toward its edges the way
+            // thick glass does.
+            shape.stroke(Color.black.opacity(0.20), style: StrokeStyle(lineWidth: 30))
+                .blur(radius: 20)
+            // The refraction line just inside the edge.
+            shape.stroke(Color.black.opacity(0.28), lineWidth: 1)
+                .padding(1.8)
+                .blur(radius: 0.6)
+        }
+        .allowsHitTesting(false)
     }
 
     // Edge-drag resizing. Width is symmetric (the panel stays centered on the
@@ -538,8 +643,11 @@ struct ChatRootView: View {
     // stable while the window frame changes mid-drag.
     private func sideResizeHandle(sign: CGFloat) -> some View {
         Color.clear
-            .frame(width: 10)
+            .frame(width: 12)
             .frame(maxHeight: .infinity)
+            // Center the handle on the visible edge: ~6pt over the panel, ~6pt
+            // out into the margin.
+            .offset(x: sign * 6)
             .contentShape(Rectangle())
             .onHover { hovering in
                 if hovering { NSCursor.resizeLeftRight.push() } else { NSCursor.pop() }
@@ -562,10 +670,51 @@ struct ChatRootView: View {
             )
     }
 
+    // Corner drag: width and height at once. Width stays symmetric like the
+    // side handles (panel is centered on the notch); height grows downward.
+    private func cornerResizeHandle(sign: CGFloat) -> some View {
+        Circle()
+            .fill(Color.clear)
+            .frame(width: 18, height: 18)
+            // Center the corner on the panel's bottom corner, straddling it.
+            .offset(x: sign * 6, y: 6)
+            .contentShape(Circle())
+            .onHover { hovering in
+                if hovering {
+                    // No true diagonal cursor in AppKit; the down-up arrow
+                    // reads best for a bottom corner.
+                    NSCursor.resizeUpDown.push()
+                } else {
+                    NSCursor.pop()
+                }
+            }
+            .gesture(
+                DragGesture(minimumDistance: 1)
+                    .onChanged { _ in
+                        let mouse = NSEvent.mouseLocation
+                        if state.resizeStart == nil {
+                            state.resizeStart = (mouse, NSSize(width: state.panelWidth, height: state.panelHeight))
+                        }
+                        guard let start = state.resizeStart else { return }
+                        let dx = (mouse.x - start.mouse.x) * sign
+                        let dy = start.mouse.y - mouse.y
+                        state.applyPanelResize(
+                            width: start.size.width + dx * 2,
+                            height: start.size.height + dy)
+                    }
+                    .onEnded { _ in
+                        state.resizeStart = nil
+                        state.persistPanelSize()
+                    }
+            )
+    }
+
     private var bottomResizeHandle: some View {
         Color.clear
-            .frame(height: 10)
+            .frame(height: 12)
             .frame(maxWidth: .infinity)
+            // Center on the visible bottom edge, straddling it.
+            .offset(y: 6)
             .contentShape(Rectangle())
             .onHover { hovering in
                 if hovering { NSCursor.resizeUpDown.push() } else { NSCursor.pop() }
@@ -610,7 +759,7 @@ struct ChatRootView: View {
     private var historyButton: some View {
         Button { state.showHistory.toggle() } label: {
             Image(systemName: "clock.arrow.circlepath")
-                .font(.system(size: 11, weight: .medium))
+                .font(.system(size: 11 * s, weight: .medium))
                 .foregroundStyle(.white.opacity(0.55))
         }
         .buttonStyle(.plain)
@@ -621,7 +770,7 @@ struct ChatRootView: View {
     }
 
     private var historyList: some View {
-        ScrollView {
+        ScrollView(showsIndicators: false) {
             VStack(alignment: .leading, spacing: 2) {
                 if session.pastChats.isEmpty {
                     Text("No past chats")
@@ -670,7 +819,7 @@ struct ChatRootView: View {
     private var pinButton: some View {
         Button { state.pinned.toggle() } label: {
             Image(systemName: state.pinned ? "pin.fill" : "pin")
-                .font(.system(size: 11, weight: .medium))
+                .font(.system(size: 11 * s, weight: .medium))
                 .foregroundStyle(state.pinned ? AnyShapeStyle(accent) : AnyShapeStyle(.white.opacity(0.55)))
         }
         .buttonStyle(.plain)
@@ -680,7 +829,7 @@ struct ChatRootView: View {
     private var settingsButton: some View {
         Button { state.openSettings() } label: {
             Image(systemName: "gearshape")
-                .font(.system(size: 11, weight: .medium))
+                .font(.system(size: 11 * s, weight: .medium))
                 .foregroundStyle(.white.opacity(0.55))
         }
         .buttonStyle(.plain)
@@ -690,7 +839,7 @@ struct ChatRootView: View {
     private var newChatButton: some View {
         Button(action: session.reset) {
             Image(systemName: "square.and.pencil")
-                .font(.system(size: 11, weight: .medium))
+                .font(.system(size: 11 * s, weight: .medium))
                 .foregroundStyle(.white.opacity(0.55))
         }
         .buttonStyle(.plain)
@@ -735,16 +884,17 @@ struct ChatRootView: View {
 
     private var messagesList: some View {
         ScrollViewReader { proxy in
-            ScrollView {
-                LazyVStack(alignment: .leading, spacing: 10) {
+            ScrollView(showsIndicators: false) {
+                LazyVStack(alignment: .leading, spacing: 10 * s) {
                     ForEach(displayItems) { item in
                         switch item {
                         case .message(let message):
-                            MessageBubble(message: message)
+                            MessageBubble(message: message, scale: s)
                                 .id(item.id)
                         case .steps(let run):
                             StepsGroup(
                                 steps: run,
+                                scale: s,
                                 expanded: state.expandedGroups.contains(item.id),
                                 toggle: {
                                     if state.expandedGroups.contains(item.id) {
@@ -761,7 +911,7 @@ struct ChatRootView: View {
                         HStack(spacing: 6) {
                             ProgressView().controlSize(.small)
                             Text(currentActivity)
-                                .font(.system(size: 11))
+                                .font(.system(size: 11 * s))
                                 .foregroundStyle(.white.opacity(0.5))
                                 .lineLimit(1)
                                 .truncationMode(.middle)
@@ -770,7 +920,7 @@ struct ChatRootView: View {
                     }
                     Color.clear.frame(height: 1).id("bottom")
                 }
-                .padding(12)
+                .padding(12 * s)
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
             .onChange(of: session.messages) { _ in
@@ -809,14 +959,14 @@ struct ChatRootView: View {
     private var emptyState: some View {
         VStack(spacing: 6) {
             Image(systemName: "sparkle")
-                .font(.system(size: 16))
+                .font(.system(size: 16 * s))
                 .foregroundStyle(.white.opacity(0.3))
                 .padding(.bottom, 2)
             Text("Ask anything.")
-                .font(.system(size: 12.5))
+                .font(.system(size: 12.5 * s))
                 .foregroundStyle(.white.opacity(0.55))
             Text("⌥Space toggle · Esc close")
-                .font(.system(size: 10))
+                .font(.system(size: 10 * s))
                 .foregroundStyle(.white.opacity(0.3))
         }
     }
@@ -831,25 +981,33 @@ struct ChatRootView: View {
                 standardComposer
             }
         }
-        .padding(.horizontal, 10)
-        .padding(.top, 9)
-        .padding(.bottom, 7)
+        .padding(.horizontal, 11 * s)
+        .padding(.top, 9 * s)
+        .padding(.bottom, 8 * s)
         .background(
-            RoundedRectangle(cornerRadius: 16)
-                .fill(session.pendingPermission != nil
-                      ? AnyShapeStyle(amber.opacity(0.06))
-                      : AnyShapeStyle(Color.white.opacity(0.08)))
+            // A slight dark scrim under the usual tint keeps the composer
+            // legible while messages slide beneath it, without giving up
+            // the see-through look.
+            RoundedRectangle(cornerRadius: 16 * s)
+                .fill(Color.black.opacity(0.3))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 16 * s)
+                        .fill(session.pendingPermission != nil
+                              ? AnyShapeStyle(amber.opacity(0.06))
+                              : AnyShapeStyle(Color.white.opacity(0.08)))
+                )
         )
         .overlay {
             // Amber while an approval is pending or a mode that skips
             // permission prompts is active.
             if session.pendingPermission != nil || currentMode.dangerous {
-                RoundedRectangle(cornerRadius: 16)
+                RoundedRectangle(cornerRadius: 16 * s)
                     .strokeBorder(Color.orange.opacity(0.45), lineWidth: 1)
             }
         }
-        .padding(.horizontal, 10)
-        .padding(.bottom, 10)
+        .padding(.horizontal, 10 * s)
+        .padding(.top, 4 * s)
+        .padding(.bottom, 8 * s)
     }
 
     private var standardComposer: some View {
@@ -860,7 +1018,7 @@ struct ChatRootView: View {
             TextField("Ask anything…", text: $session.draft, axis: .vertical)
                 .textFieldStyle(.plain)
                 .lineLimit(1...4)
-                .font(.system(size: 13))
+                .font(.system(size: 13 * s))
                 .foregroundStyle(.white)
                 .tint(accent)
                 .focused($inputFocused)
@@ -881,7 +1039,7 @@ struct ChatRootView: View {
     private var stealthEyeButton: some View {
         Button { state.toggleStealth() } label: {
             Image(systemName: state.stealthMode ? "eye" : "eye.slash")
-                .font(.system(size: 11, weight: .medium))
+                .font(.system(size: 11 * s, weight: .medium))
                 .foregroundStyle(.white.opacity(0.55))
         }
         .buttonStyle(.plain)
@@ -896,17 +1054,17 @@ struct ChatRootView: View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 6) {
                 Image(systemName: "shield.fill")
-                    .font(.system(size: 11))
+                    .font(.system(size: 11 * s))
                     .foregroundStyle(amber)
                 Text(request.title)
-                    .font(.system(size: 12, weight: .semibold))
+                    .font(.system(size: 12 * s, weight: .semibold))
                     .foregroundStyle(Color(red: 240/255, green: 224/255, blue: 192/255))
                     .lineLimit(1)
                     .truncationMode(.tail)
             }
             if !request.detail.isEmpty {
                 Text(request.detail)
-                    .font(.system(size: 11, design: .monospaced))
+                    .font(.system(size: 11 * s, design: .monospaced))
                     .foregroundStyle(.white.opacity(0.85))
                     .lineLimit(3)
                     .truncationMode(.middle)
@@ -920,7 +1078,7 @@ struct ChatRootView: View {
                     session.respondPermission(.deny)
                 } label: {
                     Text("Deny")
-                        .font(.system(size: 11.5, weight: .semibold))
+                        .font(.system(size: 11.5 * s, weight: .semibold))
                         .foregroundStyle(Color(red: 224/255, green: 122/255, blue: 106/255))
                         .padding(.vertical, 5)
                         .padding(.horizontal, 8)
@@ -933,7 +1091,7 @@ struct ChatRootView: View {
                         session.respondPermission(.always)
                     } label: {
                         Text("Always")
-                            .font(.system(size: 11.5, weight: .semibold))
+                            .font(.system(size: 11.5 * s, weight: .semibold))
                             .foregroundStyle(.white.opacity(0.85))
                             .padding(.vertical, 5)
                             .padding(.horizontal, 11)
@@ -947,9 +1105,9 @@ struct ChatRootView: View {
                     HStack(spacing: 4) {
                         Text("Allow")
                         Image(systemName: "return")
-                            .font(.system(size: 9, weight: .bold))
+                            .font(.system(size: 9 * s, weight: .bold))
                     }
-                    .font(.system(size: 11.5, weight: .semibold))
+                    .font(.system(size: 11.5 * s, weight: .semibold))
                     .foregroundStyle(.black)
                     .padding(.vertical, 5)
                     .padding(.horizontal, 11)
@@ -980,7 +1138,7 @@ struct ChatRootView: View {
             // history above it. Header and answer field stay pinned.
             ViewThatFits(in: .vertical) {
                 questionBody(question)
-                ScrollView { questionBody(question) }.frame(maxHeight: 260)
+                ScrollView(showsIndicators: false) { questionBody(question) }.frame(maxHeight: 260)
             }
             questionFooter(question)
         }
@@ -1001,7 +1159,7 @@ struct ChatRootView: View {
     private func questionBody(_ question: AgentQuestion) -> some View {
         VStack(alignment: .leading, spacing: 8) {
             Text(question.question)
-                .font(.system(size: 12.5))
+                .font(.system(size: 12.5 * s))
                 .foregroundStyle(.white.opacity(0.9))
                 .fixedSize(horizontal: false, vertical: true)
             VStack(spacing: 2) {
@@ -1015,16 +1173,16 @@ struct ChatRootView: View {
     private func questionHeader(_ request: QuestionRequest, _ question: AgentQuestion) -> some View {
         HStack(spacing: 6) {
             Image(systemName: "questionmark.circle.fill")
-                .font(.system(size: 11))
+                .font(.system(size: 11 * s))
                 .foregroundStyle(accent)
             Text(question.header)
-                .font(.system(size: 10, weight: .semibold))
+                .font(.system(size: 10 * s, weight: .semibold))
                 .foregroundStyle(.white.opacity(0.5))
                 .textCase(.uppercase)
             Spacer()
             if request.questions.count > 1 {
                 Text("\(request.index + 1) of \(request.questions.count)")
-                    .font(.system(size: 10))
+                    .font(.system(size: 10 * s))
                     .foregroundStyle(.white.opacity(0.35))
             }
         }
@@ -1046,16 +1204,16 @@ struct ChatRootView: View {
         } label: {
             HStack(alignment: .top, spacing: 8) {
                 Image(systemName: icon)
-                    .font(.system(size: 11))
+                    .font(.system(size: 11 * s))
                     .foregroundStyle(selected ? AnyShapeStyle(accent) : AnyShapeStyle(.white.opacity(0.4)))
                     .padding(.top, 1)
                 VStack(alignment: .leading, spacing: 1) {
                     Text(option.label)
-                        .font(.system(size: 12))
+                        .font(.system(size: 12 * s))
                         .foregroundStyle(.white.opacity(0.88))
                     if !option.description.isEmpty {
                         Text(option.description)
-                            .font(.system(size: 10))
+                            .font(.system(size: 10 * s))
                             .foregroundStyle(.white.opacity(0.42))
                             .fixedSize(horizontal: false, vertical: true)
                     }
@@ -1073,7 +1231,7 @@ struct ChatRootView: View {
         HStack(spacing: 6) {
             TextField("Something else…", text: $session.questionDraft)
                 .textFieldStyle(.plain)
-                .font(.system(size: 11.5))
+                .font(.system(size: 11.5 * s))
                 .foregroundStyle(.white)
                 .tint(accent)
                 .onSubmit {
@@ -1090,7 +1248,7 @@ struct ChatRootView: View {
                     session.answerQuestion(parts.joined(separator: ", "))
                 } label: {
                     Text("Answer")
-                        .font(.system(size: 11.5, weight: .semibold))
+                        .font(.system(size: 11.5 * s, weight: .semibold))
                         .foregroundStyle(.black)
                         .padding(.vertical, 4)
                         .padding(.horizontal, 10)
@@ -1109,15 +1267,15 @@ struct ChatRootView: View {
                 ForEach(Array(session.attachments.enumerated()), id: \.offset) { index, url in
                     HStack(spacing: 4) {
                         Image(systemName: "doc.fill")
-                            .font(.system(size: 9))
+                            .font(.system(size: 9 * s))
                         Text(url.lastPathComponent)
-                            .font(.system(size: 10.5))
+                            .font(.system(size: 10.5 * s))
                             .lineLimit(1)
                         Button {
                             session.attachments.remove(at: index)
                         } label: {
                             Image(systemName: "xmark.circle.fill")
-                                .font(.system(size: 10))
+                                .font(.system(size: 10 * s))
                                 .foregroundStyle(.white.opacity(0.5))
                         }
                         .buttonStyle(.plain)
@@ -1139,7 +1297,7 @@ struct ChatRootView: View {
             Button("Screenshot: Active App Window") { captureScreenshot(activeWindowOnly: true) }
         } label: {
             Image(systemName: "paperclip")
-                .font(.system(size: 12))
+                .font(.system(size: 12 * s))
                 .foregroundStyle(.white.opacity(0.6))
         }
         .menuStyle(.button)
@@ -1318,18 +1476,18 @@ struct ChatRootView: View {
     private func pill(_ text: String, icon: String? = nil) -> some View {
         HStack(spacing: 4) {
             if let icon {
-                Image(systemName: icon).font(.system(size: 9))
+                Image(systemName: icon).font(.system(size: 9 * s))
             }
             Text(text)
-                .font(.system(size: 11, weight: .medium))
+                .font(.system(size: 11 * s, weight: .medium))
                 .lineLimit(1)
             Image(systemName: "chevron.down")
-                .font(.system(size: 7, weight: .semibold))
+                .font(.system(size: 7 * s, weight: .semibold))
                 .opacity(0.6)
         }
         .foregroundStyle(.white.opacity(0.85))
-        .padding(.horizontal, 9)
-        .padding(.vertical, 4)
+        .padding(.horizontal, 9 * s)
+        .padding(.vertical, 4 * s)
         .background(Capsule().fill(Color.white.opacity(0.1)))
     }
 
@@ -1338,7 +1496,7 @@ struct ChatRootView: View {
         if session.isRunning {
             Button(action: session.cancel) {
                 Image(systemName: "stop.circle.fill")
-                    .font(.system(size: 20))
+                    .font(.system(size: 20 * s))
                     .foregroundStyle(.white.opacity(0.8))
             }
             .buttonStyle(.plain)
@@ -1346,7 +1504,7 @@ struct ChatRootView: View {
         } else {
             Button(action: sendDraft) {
                 Image(systemName: "arrow.up.circle.fill")
-                    .font(.system(size: 20))
+                    .font(.system(size: 20 * s))
                     .foregroundStyle(session.draft.isEmpty
                         ? AnyShapeStyle(.white.opacity(0.25))
                         : AnyShapeStyle(accent))
@@ -1386,6 +1544,7 @@ struct ChatRootView: View {
 // Collapsed run of tool activity: "N steps" row that expands in place.
 struct StepsGroup: View {
     let steps: [ChatMessage]
+    var scale: CGFloat = 1
     let expanded: Bool
     let toggle: () -> Void
 
@@ -1394,9 +1553,9 @@ struct StepsGroup: View {
             Button(action: toggle) {
                 HStack(spacing: 5) {
                     Image(systemName: expanded ? "chevron.down" : "chevron.right")
-                        .font(.system(size: 8, weight: .semibold))
+                        .font(.system(size: 8 * scale, weight: .semibold))
                     Text("\(steps.count) step\(steps.count == 1 ? "" : "s")")
-                        .font(.system(size: 11))
+                        .font(.system(size: 11 * scale))
                 }
                 .foregroundStyle(.white.opacity(0.45))
                 .contentShape(Rectangle())
@@ -1405,10 +1564,10 @@ struct StepsGroup: View {
             if expanded {
                 VStack(alignment: .leading, spacing: 6) {
                     ForEach(steps) { step in
-                        MessageBubble(message: step)
+                        MessageBubble(message: step, scale: scale)
                     }
                 }
-                .padding(.leading, 14)
+                .padding(.leading, 14 * scale)
             }
         }
     }
@@ -1416,6 +1575,7 @@ struct StepsGroup: View {
 
 struct MessageBubble: View {
     let message: ChatMessage
+    var scale: CGFloat = 1
 
     var body: some View {
         switch message.role {
@@ -1423,38 +1583,38 @@ struct MessageBubble: View {
             HStack {
                 Spacer(minLength: 40)
                 Text(message.text)
-                    .font(.system(size: 13))
+                    .font(.system(size: 13 * scale))
                     .foregroundStyle(.white)
                     .textSelection(.enabled)
-                    .padding(.horizontal, 11)
-                    .padding(.vertical, 7)
-                    .background(RoundedRectangle(cornerRadius: 15).fill(Color.white.opacity(0.14)))
+                    .padding(.horizontal, 11 * scale)
+                    .padding(.vertical, 7 * scale)
+                    .background(RoundedRectangle(cornerRadius: 15 * scale).fill(Color.white.opacity(0.14)))
             }
         case .assistant:
             Text(MathText.render(message.text))
-                .font(.system(size: 13))
+                .font(.system(size: 13 * scale))
                 .foregroundStyle(.white.opacity(0.92))
                 .textSelection(.enabled)
                 .frame(maxWidth: .infinity, alignment: .leading)
         case .tool:
             HStack(spacing: 5) {
                 Image(systemName: message.icon ?? "wrench.fill")
-                    .font(.system(size: 9))
-                    .frame(width: 12)
+                    .font(.system(size: 9 * scale))
+                    .frame(width: 12 * scale)
                 Text(message.text)
-                    .font(.system(size: 11))
+                    .font(.system(size: 11 * scale))
                     .lineLimit(1)
                     .truncationMode(.middle)
             }
             .foregroundStyle(.white.opacity(0.45))
         case .error:
             Text(message.text)
-                .font(.system(size: 12, design: .monospaced))
+                .font(.system(size: 12 * scale, design: .monospaced))
                 .foregroundStyle(Color(red: 1, green: 0.45, blue: 0.45))
                 .textSelection(.enabled)
-                .padding(.horizontal, 10)
-                .padding(.vertical, 7)
-                .background(RoundedRectangle(cornerRadius: 12).fill(Color(red: 1, green: 0.3, blue: 0.3).opacity(0.12)))
+                .padding(.horizontal, 10 * scale)
+                .padding(.vertical, 7 * scale)
+                .background(RoundedRectangle(cornerRadius: 12 * scale).fill(Color(red: 1, green: 0.3, blue: 0.3).opacity(0.12)))
         }
     }
 }
@@ -1469,7 +1629,15 @@ struct SettingsView: View {
         switch state.notchStyle {
         case .standard: return "Live activity text and buttons around the notch"
         case .compact: return "A hairline sliver under the notch — color shows what's happening"
-        case .stealth: return "Silent while working; dim notch-width panel, composer on click"
+        case .stealth: return "Silent while working; dim notch-width panel — Clear material makes it glass"
+        }
+    }
+
+    private var materialCaption: String {
+        switch state.panelStyle {
+        case .black: return "Solid black — the panel hides what's behind it"
+        case .smoke: return "Dark liquid glass — smoked blur of what's behind"
+        case .clear: return "Clear pane — the panel shows what's behind it"
         }
     }
 
@@ -1520,14 +1688,18 @@ struct SettingsView: View {
                     .font(.system(size: 10.5)).foregroundStyle(.secondary)
             }
 
-            Toggle(isOn: $state.glassPanel) {
-                VStack(alignment: .leading, spacing: 1) {
-                    Text("Glass panel").font(.system(size: 12.5))
-                    Text("Clear pane — the panel shows what's behind it")
-                        .font(.system(size: 10.5)).foregroundStyle(.secondary)
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Panel material").font(.system(size: 12.5))
+                Picker("Panel material", selection: $state.panelStyle) {
+                    Text("Black").tag(AppState.PanelStyle.black)
+                    Text("Smoke").tag(AppState.PanelStyle.smoke)
+                    Text("Clear").tag(AppState.PanelStyle.clear)
                 }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                Text(materialCaption)
+                    .font(.system(size: 10.5)).foregroundStyle(.secondary)
             }
-            .toggleStyle(.switch)
 
             Divider()
 

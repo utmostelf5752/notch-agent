@@ -7,7 +7,11 @@
 <meta name="description" content="Hover the notch or press Option+Space and a chat panel drops out of the camera housing. Talk to Claude Code, Codex, Cursor, or ChatGPT without leaving what you're doing.">
 <meta property="og:title" content="NotchAgent">
 <meta property="og:description" content="A coding agent living in your Mac's notch. Claude, Codex, Cursor, ChatGPT.">
-<link rel="icon" type="image/png" href="icon.png">
+<meta property="og:image" content="icon.png">
+<meta name="twitter:card" content="summary">
+<meta name="twitter:image" content="icon.png">
+<link rel="icon" type="image/png" sizes="256x256" href="icon.png">
+<link rel="apple-touch-icon" href="apple-touch-icon.png">
 <style>
 :root {
   --bg: #0a0a0c;
@@ -52,10 +56,16 @@ code { font-family: var(--mono); font-size: 0.85em; }
 .topbar {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 12px;
   padding-top: 28px;
 }
-.topbar img { width: 24px; height: 24px; border-radius: 6px; }
+.topbar img {
+  width: 30px;
+  height: 30px;
+  border-radius: 8px;
+  border: 1px solid rgba(255,255,255,0.1);
+  box-shadow: 0 0 18px rgba(10,132,255,0.08);
+}
 .topbar .name { font-weight: 650; font-size: 15px; letter-spacing: -0.01em; }
 .topbar .gh {
   margin-left: auto;
@@ -126,14 +136,8 @@ h1 .grad {
   position: relative;
   width: 520px;
   height: 420px;
-  border-radius: 18px;
-  border: 1px solid rgba(255,255,255,0.12);
   overflow: hidden;
-  background:
-    radial-gradient(360px 260px at 15% 110%, rgba(201,139,255,0.09), transparent 68%),
-    radial-gradient(390px 280px at 88% 105%, rgba(255,157,110,0.07), transparent 70%),
-    linear-gradient(180deg, #151518 0%, #0d0d0f 100%);
-  box-shadow: 0 40px 100px -30px rgba(0,0,0,0.9);
+  background: transparent;
   user-select: none;
   font-family: var(--sans);
 }
@@ -153,9 +157,8 @@ h1 .grad {
 }
 .d-menubar .l, .d-menubar .r { display: flex; gap: 12px; align-items: center; }
 .d-menubar .appname { font-weight: 600; color: var(--ink); }
-.d-menubar .spark { color: rgba(255,255,255,0.85); }
-.d-menubar .spark.busy { color: var(--spark-a); animation: sparkle 1s ease-in-out infinite; }
-@keyframes sparkle { 0%,100% { opacity: 1; } 50% { opacity: 0.3; } }
+.d-menubar .status-mark { width: 18px; height: 18px; display: inline-flex; align-items: center; opacity: 0.78; }
+.d-menubar .status-mark img { width: 18px; height: 18px; display: block; object-fit: contain; }
 .d-notch {
   position: absolute;
   top: 0; left: 50%;
@@ -204,17 +207,17 @@ h1 .grad {
 .d-strip { height: 42px; position: relative; flex: none; }
 .d-icon {
   position: absolute;
-  top: 15px;
-  width: 15px; height: 15px;
-  color: rgba(255,255,255,0.57);
+  top: 13px;
+  width: 18px; height: 18px;
+  color: rgba(255,255,255,0.66);
   background: currentColor;
   -webkit-mask: var(--icon) center / contain no-repeat;
           mask: var(--icon) center / contain no-repeat;
 }
-.d-icon.clock  { --icon: url("icons/clock-counter-clockwise-light.svg"); left: 12px; }
-.d-icon.gear   { --icon: url("icons/gear-six-light.svg"); left: 45px; }
-.d-icon.pin    { --icon: url("icons/push-pin-simple.svg"); right: 45px; transition: color 0.15s, transform 0.15s; }
-.d-icon.pencil { --icon: url("icons/note-pencil-light.svg"); right: 12px; }
+.d-icon.clock  { --icon: url("icons/history.svg"); left: 13px; }
+.d-icon.gear   { --icon: url("icons/settings.svg"); left: 48px; }
+.d-icon.pin    { --icon: url("icons/pin.svg"); right: 48px; transition: color 0.15s, transform 0.15s; }
+.d-icon.pencil { --icon: url("icons/edit.svg"); right: 13px; }
 .frame.pinned .d-icon.pin { color: var(--accent); }
 
 /* chat area */
@@ -496,7 +499,12 @@ footer .inner {
 footer a { color: var(--ink-dim); text-decoration: none; }
 footer a:hover { color: var(--ink); }
 footer .fbrand { display: flex; align-items: center; gap: 8px; }
-footer .fbrand img { width: 18px; height: 18px; border-radius: 4px; }
+footer .fbrand img {
+  width: 22px;
+  height: 22px;
+  border-radius: 6px;
+  border: 1px solid rgba(255,255,255,0.08);
+}
 
 /* ---------- responsive ---------- */
 @media (max-width: 940px) {
@@ -506,7 +514,7 @@ footer .fbrand img { width: 18px; height: 18px; border-radius: 4px; }
 @media (prefers-reduced-motion: reduce) {
   .d-cursor, .d-ring { display: none; }
   .d-panel { transition: none; }
-  .d-caret, .d-menubar .spark.busy, .d-spin .ring { animation: none; }
+  .d-caret, .d-spin .ring { animation: none; }
 }
 </style>
 </head>
@@ -534,7 +542,7 @@ footer .fbrand img { width: 18px; height: 18px; border-radius: 4px; }
         <div class="frame" id="frame">
           <div class="d-menubar" aria-hidden="true">
             <div class="l"><span>&#63743;</span><span class="appname">NotchAgent</span></div>
-            <div class="r"><span class="spark" id="spark">&#10022;</span><span>9:41</span></div>
+            <div class="r"><span class="status-mark"><img src="menu-bar-icon.png" alt=""></span><span>9:41</span></div>
           </div>
           <div class="d-notch" aria-hidden="true"></div>
 
@@ -650,7 +658,7 @@ footer .fbrand img { width: 18px; height: 18px; border-radius: 4px; }
 (() => {
   const $ = id => document.getElementById(id);
   const frame = $('frame'), chat = $('chat'), input = $('input'), cursor = $('cursor'),
-        ring = $('ring'), spark = $('spark'), caption = $('caption'), send = $('send');
+        ring = $('ring'), caption = $('caption'), send = $('send');
 
   const QUESTION = 'why is test_auth_flow failing?';
   const REPLY = 'The token fixture expires at <code>t+0</code> — <code>session.py</code> now refreshes 30s early, so the mock is already stale. Bumping the TTL to 60s fixes the suite.';
@@ -727,7 +735,6 @@ footer .fbrand img { width: 18px; height: 18px; border-radius: 4px; }
     frame.classList.toggle('pinned', i >= 5);
     $('pop-model').classList.remove('show');
     $('pop-history').classList.remove('show');
-    spark.classList.remove('busy');
     send.classList.remove('ready');
     $('pill-session').innerHTML = (i >= 6 ? 'ChatGPT' : 'Sonnet 5 &middot; High') +
       ' <svg viewBox="0 0 8 8" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M1 2.5l3 3 3-3"/></svg>';
@@ -760,7 +767,6 @@ footer .fbrand img { width: 18px; height: 18px; border-radius: 4px; }
         send.classList.remove('ready');
         input.innerHTML = PH;
         chat.innerHTML = userBubble + spinRow('Waiting for response');
-        spark.classList.add('busy');
         await sleep(650, g);
         // tool lines render live while the turn runs
         let lines = '';
@@ -778,7 +784,6 @@ footer .fbrand img { width: 18px; height: 18px; border-radius: 4px; }
             `<div class="d-msg-agent">${words.slice(0, i).join(' ')}</div>`;
           await sleep(55, g);
         }
-        spark.classList.remove('busy');
         await sleep(600, g);
       } },
     { cap: "Click anywhere else — it's gone.",

@@ -56,16 +56,13 @@ final class AppState: ObservableObject {
 
     // What the expanded panel is made of.
     //   black — solid, the original look.
-    //   smoke — dark liquid glass: an NSVisualEffectView diffuses what's
+    //   smoke — dark frosted glass: an NSVisualEffectView diffuses what's
     //           behind the window under a smoked tint.
     //   clear — a genuinely clear pane: the faint CGS blur and near-no tint.
-    // Smoke uses NSVisualEffectView rather than the CGS blur because the
-    // CGS radius applies to the window's whole rectangle — at liquid-glass
-    // strengths the transparent margins around the panel show as a blurred
-    // band, and the region lags the reveal/resize animations. The effect
-    // view is an ordinary layer, so it clips and animates with the panel
-    // shape. Stealth honors only the clear pane (drawn without its rim
-    // there); smoke falls back to the near-black overlay.
+    // Smoke uses NSVisualEffectView rather than the CGS blur because the CGS
+    // radius applies to the window's whole rectangle and lags reveal/resize
+    // animations. Stealth honors only the clear pane (drawn without its rim
+    // there); smoke falls back to the near-black overlay in stealth.
     enum PanelStyle: String, CaseIterable { case black, smoke, clear }
 
     @Published var panelStyle: PanelStyle {
@@ -130,6 +127,11 @@ final class AppState: ObservableObject {
 
     private var notchWatchTimer: Timer?
 
+    // Display the notch/panel are currently anchored to. Updated when screens
+    // rearrange or the cursor moves onto a different notched display.
+    private var anchoredDisplayID: CGDirectDisplayID?
+    private var screenObserver: NSObjectProtocol?
+
     // Background mode: while the panel is collapsed and a turn is in flight
     // (or waiting on the user), the notch itself grows to show status. The
     // clock ticks the elapsed-time label; the subscriptions resize the target
@@ -180,11 +182,68 @@ final class AppState: ObservableObject {
     static let panelMargin: CGFloat = 14
     static let panelBottomMargin: CGFloat = 30
 
-    private var screen: NSScreen {
-        NSScreen.screens.first { $0.safeAreaInsets.top > 0 } ?? NSScreen.main ?? NSScreen.screens[0]
-    }
+    private var screen: NSScreen { resolveScreen() }
 
     var hasNotch: Bool { screen.safeAreaInsets.top > 0 }
+
+    // Prefer a notched screen under the cursor, then the previously anchored
+    // notched screen (if it still exists), then any notched screen, then the
+    // screen under the cursor / main. External-only setups get a fake tab.
+    private func resolveScreen() -> NSScreen {
+        let screens = NSScreen.screens
+        precondition(!screens.isEmpty, "NSScreen.screens is empty")
+        let mouse = NSEvent.mouseLocation
+        let notched = screens.filter { $0.safeAreaInsets.top > 0 }
+
+        if let hit = notched.first(where: { $0.frame.contains(mouse) }) {
+            return hit
+        }
+        if let id = anchoredDisplayID,
+           let kept = notched.first(where: { $0.displayID == id }) {
+            return kept
+        }
+        if let first = notched.first { return first }
+        return screens.first(where: { $0.frame.contains(mouse) })
+            ?? NSScreen.main
+            ?? screens[0]
+    }
+
+    // Reposition when displays are added/removed/rearranged, and when the
+    // cursor moves onto a different notched screen.
+    func installScreenObservers() {
+        if screenObserver == nil {
+            screenObserver = NotificationCenter.default.addObserver(
+                forName: NSApplication.didChangeScreenParametersNotification,
+                object: nil,
+                queue: .main
+            ) { [weak self] _ in
+                self?.repositionForActiveScreen(force: true)
+            }
+        }
+        repositionForActiveScreen(force: true)
+    }
+
+    private func repositionForActiveScreen(force: Bool) {
+        let next = resolveScreen()
+        let nextID = next.displayID
+        guard force || anchoredDisplayID != nextID else { return }
+        anchoredDisplayID = nextID
+
+        // Clamp a persisted size that no longer fits the new display.
+        if let w = panelWidthOverride {
+            panelWidthOverride = min(max(w, minPanelWidth), maxPanelWidth)
+        }
+        if let h = panelHeightOverride {
+            panelHeightOverride = min(max(h, minPanelHeight), maxPanelHeight)
+        }
+
+        syncNotchFrame(animated: false)
+        if expanded {
+            chatPanel?.setFrame(expandedFrame, display: true)
+            applyPanelBlur()
+        }
+        NSLog("NotchAgent: repositioned for display \(nextID) frame=\(NSStringFromRect(next.frame))")
+    }
 
     private var notchSize: NSSize {
         let s = screen
@@ -227,17 +286,20 @@ final class AppState: ObservableObject {
 
     // The open panel's top-edge close target: the camera-cutout-width gap along
     // the top strip, between the left (history/settings) and right (pin/new)
-    // icon clusters. Extended above the screen top by activationTopOvershoot so
-    // the pinned top row (y == maxY) counts as inside — same reason as
-    // activationFrame's overshoot.
+    // icon clusters. Only the last couple of pixels before the screen edge —
+    // the cursor must be shoved all the way to the top, so merely sitting
+    // inside the notch doesn't close the panel. Extended above the screen top
+    // by activationTopOvershoot so the pinned top row (y == maxY) counts as
+    // inside — same reason as activationFrame's overshoot.
     var topCloseZone: NSRect {
         guard let frame = chatPanel?.frame else { return .zero }
         let width = notchWidth
+        let edgeDepth: CGFloat = 2
         return NSRect(
             x: frame.midX - width / 2,
-            y: frame.maxY - notchHeight,
+            y: frame.maxY - edgeDepth,
             width: width,
-            height: notchHeight + activationTopOvershoot
+            height: edgeDepth + activationTopOvershoot
         )
     }
 
@@ -576,6 +638,10 @@ final class AppState: ObservableObject {
             guard let self, self.targetWindow != nil else { return }
             let mouse = NSEvent.mouseLocation
 
+            // Follow the cursor onto another notched display (or recover after
+            // a screen arrangement change the notification missed).
+            self.repositionForActiveScreen(force: false)
+
             // While open: pushing into the top-edge gap between the icons closes
             // the panel. Only after the cursor has left that zone at least once
             // since opening (topCloseArmed) — otherwise a hover-expand, which
@@ -613,5 +679,12 @@ final class AppState: ObservableObject {
                 }
             }
         }
+    }
+}
+
+private extension NSScreen {
+    var displayID: CGDirectDisplayID {
+        let key = NSDeviceDescriptionKey("NSScreenNumber")
+        return (deviceDescription[key] as? NSNumber)?.uint32Value ?? 0
     }
 }

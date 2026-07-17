@@ -37,6 +37,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         installSignalTriggers()
         state.startNotchWatch()
         state.installOutsideClickMonitors()
+        state.installScreenObservers()
         state.startBackgroundObservers()
         state.logGeometry()
     }
@@ -69,7 +70,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     // Debug hooks: `kill -USR1 <pid>` toggles the panel. `kill -USR2 <pid>`
     // executes commands from /tmp/notchagent-cmd (one per line):
-    //   provider:<claude|codex|chatgpt>   switch provider
+    //   provider:<claude|codex|cursor|chatgpt>   switch provider
     //   send:<text>                       send a message
     //   msgs                              write transcript to /tmp/notchagent-msgs.txt
     //   dump                              write ChatGPT web view state to /tmp/notchagent-dom.txt

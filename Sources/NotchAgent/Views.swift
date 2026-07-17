@@ -66,7 +66,7 @@ struct NotchShape: Shape {
     }
 }
 
-// The diffusion layer of the liquid-glass materials: a behind-window
+// The diffusion layer of the frosted materials: a behind-window
 // NSVisualEffectView. Unlike the CGS window blur (a radius on the whole
 // window rectangle), this is an ordinary layer — it clips to the panel
 // shape, tracks resizes, and rides the reveal mask like any other view,
@@ -476,107 +476,107 @@ struct ChatRootView: View {
     private var s: CGFloat { state.stealthMode ? 0.85 : 1 }
 
     var body: some View {
-        VStack(spacing: 0) {
-            Color.clear.frame(height: state.notchHeight + 2)
-            messagesList
-                // The composer floats over the chat: its translucent box
-                // lets messages show through as they scroll underneath, and
-                // the safe-area inset stops the scroll's end above it so the
-                // last message is never trapped behind the box.
-                .safeAreaInset(edge: .bottom, spacing: 0) {
-                    VStack(spacing: 0) {
-                        questionSheet
-                        // A pending approval overrides the stealth hide —
-                        // the composer is where the Deny/Allow buttons live.
-                        if !state.stealthMode || state.stealthComposerOpen || session.pendingPermission != nil {
-                            composer
+        Group {
+            VStack(spacing: 0) {
+                Color.clear.frame(height: state.notchHeight + 2)
+                messagesList
+                    // The composer floats over the chat: its translucent box
+                    // lets messages show through as they scroll underneath, and
+                    // the safe-area inset stops the scroll's end above it so the
+                    // last message is never trapped behind the box.
+                    .safeAreaInset(edge: .bottom, spacing: 0) {
+                        VStack(spacing: 0) {
+                            questionSheet
+                            // A pending approval overrides the stealth hide —
+                            // the composer is where the Deny/Allow buttons live.
+                            if !state.stealthMode || state.stealthComposerOpen || session.pendingPermission != nil {
+                                composer
+                            }
                         }
                     }
+            }
+            .animation(.easeOut(duration: 0.2), value: state.stealthComposerOpen)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            // Only stealth dims: translucent glyphs that let what's behind the
+            // pane show through them. Every normal mode keeps content at full
+            // strength, whatever the material.
+            .opacity(state.stealthMode ? 0.45 : 1)
+            .background(panelBackdrop)
+            .clipShape(NotchShape(radius: cornerRadius, topRadius: state.notchTopRadius))
+            .overlay(alignment: .top) { topStrip.opacity(state.stealthMode ? 0.4 : 1) }
+            .overlay {
+                if state.dropTargeted {
+                    NotchShape(radius: cornerRadius, topRadius: state.notchTopRadius)
+                        .fill(Color.white.opacity(0.06))
+                        .overlay {
+                            VStack(spacing: 6) {
+                                Image(systemName: "paperclip")
+                                    .font(.system(size: 18))
+                                Text("Drop to attach")
+                                    .font(.system(size: 12, weight: .medium))
+                            }
+                            .foregroundStyle(.white.opacity(0.7))
+                        }
+                        .allowsHitTesting(false)
                 }
-        }
-        .animation(.easeOut(duration: 0.2), value: state.stealthComposerOpen)
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        // Only stealth dims: translucent glyphs that let what's behind the
-        // pane show through them. Every normal mode keeps content at full
-        // strength, whatever the material.
-        .opacity(state.stealthMode ? 0.45 : 1)
-        .background(panelBackdrop)
-        .clipShape(NotchShape(radius: cornerRadius, topRadius: state.notchTopRadius))
-        .overlay(alignment: .top) { topStrip.opacity(state.stealthMode ? 0.4 : 1) }
-        .overlay {
-            if state.dropTargeted {
-                NotchShape(radius: cornerRadius, topRadius: state.notchTopRadius)
-                    .fill(Color.white.opacity(0.06))
-                    .overlay {
-                        VStack(spacing: 6) {
-                            Image(systemName: "paperclip")
-                                .font(.system(size: 18))
-                            Text("Drop to attach")
-                                .font(.system(size: 12, weight: .medium))
-                        }
-                        .foregroundStyle(.white.opacity(0.7))
-                    }
-                    .allowsHitTesting(false)
             }
-        }
-        // Stealth is colorless: one desaturation pass turns every accent —
-        // send blue, permission amber, error red — to greyscale.
-        // 0.9999, not 1: at exactly 1 SwiftUI removes the saturation effect
-        // layer entirely, and on the stealth→normal transition that teardown
-        // leaves the AppKit-backed views (text field, menus) and some text
-        // unrendered until the panel is reopened. Keeping the effect active
-        // in both states sidesteps it; 0.9999 is visually identical to 1.
-        .saturation(state.stealthMode ? 0 : 0.9999)
-        .onDrop(of: [UTType.fileURL], isTargeted: $state.dropTargeted) { providers in
-            acceptDroppedFiles(providers)
-        }
-        // Reveal, not movement: the content is laid out in place and a
-        // top-anchored mask wipes downward over it, so the panel appears to
-        // be uncovered rather than to slide. Stealth folds out the same way.
-        .mask {
-            GeometryReader { geo in
-                NotchShape(radius: cornerRadius, topRadius: state.notchTopRadius)
-                    .frame(height: state.expanded ? geo.size.height : 0)
+            // Stealth is colorless: one desaturation pass turns every accent —
+            // send blue, permission amber, error red — to greyscale.
+            // 0.9999, not 1: at exactly 1 SwiftUI removes the saturation effect
+            // layer entirely, and on the stealth→normal transition that teardown
+            // leaves the AppKit-backed views (text field, menus) and some text
+            // unrendered until the panel is reopened. Keeping the effect active
+            // in both states sidesteps it; 0.9999 is visually identical to 1.
+            .saturation(state.stealthMode ? 0 : 0.9999)
+            .onDrop(of: [UTType.fileURL], isTargeted: $state.dropTargeted) { providers in
+                acceptDroppedFiles(providers)
             }
-        }
-        // Resize handles sit AFTER the mask so they aren't clipped to the panel
-        // shape — they intentionally straddle the visible edge, extending out
-        // into the window's transparent margin. Width is locked to the notch in
-        // stealth, so the side/corner handles only exist when not stealth.
-        .overlay(alignment: .leading) { if !state.stealthMode { sideResizeHandle(sign: -1) } }
-        .overlay(alignment: .trailing) { if !state.stealthMode { sideResizeHandle(sign: 1) } }
-        .overlay(alignment: .bottom) { bottomResizeHandle }
-        .overlay(alignment: .bottomLeading) { if !state.stealthMode { cornerResizeHandle(sign: -1) } }
-        .overlay(alignment: .bottomTrailing) { if !state.stealthMode { cornerResizeHandle(sign: 1) } }
-        .padding(.horizontal, AppState.panelMargin)
-        .padding(.bottom, AppState.panelBottomMargin)
-        .preferredColorScheme(.dark)
-        .animation(
-            state.expanded
-                ? .timingCurve(0.16, 1, 0.3, 1, duration: 0.4)
-                : .easeInOut(duration: 0.25),
-            value: state.expanded
-        )
-        .onChange(of: state.panelIsKey) { isKey in
-            if isKey {
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { inputFocused = true }
-            } else {
-                inputFocused = false
+            // Reveal, not movement: the content is laid out in place and a
+            // top-anchored mask wipes downward over it, so the panel appears to
+            // be uncovered rather than to slide. Stealth folds out the same way.
+            .mask {
+                GeometryReader { geo in
+                    NotchShape(radius: cornerRadius, topRadius: state.notchTopRadius)
+                        .frame(height: state.expanded ? geo.size.height : 0)
+                }
             }
-        }
-        // Pulling the stealth composer up while the panel is key should put
-        // the caret in it immediately.
-        .onChange(of: state.stealthComposerOpen) { open in
-            if open && state.panelIsKey {
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { inputFocused = true }
+            // Resize handles sit AFTER the mask so they aren't clipped to the panel
+            // shape — they intentionally straddle the visible edge, extending out
+            // into the window's transparent margin. Width is locked to the notch in
+            // stealth, so the side/corner handles only exist when not stealth.
+            .overlay(alignment: .leading) { if !state.stealthMode { sideResizeHandle(sign: -1) } }
+            .overlay(alignment: .trailing) { if !state.stealthMode { sideResizeHandle(sign: 1) } }
+            .overlay(alignment: .bottom) { bottomResizeHandle }
+            .overlay(alignment: .bottomLeading) { if !state.stealthMode { cornerResizeHandle(sign: -1) } }
+            .overlay(alignment: .bottomTrailing) { if !state.stealthMode { cornerResizeHandle(sign: 1) } }
+            .padding(.horizontal, AppState.panelMargin)
+            .padding(.bottom, AppState.panelBottomMargin)
+            .preferredColorScheme(.dark)
+            .animation(
+                state.expanded
+                    ? .timingCurve(0.16, 1, 0.3, 1, duration: 0.4)
+                    : .easeInOut(duration: 0.25),
+                value: state.expanded
+            )
+            .onChange(of: state.panelIsKey) { isKey in
+                if isKey {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { inputFocused = true }
+                } else {
+                    inputFocused = false
+                }
+            }
+            // Pulling the stealth composer up while the panel is key should put
+            // the caret in it immediately.
+            .onChange(of: state.stealthComposerOpen) { open in
+                if open && state.panelIsKey {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { inputFocused = true }
+                }
             }
         }
     }
 
-    // Near-black in stealth; otherwise per panelStyle. Smoke is built from
-    // an NSVisualEffectView (real diffusion of what's behind the window,
-    // with Apple's saturation boost) under a smoked tint; the clear pane
-    // keeps the faint CGS window blur set in AppState.applyPanelBlur.
+    // Near-black in stealth; otherwise per panelStyle. Smoke is a darker
+    // NSVisualEffectView blur. Clear keeps the faint CGS blur set in AppState.
     @ViewBuilder private var panelBackdrop: some View {
         let shape = NotchShape(radius: cornerRadius, topRadius: state.notchTopRadius)
         if state.stealthMode {
@@ -612,7 +612,7 @@ struct ChatRootView: View {
             startPoint: .top, endPoint: .bottom))
     }
 
-    // Smoked liquid glass: a dark vibrancy backdrop diffuses what's behind
+    // Smoked frosted glass: a dark vibrancy backdrop diffuses what's behind
     // the window under a smoked tint, with only dark edge shading for depth
     // — no specular rim or corner glows, so the edges never catch light.
     private func smokeGlass(shape: NotchShape) -> some View {
@@ -920,7 +920,8 @@ struct ChatRootView: View {
                     }
                     Color.clear.frame(height: 1).id("bottom")
                 }
-                .padding(12 * s)
+                .padding(.vertical, 12 * s)
+                .padding(.horizontal, 18 * s)
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
             .onChange(of: session.messages) { _ in
@@ -931,6 +932,26 @@ struct ChatRootView: View {
             .onChange(of: session.isRunning) { _ in
                 withAnimation(.easeOut(duration: 0.12)) {
                     proxy.scrollTo("bottom", anchor: .bottom)
+                }
+            }
+            // Fog at the bottom edge: text dissolves just above the composer
+            // instead of being cut off mid-glyph. An alpha mask, not a color
+            // overlay — the backdrop can be clear glass, so painting a
+            // gradient over it would show as a smudge on the desktop. The
+            // mask honors the composer's safe-area inset, so nothing renders
+            // behind the composer box.
+            .mask {
+                VStack(spacing: 0) {
+                    Rectangle()
+                    LinearGradient(
+                        stops: [
+                            .init(color: .black, location: 0),
+                            .init(color: .black.opacity(0.6), location: 0.45),
+                            .init(color: .clear, location: 1),
+                        ],
+                        startPoint: .top, endPoint: .bottom
+                    )
+                    .frame(height: 36 * s)
                 }
             }
             .overlay {
@@ -973,6 +994,31 @@ struct ChatRootView: View {
 
     private let amber = Color(red: 232/255, green: 182/255, blue: 76/255)
 
+    // Frosted glass normally: the material blurs what's behind the window
+    // and a dark wash keeps it near-opaque. On the clear pane that opacity
+    // defeats the whole material, so the composer goes genuinely clear.
+    // Outside stealth, a hairline rim keeps its bounds readable. The chat is
+    // masked to stop above the composer, so no text shows through it either way.
+    @ViewBuilder private var composerBackdrop: some View {
+        let shape = RoundedRectangle(cornerRadius: Self.composerRadius)
+        if state.panelStyle == .clear {
+            shape.fill(session.pendingPermission != nil
+                       ? AnyShapeStyle(amber.opacity(0.06))
+                       : AnyShapeStyle(Color.white.opacity(0.04)))
+                .overlay {
+                    if !state.stealthMode {
+                        shape.strokeBorder(Color.white.opacity(0.22), lineWidth: 1)
+                    }
+                }
+        } else {
+            shape.fill(.regularMaterial)
+                .overlay(shape.fill(Color(red: 0.09, green: 0.09, blue: 0.10).opacity(0.55)))
+                .overlay(shape.fill(session.pendingPermission != nil
+                                    ? AnyShapeStyle(amber.opacity(0.06))
+                                    : AnyShapeStyle(Color.white.opacity(0.08))))
+        }
+    }
+
     private var composer: some View {
         Group {
             if let request = session.pendingPermission {
@@ -984,31 +1030,29 @@ struct ChatRootView: View {
         .padding(.horizontal, 11 * s)
         .padding(.top, 9 * s)
         .padding(.bottom, 8 * s)
-        .background(
-            // A slight dark scrim under the usual tint keeps the composer
-            // legible while messages slide beneath it, without giving up
-            // the see-through look.
-            RoundedRectangle(cornerRadius: 16 * s)
-                .fill(Color.black.opacity(0.3))
-                .overlay(
-                    RoundedRectangle(cornerRadius: 16 * s)
-                        .fill(session.pendingPermission != nil
-                              ? AnyShapeStyle(amber.opacity(0.06))
-                              : AnyShapeStyle(Color.white.opacity(0.08)))
-                )
-        )
+        .background(composerBackdrop)
         .overlay {
-            // Amber while an approval is pending or a mode that skips
-            // permission prompts is active.
-            if session.pendingPermission != nil || currentMode.dangerous {
-                RoundedRectangle(cornerRadius: 16 * s)
+            // Amber while an approval is pending.
+            if session.pendingPermission != nil && !state.stealthMode {
+                RoundedRectangle(cornerRadius: Self.composerRadius)
                     .strokeBorder(Color.orange.opacity(0.45), lineWidth: 1)
             }
         }
-        .padding(.horizontal, 10 * s)
+        .padding(.horizontal, Self.composerMargin + state.notchTopRadius)
         .padding(.top, 4 * s)
-        .padding(.bottom, 8 * s)
+        .padding(.bottom, Self.composerMargin)
     }
+
+    // Concentric corners: for the composer's arc to follow the panel's, the
+    // visible gap to the panel edge must be uniform and the inner radius
+    // must be outer radius minus that gap (24 − 12 = 12), not the same
+    // radius. NotchShape draws its straight sides notchTopRadius inside the
+    // layout bounds (the top flare needs the full rect width), so the
+    // horizontal padding adds that inset back; the bottom edge isn't inset.
+    // Unscaled so the geometry holds in stealth, where the panel radius
+    // doesn't shrink either.
+    private static let composerMargin: CGFloat = 12
+    private static let composerRadius: CGFloat = 12
 
     private var standardComposer: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -1025,7 +1069,7 @@ struct ChatRootView: View {
                 .onSubmit(sendDraft)
             HStack(spacing: 6) {
                 attachButton
-                contextChip
+                contextMenus
                 stealthEyeButton
                 Spacer(minLength: 4)
                 sendButton
@@ -1149,7 +1193,9 @@ struct ChatRootView: View {
                 .overlay(RoundedRectangle(cornerRadius: 14)
                     .strokeBorder(Color.white.opacity(0.14), lineWidth: 1))
         )
-        .padding(.horizontal, 10)
+        // Same side-inset correction as the composer: NotchShape's straight
+        // sides sit notchTopRadius inside the layout bounds.
+        .padding(.horizontal, 10 + state.notchTopRadius)
         .padding(.bottom, 6)
     }
 
@@ -1370,39 +1416,41 @@ struct ChatRootView: View {
         }
     }
 
-    // The whole session context — model, permission mode, working folder —
-    // lives in one chip so the composer row stays two controls wide.
-    // Claude and Codex expand into model submenus; picking a model also
-    // switches to that provider. ChatGPT has no model choice, so it stays flat.
-    private var contextChip: some View {
-        Menu {
+    // Session context controls: model, effort, and permissions live in one
+    // dropdown as submenus; the working folder gets its own dropdown so it
+    // can truncate independently instead of fighting the session pill for
+    // row width. Picking a model also switches provider; the ChatGPT provider
+    // exposes a single Web entry and has no CLI options, so the folder
+    // dropdown hides.
+    // Stealth locks the panel to notch width, so the folder pill hides and
+    // the folder submenu moves inside the session menu instead.
+    @ViewBuilder
+    private var contextMenus: some View {
+        sessionMenu
+        if session.provider.hasCLIOptions && !state.stealthMode {
+            folderMenu
+        }
+    }
+
+    private var sessionMenu: some View {
+        contextMenu(help: sessionMenuHelp) {
             Menu("Model") {
                 ForEach(AgentProvider.allCases) { provider in
-                    if provider.models.isEmpty {
-                        Button {
-                            session.provider = provider
-                        } label: {
-                            if provider == session.provider {
-                                Label(provider.label, systemImage: "checkmark")
-                            } else {
-                                Text(provider.label)
+                    Menu(provider.label) {
+                        let groups = session.modelMenuGroups(for: provider)
+                        if groups.isEmpty {
+                            menuItem("Web", checked: session.provider == provider) {
+                                session.provider = provider
                             }
-                        }
-                    } else {
-                        Menu(provider.label) {
-                            ForEach(provider.models) { model in
-                                Button {
-                                    session.provider = provider
-                                    if let value = model.value {
-                                        session.modelChoice[provider] = value
-                                    } else {
-                                        session.modelChoice.removeValue(forKey: provider)
-                                    }
-                                } label: {
-                                    if session.modelChoice[provider] == model.value {
-                                        Label(model.label, systemImage: "checkmark")
-                                    } else {
-                                        Text(model.label)
+                        } else {
+                            ForEach(groups) { group in
+                                modelMenuGroup(group, provider: provider)
+                            }
+                            let otherGroups = session.otherModelMenuGroups(for: provider)
+                            if !otherGroups.isEmpty {
+                                Menu("Other") {
+                                    ForEach(otherGroups) { group in
+                                        modelMenuGroup(group, provider: provider)
                                     }
                                 }
                             }
@@ -1411,58 +1459,185 @@ struct ChatRootView: View {
                 }
             }
             if session.provider.hasCLIOptions {
-                Menu("Permissions") {
-                    ForEach(session.provider.permissionModes) { mode in
-                        Button {
-                            if let value = mode.value {
-                                session.modeChoice[session.provider] = value
-                            } else {
-                                session.modeChoice.removeValue(forKey: session.provider)
-                            }
-                        } label: {
-                            if session.modeChoice[session.provider] == mode.value {
-                                Label(mode.label, systemImage: "checkmark")
-                            } else {
-                                Text(mode.label)
+                let efforts = session.efforts(for: session.provider)
+                if !efforts.isEmpty {
+                    Menu(session.effortMenuLabel(for: session.provider)) {
+                        ForEach(efforts) { effort in
+                            menuItem(effort.label, checked: currentEffort?.id == effort.id) {
+                                session.effortChoice[session.provider] = effort.value
                             }
                         }
                     }
                 }
-                Menu("Folder") {
-                    Button("Choose Folder…", action: pickFolder)
-                    Divider()
-                    Text(session.workingDirectory.path)
+                let speedVersions = session.speedVersions(for: session.provider)
+                let contextVersions = session.contextVersions(for: session.provider)
+                if !speedVersions.isEmpty || !contextVersions.isEmpty {
+                    Menu("Version") {
+                        ForEach(speedVersions) { version in
+                            menuItem(
+                                version.label,
+                                checked: session.effectiveSpeedVersion(for: session.provider)
+                                    == version.value
+                            ) {
+                                if let value = version.value {
+                                    session.setSpeedVersion(value, for: session.provider)
+                                }
+                            }
+                        }
+                        if !speedVersions.isEmpty && !contextVersions.isEmpty {
+                            Divider()
+                        }
+                        ForEach(contextVersions) { version in
+                            menuItem(
+                                version.label,
+                                checked: session.effectiveContextVersion(for: session.provider)
+                                    == version.value
+                            ) {
+                                if let value = version.value {
+                                    session.setContextVersion(value, for: session.provider)
+                                }
+                            }
+                        }
+                    }
+                }
+                Menu("Permissions") {
+                    ForEach(session.provider.permissionModes) { mode in
+                        menuItem(mode.label, checked: session.modeChoice[session.provider] == mode.value) {
+                            session.modeChoice[session.provider] = mode.value
+                        }
+                    }
+                }
+                if state.stealthMode {
+                    Menu("Folder") {
+                        Button("Choose Folder…", action: pickFolder)
+                        Divider()
+                        Text(session.workingDirectory.path)
+                    }
                 }
             }
         } label: {
-            pill(chipText)
+            menuPill(sessionPillText)
         }
-        .menuStyle(.button)
-        .buttonStyle(.plain)
-        .menuIndicator(.hidden)
-        .disabled(session.isRunning)
-        .help(chipHelp)
     }
 
-    // "Sonnet 5 · Edits · notch-agent"; just "ChatGPT" for the web provider.
-    private var chipText: String {
-        guard session.provider.hasCLIOptions else { return session.provider.label }
-        return "\(modelPillText) · \(currentMode.short) · \(session.workingDirectory.lastPathComponent)"
+    private func modelMenuItem(
+        _ variant: AgentModelVariant, provider: AgentProvider, title: String
+    ) -> some View {
+        menuItem(
+            title,
+            checked: session.provider == provider
+                && session.modelChoice[provider] == variant.option.value
+        ) {
+            session.provider = provider
+            session.modelChoice[provider] = variant.option.value
+        }
     }
 
-    private var chipHelp: String {
+    @ViewBuilder
+    private func modelMenuGroup(
+        _ group: AgentModelMenuGroup, provider: AgentProvider
+    ) -> some View {
+        if group.variants.count == 1, let variant = group.variants.first {
+            modelMenuItem(variant, provider: provider, title: group.label)
+        } else {
+            Menu(group.label) {
+                ForEach(group.variants) { variant in
+                    modelMenuItem(variant, provider: provider, title: variant.label)
+                }
+            }
+        }
+    }
+
+    // "Sonnet 5 · High"; just "ChatGPT" for the web provider. Permissions
+    // only show inside the menu (and the tooltip), not on the pill. Stealth
+    // collapses the pill to the bare model name — the row has no room for
+    // more there.
+    private var sessionPillText: String {
         guard session.provider.hasCLIOptions else { return session.provider.label }
-        return "Model: \(modelPillText) · Permissions: \(currentMode.label) · Folder: \(session.workingDirectory.path)"
+        guard !state.stealthMode else { return modelPillText }
+        var parts = [modelPillText]
+        if let effort = currentEffort { parts.append(effort.short) }
+        if let version = currentVersion { parts.append(version.short) }
+        return parts.joined(separator: " · ")
+    }
+
+    private var sessionMenuHelp: String {
+        guard session.provider.hasCLIOptions else { return session.provider.label }
+        let effortLabel = session.effortMenuLabel(for: session.provider)
+        let effort = currentEffort.map { " · \(effortLabel): \($0.label)" } ?? ""
+        let version = currentVersion.map { " · Version: \($0.label)" } ?? ""
+        return "Model: \(modelPillText)\(effort)\(version) · Permissions: \(currentMode.label)"
+    }
+
+    private var folderMenu: some View {
+        contextMenu(help: "Folder: \(session.workingDirectory.path)") {
+            Button("Choose Folder…", action: pickFolder)
+            Divider()
+            Text(session.workingDirectory.path)
+        } label: {
+            menuPill(session.workingDirectory.lastPathComponent)
+        }
+    }
+
+    // Shared dropdown chrome: plain-styled system Menu, hidden indicator,
+    // disabled mid-turn like the rest of the session controls. No fixedSize:
+    // it would force the label's full ideal width, and on a narrow panel the
+    // row then overflows its padding and the composer box swallows its own
+    // margins. Without it the labels compress and truncate instead.
+    private func contextMenu(
+        help: String,
+        @ViewBuilder content: () -> some View,
+        @ViewBuilder label: () -> some View
+    ) -> some View {
+        Menu(content: content, label: label)
+            .menuStyle(.button)
+            .buttonStyle(.plain)
+            .menuIndicator(.hidden)
+            .disabled(session.isRunning)
+            .help(help)
+    }
+
+    private func menuItem(
+        _ title: String, checked: Bool, action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            if checked {
+                Label(title, systemImage: "checkmark")
+            } else {
+                Text(title)
+            }
+        }
+    }
+
+    // The checked effort item and the pill's effort segment. An unset (or
+    // unsupported-for-this-model) effortChoice shows the stop the CLI
+    // defaults to without sending a flag.
+    private var currentEffort: AgentOption? {
+        let efforts = session.efforts(for: session.provider)
+        guard !efforts.isEmpty else { return nil }
+        if let value = session.effectiveEffort(for: session.provider),
+           let match = efforts.first(where: { $0.value == value }) {
+            return match
+        }
+        return efforts.first { $0.value == session.defaultEffortValue(for: session.provider) }
+            ?? efforts.first
+    }
+
+    private var currentVersion: AgentOption? {
+        let versions = session.contextVersions(for: session.provider)
+        guard let value = session.effectiveContextVersion(for: session.provider) else { return nil }
+        return versions.first { $0.value == value }
     }
 
     // A chosen model replaces the provider name ("Sonnet 5" instead of
-    // "Claude"); the provider name only shows on Default.
+    // "Claude"); ChatGPT has no models, so it keeps the provider name.
     private var modelPillText: String {
         let provider = session.provider
         guard let value = session.modelChoice[provider],
-              let model = provider.models.first(where: { $0.value == value })
+              let model = session.models(for: provider).first(where: { $0.value == value })
         else { return provider.label }
-        return model.short
+        let fastSuffix = session.effectiveFastMode(for: provider) ? " Fast" : ""
+        return model.short + fastSuffix
     }
 
     private var currentMode: AgentOption {
@@ -1473,22 +1648,21 @@ struct ChatRootView: View {
             ?? AgentOption(label: "Default", short: "Default", value: nil)
     }
 
-    private func pill(_ text: String, icon: String? = nil) -> some View {
-        HStack(spacing: 4) {
-            if let icon {
-                Image(systemName: icon).font(.system(size: 9 * s))
-            }
+    // The HStack proposes the available composer width, so long labels still
+    // truncate while short labels keep their natural width beside the icon.
+    private func menuPill(_ text: String) -> some View {
+        HStack(spacing: 3) {
             Text(text)
                 .font(.system(size: 11 * s, weight: .medium))
                 .lineLimit(1)
             Image(systemName: "chevron.down")
-                .font(.system(size: 7 * s, weight: .semibold))
-                .opacity(0.6)
+                .font(.system(size: 6.5 * s, weight: .semibold))
+                .opacity(0.55)
         }
-        .foregroundStyle(.white.opacity(0.85))
-        .padding(.horizontal, 9 * s)
+        .foregroundStyle(.white.opacity(0.75))
+        .padding(.horizontal, 4 * s)
         .padding(.vertical, 4 * s)
-        .background(Capsule().fill(Color.white.opacity(0.1)))
+        .contentShape(Rectangle())
     }
 
     @ViewBuilder
@@ -1503,11 +1677,12 @@ struct ChatRootView: View {
             .help("Stop")
         } else {
             Button(action: sendDraft) {
+                // No accent: plain white that the panel's theme treatment
+                // (grey colorMultiply on glass, stealth desaturation) tints
+                // appropriately. Dim until there's something to send.
                 Image(systemName: "arrow.up.circle.fill")
                     .font(.system(size: 20 * s))
-                    .foregroundStyle(session.draft.isEmpty
-                        ? AnyShapeStyle(.white.opacity(0.25))
-                        : AnyShapeStyle(accent))
+                    .foregroundStyle(.white.opacity(session.draft.isEmpty ? 0.25 : 0.85))
             }
             .buttonStyle(.plain)
             .disabled(session.draft.isEmpty)
@@ -1633,7 +1808,7 @@ struct SettingsView: View {
     private var materialCaption: String {
         switch state.panelStyle {
         case .black: return "Solid black — the panel hides what's behind it"
-        case .smoke: return "Dark liquid glass — smoked blur of what's behind"
+        case .smoke: return "Dark frosted glass — smoked blur of what's behind"
         case .clear: return "Clear pane — the panel shows what's behind it"
         }
     }

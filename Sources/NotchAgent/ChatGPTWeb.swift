@@ -25,18 +25,96 @@ final class ChatGPTWeb: NSObject {
     private var cancelled = false
     private var generation = 0
 
-    private static let sendSelector = "button[data-testid='send-button'], button[data-testid='composer-submit-button'], #composer-submit-button, button[aria-label*='Send']"
-    private static let stopSelector = "button[aria-label*='Stop'], button[data-testid='stop-button']"
-    private static let assistantSelector = "[data-message-author-role='assistant']"
+    // Multi-strategy selectors: chatgpt.com renames data-testid / role attrs
+    // periodically. Prefer current attrs, then historical / structural fallbacks.
+    private static let sendSelector = "button[data-testid='send-button'], button[data-testid='composer-submit-button'], #composer-submit-button, button[aria-label*='Send'], button[aria-label*='Send message'], form button[type='submit']"
+    private static let stopSelector = "button[aria-label*='Stop'], button[data-testid='stop-button'], button[aria-label*='Stop generating'], button[aria-label*='Stop streaming']"
 
-    // chatgpt.com keeps a hidden fallback <textarea> that matches naive
-    // selectors before the real ProseMirror editor — resolve the composer by
-    // visibility (getClientRects), not just by selector order.
-    private static let findComposerJS = """
+    // Shared DOM helpers injected into scrape/inject scripts. Single source of
+    // truth for composer + message node resolution so fallbacks stay consistent.
+    private static let domHelpersJS = """
+    const __visible = (el) => !!(el && el.getClientRects && el.getClientRects().length > 0);
     const __composer = () => {
-      const cands = document.querySelectorAll("#prompt-textarea, main [contenteditable='true'], [contenteditable='true'], main textarea, form textarea");
-      for (const el of cands) { if (el.getClientRects().length > 0) return el; }
+      const cands = document.querySelectorAll(
+        "#prompt-textarea, [data-testid='prompt-textarea'], div[role='textbox'], " +
+        "main [contenteditable='true'], [contenteditable='true'], main textarea, form textarea"
+      );
+      for (const el of cands) { if (__visible(el)) return el; }
       return null;
+    };
+    const __nodesByStrategies = (strategies) => {
+      for (const s of strategies) {
+        const nodes = s.fn();
+        if (nodes && nodes.length) return { nodes: Array.from(nodes), strategy: s.name };
+      }
+      return { nodes: [], strategy: "none" };
+    };
+    const __assistantQuery = () => __nodesByStrategies([
+      { name: "data-message-author-role", fn: () => document.querySelectorAll("[data-message-author-role='assistant']") },
+      { name: "data-testid-assistant", fn: () => document.querySelectorAll("[data-testid='assistant-message'], [data-testid='conversation-turn-assistant']") },
+      { name: "data-turn", fn: () => document.querySelectorAll("[data-turn='assistant'], article[data-turn='assistant']") },
+      { name: "aria-assistant", fn: () => document.querySelectorAll("[aria-label*='ChatGPT said'], [data-message-id][data-author='assistant']") }
+    ]);
+    const __userQuery = () => __nodesByStrategies([
+      { name: "data-message-author-role", fn: () => document.querySelectorAll("[data-message-author-role='user']") },
+      { name: "data-testid-user", fn: () => document.querySelectorAll("[data-testid='user-message'], [data-testid='conversation-turn-user']") },
+      { name: "data-turn", fn: () => document.querySelectorAll("[data-turn='user'], article[data-turn='user']") },
+      { name: "aria-user", fn: () => document.querySelectorAll("[aria-label*='You said'], [data-message-id][data-author='user']") }
+    ]);
+    const __sendButton = () => {
+      const sels = [
+        "button[data-testid='send-button']",
+        "button[data-testid='composer-submit-button']",
+        "#composer-submit-button",
+        "button[aria-label*='Send']",
+        "button[aria-label*='Send message']",
+        "form button[type='submit']"
+      ];
+      for (const s of sels) {
+        const el = document.querySelector(s);
+        if (el && __visible(el)) return el;
+      }
+      for (const s of sels) {
+        const el = document.querySelector(s);
+        if (el) return el;
+      }
+      return null;
+    };
+    const __stopButton = () => {
+      const sels = [
+        "button[aria-label*='Stop']",
+        "button[data-testid='stop-button']",
+        "button[aria-label*='Stop generating']",
+        "button[aria-label*='Stop streaming']"
+      ];
+      for (const s of sels) {
+        const el = document.querySelector(s);
+        if (el) return el;
+      }
+      return null;
+    };
+    const __probeUI = () => {
+      const a = __assistantQuery();
+      const u = __userQuery();
+      const composer = __composer();
+      const send = __sendButton();
+      const roleAttrs = document.querySelectorAll("[data-message-author-role]").length;
+      const turnAttrs = document.querySelectorAll("[data-turn]").length;
+      const hasMain = !!document.querySelector("main");
+      // Loaded chat shell with neither role nor turn landmarks → site DOM drift.
+      const likelyChanged = hasMain && !composer && roleAttrs === 0 && turnAttrs === 0
+        && !document.querySelector("input[type='password'], button[data-testid*='login'], a[href*='login']");
+      return {
+        composer: !!composer,
+        send: !!send,
+        assistantStrategy: a.strategy,
+        userStrategy: u.strategy,
+        assistantCount: a.nodes.length,
+        userCount: u.nodes.length,
+        roleAttrs,
+        turnAttrs,
+        likelyChanged
+      };
     };
     """
 
@@ -145,7 +223,9 @@ final class ChatGPTWeb: NSObject {
     func cancel() {
         cancelled = true
         generation += 1
-        run("(() => { const b = document.querySelector(\"\(Self.stopSelector)\"); if (b) b.click(); })()") { _ in }
+        run("""
+        (() => { \(Self.domHelpersJS) const b = __stopButton(); if (b) b.click(); })()
+        """) { _ in }
     }
 
     // MARK: - Steps
@@ -153,18 +233,38 @@ final class ChatGPTWeb: NSObject {
     private func waitForComposer(gen: Int, deadline: Date, loginShown: Bool, onEvent: @escaping (Event) -> Void, then: @escaping () -> Void) {
         guard !cancelled, gen == generation else { return }
         guard Date() < deadline else {
-            onEvent(.error(loginShown
-                ? "Timed out waiting for sign-in."
-                : "Timed out waiting for chatgpt.com to load."))
-            onEvent(.done)
+            // Final probe so timeouts distinguish sign-in stalls from DOM drift.
+            self.run("""
+            (() => { \(Self.domHelpersJS) return JSON.stringify(__probeUI()); })()
+            """) { probeResult in
+                let probe = Self.decode(probeResult) ?? [:]
+                if (probe["likelyChanged"] as? Bool) == true {
+                    onEvent(.error("ChatGPT UI changed — timed out and no composer/message landmarks matched known selectors."))
+                } else if loginShown {
+                    onEvent(.error("Timed out waiting for sign-in."))
+                } else {
+                    onEvent(.error("Timed out waiting for chatgpt.com to load."))
+                }
+                onEvent(.done)
+            }
             return
         }
-        run("(() => { \(Self.findComposerJS) return !!__composer(); })()") { [weak self] result in
+        run("""
+        (() => {
+          \(Self.domHelpersJS)
+          const ready = !!__composer();
+          return JSON.stringify({ ready, probe: __probeUI() });
+        })()
+        """) { [weak self] result in
             guard let self, !self.cancelled, gen == self.generation else { return }
-            if (result as? Bool) == true {
+            let obj = Self.decode(result) ?? [:]
+            if (obj["ready"] as? Bool) == true {
                 then()
                 return
             }
+            // Do not fail-fast on probe.likelyChanged here — the shell can
+            // mount <main> before the composer hydrates. Probe is decisive
+            // only on timeout / post-action failures.
             var shown = loginShown
             // Page loaded but no composer: assume sign-in (or interstitial)
             // is needed and show the window so the user can deal with it.
@@ -190,9 +290,9 @@ final class ChatGPTWeb: NSObject {
         // and record message baselines.
         let insertJS = """
         (() => {
-          \(Self.findComposerJS)
+          \(Self.domHelpersJS)
           const el = __composer();
-          if (!el) return JSON.stringify({s: "no-composer"});
+          if (!el) return JSON.stringify({s: "no-composer", probe: __probeUI()});
           const P = \(promptJSON);
           el.focus();
           document.execCommand("selectAll", false, null);
@@ -206,17 +306,26 @@ final class ChatGPTWeb: NSObject {
             }
             el.dispatchEvent(new InputEvent("input", { bubbles: true, data: P }));
           }
+          const a = __assistantQuery();
+          const u = __userQuery();
           return JSON.stringify({
             s: "inserted",
-            aBase: document.querySelectorAll("\(Self.assistantSelector)").length,
-            uBase: document.querySelectorAll("[data-message-author-role='user']").length
+            aBase: a.nodes.length,
+            uBase: u.nodes.length,
+            aStrategy: a.strategy,
+            uStrategy: u.strategy
           });
         })()
         """
         run(insertJS) { [weak self] result in
             guard let self, !self.cancelled, gen == self.generation else { return }
             guard let obj = Self.decode(result), obj["s"] as? String == "inserted" else {
-                onEvent(.error("Could not find the message box. chatgpt.com's UI may have changed."))
+                let probe = (Self.decode(result)?["probe"] as? [String: Any]) ?? [:]
+                if (probe["likelyChanged"] as? Bool) == true {
+                    onEvent(.error("ChatGPT UI changed — could not find the message box (composer landmarks missing)."))
+                } else {
+                    onEvent(.error("Could not find the message box. chatgpt.com's UI may have changed."))
+                }
                 onEvent(.done)
                 return
             }
@@ -235,8 +344,8 @@ final class ChatGPTWeb: NSObject {
     private func submit(gen: Int, aBase: Int, uBase: Int, attempt: Int = 0, onEvent: @escaping (Event) -> Void) {
         let js = """
         (() => {
-          \(Self.findComposerJS)
-          const btn = document.querySelector("\(Self.sendSelector)");
+          \(Self.domHelpersJS)
+          const btn = __sendButton();
           if (btn && !btn.disabled) { btn.click(); return "clicked"; }
           if (btn && btn.disabled) return "disabled";
           const el = __composer();
@@ -265,10 +374,16 @@ final class ChatGPTWeb: NSObject {
     // what buttons exist so the failure is self-diagnosing.
     private func verifySubmitted(gen: Int, aBase: Int, uBase: Int, onEvent: @escaping (Event) -> Void) {
         let js = """
-        JSON.stringify({
-          u: document.querySelectorAll("[data-message-author-role='user']").length,
-          streaming: !!document.querySelector("\(Self.stopSelector)")
-        })
+        (() => {
+          \(Self.domHelpersJS)
+          const u = __userQuery();
+          return JSON.stringify({
+            u: u.nodes.length,
+            uStrategy: u.strategy,
+            streaming: !!__stopButton(),
+            probe: __probeUI()
+          });
+        })()
         """
         run(js) { [weak self] result in
             guard let self, !self.cancelled, gen == self.generation else { return }
@@ -282,14 +397,27 @@ final class ChatGPTWeb: NSObject {
                                deadline: Date().addingTimeInterval(240), onEvent: onEvent)
                 return
             }
+            let probe = obj["probe"] as? [String: Any] ?? [:]
             let diagJS = """
-            JSON.stringify(Array.from(document.querySelectorAll("main button, form button"))
-              .slice(0, 14)
-              .map(b => (b.getAttribute("data-testid") || b.getAttribute("aria-label") || "?") + (b.disabled ? "(off)" : "")))
+            (() => {
+              \(Self.domHelpersJS)
+              return JSON.stringify({
+                buttons: Array.from(document.querySelectorAll("main button, form button"))
+                  .slice(0, 14)
+                  .map(b => (b.getAttribute("data-testid") || b.getAttribute("aria-label") || "?") + (b.disabled ? "(off)" : "")),
+                probe: __probeUI()
+              });
+            })()
             """
             self.run(diagJS) { diag in
-                let buttons = (diag as? String) ?? "[]"
-                onEvent(.error("Couldn't press send — chatgpt.com's UI may have changed. Buttons seen: \(buttons)"))
+                let info = Self.decode(diag) ?? [:]
+                let buttons = info["buttons"] ?? "[]"
+                let p = info["probe"] as? [String: Any] ?? probe
+                if (p["likelyChanged"] as? Bool) == true || (p["send"] as? Bool) == false {
+                    onEvent(.error("ChatGPT UI changed — couldn't press send. Buttons seen: \(buttons); assistant=\(p["assistantStrategy"] ?? "?"); user=\(p["userStrategy"] ?? "?")"))
+                } else {
+                    onEvent(.error("Couldn't press send — chatgpt.com's UI may have changed. Buttons seen: \(buttons)"))
+                }
                 onEvent(.done)
             }
         }
@@ -303,20 +431,27 @@ final class ChatGPTWeb: NSObject {
     // Debug: dump page state for offline inspection (triggered via SIGUSR2).
     func dumpState(to path: String) {
         let js = """
-        JSON.stringify({
-          href: location.href,
-          title: document.title,
-          assistantCount: document.querySelectorAll("\(Self.assistantSelector)").length,
-          userCount: document.querySelectorAll("[data-message-author-role='user']").length,
-          streaming: !!document.querySelector("\(Self.stopSelector)"),
-          lastAssistant: (() => { const n = document.querySelectorAll("\(Self.assistantSelector)"); const l = n[n.length - 1]; return l ? l.innerText.slice(0, 200) : null; })(),
-          lastAssistantTC: (() => { const n = document.querySelectorAll("\(Self.assistantSelector)"); const l = n[n.length - 1]; return l ? l.textContent.slice(0, 200) : null; })(),
-          lastAssistantHTML: (() => { const n = document.querySelectorAll("\(Self.assistantSelector)"); const l = n[n.length - 1]; return l ? l.innerHTML.slice(0, 400) : null; })(),
-          roleAttrs: Array.from(document.querySelectorAll("[data-message-author-role]")).slice(0, 6).map(n => n.getAttribute("data-message-author-role")),
-          composer: (() => { \(Self.findComposerJS) const el = __composer(); return el ? el.outerHTML.slice(0, 400) : null; })(),
-          buttons: Array.from(document.querySelectorAll("main button, form button")).slice(0, 20)
-            .map(b => ({ testid: b.getAttribute("data-testid"), aria: b.getAttribute("aria-label"), disabled: b.disabled }))
-        }, null, 1)
+        (() => {
+          \(Self.domHelpersJS)
+          const a = __assistantQuery();
+          const last = a.nodes.length ? a.nodes[a.nodes.length - 1] : null;
+          return JSON.stringify({
+            href: location.href,
+            title: document.title,
+            probe: __probeUI(),
+            assistantCount: a.nodes.length,
+            assistantStrategy: a.strategy,
+            userCount: __userQuery().nodes.length,
+            streaming: !!__stopButton(),
+            lastAssistant: last ? last.innerText.slice(0, 200) : null,
+            lastAssistantTC: last ? last.textContent.slice(0, 200) : null,
+            lastAssistantHTML: last ? last.innerHTML.slice(0, 400) : null,
+            roleAttrs: Array.from(document.querySelectorAll("[data-message-author-role]")).slice(0, 6).map(n => n.getAttribute("data-message-author-role")),
+            composer: (() => { const el = __composer(); return el ? el.outerHTML.slice(0, 400) : null; })(),
+            buttons: Array.from(document.querySelectorAll("main button, form button")).slice(0, 20)
+              .map(b => ({ testid: b.getAttribute("data-testid"), aria: b.getAttribute("aria-label"), disabled: b.disabled }))
+          }, null, 1);
+        })()
         """
         run(js) { result in
             let out = (result as? String) ?? "no result (web view not loaded?)"
@@ -335,20 +470,24 @@ final class ChatGPTWeb: NSObject {
         // chatgpt.com can append empty placeholder assistant nodes after the
         // real one, which would otherwise stall completion forever.
         let js = """
-        JSON.stringify((() => {
-          const nodes = Array.from(document.querySelectorAll("\(Self.assistantSelector)")).slice(\(baseline));
+        (() => {
+          \(Self.domHelpersJS)
+          const q = __assistantQuery();
+          const nodes = q.nodes.slice(\(baseline));
           let text = "";
           for (let i = nodes.length - 1; i >= 0; i--) {
-            const t = nodes[i].innerText.trim();
+            const t = (nodes[i].innerText || "").trim();
             if (t.length > 0) { text = t; break; }
           }
-          return {
-            count: document.querySelectorAll("\(Self.assistantSelector)").length,
-            streaming: !!document.querySelector("\(Self.stopSelector)"),
+          return JSON.stringify({
+            count: q.nodes.length,
+            strategy: q.strategy,
+            streaming: !!__stopButton(),
             text,
-            href: location.href
-          };
-        })())
+            href: location.href,
+            landmarksGone: q.strategy === "none" && !__composer() && !!document.querySelector("main")
+          });
+        })()
         """
         run(js) { [weak self] result in
             guard let self, !self.cancelled, gen == self.generation else { return }
@@ -364,6 +503,11 @@ final class ChatGPTWeb: NSObject {
             let streaming = obj["streaming"] as? Bool ?? false
             let text = obj["text"] as? String ?? ""
             let href = obj["href"] as? String ?? ""
+            if (obj["landmarksGone"] as? Bool) == true {
+                onEvent(.error("ChatGPT UI changed — message landmarks disappeared mid-reply."))
+                onEvent(.done)
+                return
+            }
 
             // Stream partial text into the panel as it grows.
             if !text.isEmpty && text != lastText {

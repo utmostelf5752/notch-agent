@@ -32,7 +32,7 @@ final class ChatGPTWeb: NSObject {
 
     // Shared DOM helpers injected into scrape/inject scripts. Single source of
     // truth for composer + message node resolution so fallbacks stay consistent.
-    private static let domHelpersJS = """
+    private static let domHelpersJS = #"""
     const __visible = (el) => !!(el && el.getClientRects && el.getClientRects().length > 0);
     const __composer = () => {
       const cands = document.querySelectorAll(
@@ -61,6 +61,140 @@ final class ChatGPTWeb: NSObject {
       { name: "data-turn", fn: () => document.querySelectorAll("[data-turn='user'], article[data-turn='user']") },
       { name: "aria-user", fn: () => document.querySelectorAll("[aria-label*='You said'], [data-message-id][data-author='user']") }
     ]);
+    const __normalizeMarkdown = (value) => String(value || "")
+      .split(String.fromCharCode(160)).join(" ")
+      .split("\r\n").join("\n")
+      .split("\r").join("\n")
+      .split("\n").map(line => line.replace(/[ \t]+$/g, "")).join("\n")
+      .replace(/\n{3,}/g, "\n\n")
+      .trim();
+    const __inlineCode = (value) => {
+      const code = String(value || "").replace(/\n+/g, " ").trim();
+      if (!code) return "";
+      const runs = code.match(/`+/g) || [];
+      const fence = "`".repeat(Math.max(1, ...runs.map(run => run.length + 1)));
+      const pad = code.startsWith("`") || code.endsWith("`") ? " " : "";
+      return fence + pad + code + pad + fence;
+    };
+    const __codeLanguage = (pre, code) => {
+      const values = [
+        code && code.getAttribute("data-language"),
+        pre && pre.getAttribute("data-language"),
+        code && code.className,
+        pre && pre.className
+      ].filter(value => typeof value === "string" && value.length);
+      for (const value of values) {
+        const match = value.match(/(?:language-|lang-)([A-Za-z0-9_+#.-]+)/i);
+        if (match) return match[1];
+        if (/^[A-Za-z0-9_+#.-]{1,24}$/.test(value)) return value;
+      }
+      return "";
+    };
+    const __serializeChildren = (el) => Array.from(el.childNodes)
+      .map(child => __serializeMarkdownNode(child))
+      .join("");
+    const __serializeList = (list, ordered) => {
+      const items = Array.from(list.children).filter(child => child.tagName === "LI");
+      const lines = [];
+      items.forEach((item, index) => {
+        const nestedLists = Array.from(item.children).filter(child => child.tagName === "UL" || child.tagName === "OL");
+        const nestedSet = new Set(nestedLists);
+        const body = Array.from(item.childNodes)
+          .filter(child => !nestedSet.has(child))
+          .map(child => __serializeMarkdownNode(child))
+          .join("")
+          .replace(/\n{2,}/g, "\n")
+          .trim();
+        lines.push((ordered ? String(index + 1) + ". " : "- ") + body);
+        nestedLists.forEach(nested => {
+          const nestedText = __serializeList(nested, nested.tagName === "OL").trimEnd();
+          if (nestedText) lines.push(nestedText.split("\n").map(line => "  " + line).join("\n"));
+        });
+      });
+      return lines.length ? lines.join("\n") + "\n\n" : "";
+    };
+    const __serializeMarkdownNode = (node) => {
+      if (!node) return "";
+      if (node.nodeType === Node.TEXT_NODE) {
+        return String(node.nodeValue || "").replace(/[ \t\n\r]+/g, " ");
+      }
+      if (node.nodeType !== Node.ELEMENT_NODE) return "";
+      const el = node;
+      const tag = el.tagName;
+      if (["SCRIPT", "STYLE", "NOSCRIPT", "TEMPLATE", "SVG", "BUTTON", "INPUT", "TEXTAREA"].includes(tag)) return "";
+      if (el.getAttribute("aria-hidden") === "true") return "";
+
+      if (el.matches(".katex, .katex-display")) {
+        const annotation = el.querySelector("annotation[encoding='application/x-tex']");
+        if (annotation && annotation.textContent) {
+          const tex = annotation.textContent.trim();
+          return el.matches(".katex-display") ? "\n\n$$" + tex + "$$\n\n" : "$" + tex + "$";
+        }
+      }
+
+      if (/^H[1-6]$/.test(tag)) {
+        const level = Number(tag.slice(1));
+        const text = __serializeChildren(el).trim();
+        return text ? "#".repeat(level) + " " + text + "\n\n" : "";
+      }
+      if (tag === "P") {
+        const text = __serializeChildren(el).trim();
+        return text ? text + "\n\n" : "";
+      }
+      if (tag === "BR") return "\n";
+      if (tag === "HR") return "\n\n---\n\n";
+      if (tag === "UL" || tag === "OL") return __serializeList(el, tag === "OL");
+      if (tag === "BLOCKQUOTE") {
+        const text = __normalizeMarkdown(__serializeChildren(el));
+        return text ? text.split("\n").map(line => "> " + line).join("\n") + "\n\n" : "";
+      }
+      if (tag === "PRE") {
+        const codeNode = el.querySelector("code") || el;
+        const code = String(codeNode.textContent || "").replace(/\n$/, "");
+        if (!code) return "";
+        const runs = code.match(/`+/g) || [];
+        const fence = "`".repeat(Math.max(3, ...runs.map(run => run.length + 1)));
+        const language = __codeLanguage(el, codeNode);
+        return "\n\n" + fence + language + "\n" + code + "\n" + fence + "\n\n";
+      }
+      if (tag === "CODE") return __inlineCode(el.textContent);
+      if (tag === "STRONG" || tag === "B") {
+        const text = __serializeChildren(el).trim();
+        return text ? "**" + text + "**" : "";
+      }
+      if (tag === "EM" || tag === "I") {
+        const text = __serializeChildren(el).trim();
+        return text ? "*" + text + "*" : "";
+      }
+      if (tag === "DEL" || tag === "S") {
+        const text = __serializeChildren(el).trim();
+        return text ? "~~" + text + "~~" : "";
+      }
+      if (tag === "A") {
+        const text = __serializeChildren(el).trim();
+        const href = el.href || el.getAttribute("href") || "";
+        if (!text || !href || href.toLowerCase().startsWith("javascript:")) return text;
+        return "[" + text + "](" + href.split(")").join("%29") + ")";
+      }
+      if (tag === "IMG") return el.getAttribute("alt") || "";
+
+      return __serializeChildren(el);
+    };
+    const __messageContentRoot = (node) => {
+      if (!node || !node.querySelector) return node;
+      if (node.matches && node.matches("[data-message-content], .markdown, .prose")) return node;
+      return node.querySelector("[data-message-content], .markdown, .prose") || node;
+    };
+    const __assistantMarkdown = (node) => {
+      if (!node) return "";
+      const plain = __normalizeMarkdown(node.innerText || node.textContent || "");
+      try {
+        const semantic = __normalizeMarkdown(__serializeMarkdownNode(__messageContentRoot(node)));
+        return semantic || plain;
+      } catch (_) {
+        return plain;
+      }
+    };
     const __sendButton = () => {
       const sels = [
         "button[data-testid='send-button']",
@@ -116,7 +250,7 @@ final class ChatGPTWeb: NSObject {
         likelyChanged
       };
     };
-    """
+    """#
 
     private override init() {
         super.init()
@@ -446,6 +580,7 @@ final class ChatGPTWeb: NSObject {
             lastAssistant: last ? last.innerText.slice(0, 200) : null,
             lastAssistantTC: last ? last.textContent.slice(0, 200) : null,
             lastAssistantHTML: last ? last.innerHTML.slice(0, 400) : null,
+            lastAssistantMarkdown: last ? __assistantMarkdown(last).slice(0, 1200) : null,
             roleAttrs: Array.from(document.querySelectorAll("[data-message-author-role]")).slice(0, 6).map(n => n.getAttribute("data-message-author-role")),
             composer: (() => { const el = __composer(); return el ? el.outerHTML.slice(0, 400) : null; })(),
             buttons: Array.from(document.querySelectorAll("main button, form button")).slice(0, 20)
@@ -476,7 +611,7 @@ final class ChatGPTWeb: NSObject {
           const nodes = q.nodes.slice(\(baseline));
           let text = "";
           for (let i = nodes.length - 1; i >= 0; i--) {
-            const t = (nodes[i].innerText || "").trim();
+            const t = __assistantMarkdown(nodes[i]);
             if (t.length > 0) { text = t; break; }
           }
           return JSON.stringify({

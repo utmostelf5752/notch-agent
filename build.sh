@@ -20,6 +20,7 @@ swiftc -O -o "$APP/Contents/MacOS/NotchAgent" \
     Sources/NotchAgent/AgentSession.swift \
     Sources/NotchAgent/CodexAppServer.swift \
     Sources/NotchAgent/ChatGPTWeb.swift \
+    Sources/NotchAgent/MarkdownText.swift \
     Sources/NotchAgent/Views.swift
 
 cat > "$APP/Contents/Info.plist" <<'EOF'

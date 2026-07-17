@@ -1591,10 +1591,7 @@ struct MessageBubble: View {
                     .background(RoundedRectangle(cornerRadius: 15 * scale).fill(Color.white.opacity(0.14)))
             }
         case .assistant:
-            Text(MathText.render(message.text))
-                .font(.system(size: 13 * scale))
-                .foregroundStyle(.white.opacity(0.92))
-                .textSelection(.enabled)
+            MarkdownView(text: message.text, scale: scale)
                 .frame(maxWidth: .infinity, alignment: .leading)
         case .tool:
             HStack(spacing: 5) {

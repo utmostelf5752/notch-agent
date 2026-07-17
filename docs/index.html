@@ -15,6 +15,7 @@
   --ink-dim: #9a9aa3;
   --ink-faint: #5b5b64;
   --line: rgba(255,255,255,0.09);
+  --accent: #0a84ff;            /* the app's accent (pin, caret) */
   --spark-a: #ffd479;
   --spark-b: #ff9d6e;
   --spark-c: #c98bff;
@@ -45,42 +46,18 @@ kbd {
   color: var(--ink);
 }
 code { font-family: var(--mono); font-size: 0.85em; }
+.wrap { max-width: 1200px; margin: 0 auto; padding-left: 32px; padding-right: 32px; }
 
-/* ---------- layout: copy left, demo right ---------- */
-.layout {
-  max-width: 1200px;
-  margin: 0 auto;
-  padding-left: 32px;
-  padding-right: 32px;
-  display: grid;
-  grid-template-columns: minmax(0, 10fr) minmax(0, 11fr);
-  column-gap: 64px;
-}
-.intro   { grid-column: 1; grid-row: 1; padding-top: 48px; }
-.content { grid-column: 1; grid-row: 2; padding-bottom: 96px; }
-.demo-col { grid-column: 2; grid-row: 1 / 3; }
-.demo-sticky {
-  position: sticky;
-  top: 0;
-  min-height: 100vh;
-  display: flex;
-  flex-direction: column;
-  justify-content: center;
-  align-items: center;
-  padding-top: 24px;
-  padding-bottom: 24px;
-}
-
-/* ---------- intro (left top) ---------- */
-.brand {
+/* ---------- header ---------- */
+.topbar {
   display: flex;
   align-items: center;
   gap: 10px;
-  margin-bottom: 56px;
+  padding-top: 28px;
 }
-.brand img { width: 24px; height: 24px; border-radius: 6px; }
-.brand .name { font-weight: 650; font-size: 15px; letter-spacing: -0.01em; }
-.brand .gh {
+.topbar img { width: 24px; height: 24px; border-radius: 6px; }
+.topbar .name { font-weight: 650; font-size: 15px; letter-spacing: -0.01em; }
+.topbar .gh {
   margin-left: auto;
   font-size: 13.5px;
   color: var(--ink-dim);
@@ -89,7 +66,18 @@ code { font-family: var(--mono); font-size: 0.85em; }
   border-radius: 999px;
   padding: 5px 14px;
 }
-.brand .gh:hover { color: var(--ink); border-color: rgba(255,255,255,0.2); }
+.topbar .gh:hover { color: var(--ink); border-color: rgba(255,255,255,0.2); }
+
+/* ---------- hero: copy left, demo right ---------- */
+.hero {
+  display: grid;
+  grid-template-columns: minmax(0, 10fr) minmax(0, 11fr);
+  column-gap: 64px;
+  align-items: center;
+  min-height: calc(100vh - 84px);
+  padding-top: 32px;
+  padding-bottom: 48px;
+}
 h1 {
   font-size: clamp(34px, 3.6vw, 46px);
   font-weight: 700;
@@ -108,13 +96,7 @@ h1 .grad {
   font-size: 16.5px;
   max-width: 44ch;
 }
-.cta-row {
-  margin-top: 28px;
-  display: flex;
-  gap: 12px;
-  align-items: center;
-  flex-wrap: wrap;
-}
+.cta-row { margin-top: 28px; display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
 .btn {
   display: inline-flex;
   align-items: center;
@@ -136,122 +118,8 @@ h1 .grad {
 .cta-note { margin-top: 12px; color: var(--ink-faint); font-size: 13px; }
 .cta-note .hotkey { color: var(--ink-dim); }
 
-/* ---------- feature steps (left) ---------- */
-.tour { margin-top: 72px; }
-.tour-head {
-  display: flex;
-  align-items: baseline;
-  gap: 14px;
-  margin-bottom: 6px;
-}
-.tour-head h2 { font-size: 22px; font-weight: 700; letter-spacing: -0.02em; }
-.tour-hint { font-size: 12.5px; color: var(--ink-faint); }
-.steps { display: flex; flex-direction: column; }
-.step {
-  display: grid;
-  grid-template-columns: 34px 1fr;
-  column-gap: 14px;
-  padding-top: 14px;
-  padding-bottom: 14px;
-  border: 0;
-  border-bottom: 1px solid var(--line);
-  background: none;
-  text-align: left;
-  font: inherit;
-  color: inherit;
-  cursor: pointer;
-  width: 100%;
-}
-.step:focus-visible { outline: 2px solid var(--spark-a); outline-offset: -2px; border-radius: 8px; }
-.step .n {
-  font-family: var(--mono);
-  font-size: 12px;
-  color: var(--ink-faint);
-  padding-top: 3px;
-  transition: color 0.2s;
-}
-.step h3 { font-size: 14.5px; font-weight: 650; transition: color 0.2s; }
-.step p { font-size: 13.5px; color: var(--ink-faint); line-height: 1.55; margin-top: 2px; transition: color 0.2s; }
-.step.active .n { color: var(--spark-a); }
-.step.active h3 { color: var(--spark-a); }
-.step.active p { color: var(--ink-dim); }
-.step:hover h3 { color: var(--ink); }
-
-/* ---------- also / install (left) ---------- */
-.also { margin-top: 64px; }
-.also h2, .install h2 { font-size: 22px; font-weight: 700; letter-spacing: -0.02em; margin-bottom: 16px; }
-.also ul { list-style: none; }
-.also li {
-  font-size: 14px;
-  color: var(--ink-dim);
-  padding-top: 7px;
-  padding-bottom: 7px;
-  padding-left: 18px;
-  position: relative;
-}
-.also li::before {
-  content: "";
-  position: absolute;
-  left: 2px; top: 16px;
-  width: 5px; height: 5px;
-  border-radius: 50%;
-  background: var(--spark-b);
-  opacity: 0.7;
-}
-.install { margin-top: 64px; }
-.install ol { list-style: none; counter-reset: inst; }
-.install ol li {
-  counter-increment: inst;
-  font-size: 14.5px;
-  color: var(--ink-dim);
-  padding-top: 8px;
-  padding-bottom: 8px;
-  padding-left: 34px;
-  position: relative;
-}
-.install ol li::before {
-  content: counter(inst, decimal-leading-zero);
-  position: absolute;
-  left: 0; top: 11px;
-  font-family: var(--mono);
-  font-size: 12px;
-  color: var(--spark-a);
-}
-.install strong { color: var(--ink); font-weight: 600; }
-pre {
-  margin-top: 10px;
-  background: #101014;
-  border: 1px solid var(--line);
-  border-radius: 10px;
-  padding: 11px 14px;
-  overflow-x: auto;
-}
-pre code { font-size: 12.5px; color: var(--ink); }
-
-/* ---------- footer ---------- */
-footer {
-  border-top: 1px solid var(--line);
-  padding: 28px 0 44px;
-  color: var(--ink-faint);
-  font-size: 13.5px;
-}
-footer .inner {
-  max-width: 1200px;
-  margin: 0 auto;
-  padding-left: 32px;
-  padding-right: 32px;
-  display: flex;
-  justify-content: space-between;
-  gap: 16px;
-  flex-wrap: wrap;
-  align-items: center;
-}
-footer a { color: var(--ink-dim); text-decoration: none; }
-footer a:hover { color: var(--ink); }
-footer .fbrand { display: flex; align-items: center; gap: 8px; }
-footer .fbrand img { width: 18px; height: 18px; border-radius: 4px; }
-
-/* ---------- the demo (right) ---------- */
+/* ---------- demo frame ---------- */
+.demo { display: flex; flex-direction: column; align-items: center; }
 .frame-wrap { position: relative; width: 100%; max-width: 520px; }
 .frame-scale { transform-origin: top left; }
 .frame {
@@ -264,9 +132,10 @@ footer .fbrand img { width: 18px; height: 18px; border-radius: 4px; }
   background:
     radial-gradient(400px 300px at 18% 110%, rgba(201,139,255,0.16), transparent 65%),
     radial-gradient(420px 320px at 85% 100%, rgba(255,157,110,0.12), transparent 65%),
-    linear-gradient(180deg, #131318 0%, #0d0d11 100%);
+    linear-gradient(180deg, #17171c 0%, #0e0e12 100%);
   box-shadow: 0 40px 100px -30px rgba(0,0,0,0.9);
   user-select: none;
+  font-family: var(--sans);
 }
 .d-menubar {
   position: absolute;
@@ -284,8 +153,8 @@ footer .fbrand img { width: 18px; height: 18px; border-radius: 4px; }
 }
 .d-menubar .l, .d-menubar .r { display: flex; gap: 12px; align-items: center; }
 .d-menubar .appname { font-weight: 600; color: var(--ink); }
-.d-menubar .spark { color: var(--spark-a); }
-.d-menubar .spark.busy { animation: sparkle 1s ease-in-out infinite; }
+.d-menubar .spark { color: rgba(255,255,255,0.85); }
+.d-menubar .spark.busy { color: var(--spark-a); animation: sparkle 1s ease-in-out infinite; }
 @keyframes sparkle { 0%,100% { opacity: 1; } 50% { opacity: 0.3; } }
 .d-notch {
   position: absolute;
@@ -293,154 +162,232 @@ footer .fbrand img { width: 18px; height: 18px; border-radius: 4px; }
   transform: translateX(-50%);
   width: 120px; height: 26px;
   background: #000;
-  border-radius: 0 0 9px 9px;
+  border-radius: 0 0 10px 10px;
   z-index: 4;
 }
 .d-notch::before, .d-notch::after {
   content: "";
   position: absolute;
-  top: 0; width: 9px; height: 9px;
-  background: radial-gradient(circle at 100% 100%, transparent 9px, #000 9.5px);
+  top: 0; width: 10px; height: 10px;
+  background: radial-gradient(circle at 100% 100%, transparent 10px, #000 10.5px);
 }
-.d-notch::before { left: -9px; }
-.d-notch::after { right: -9px; transform: scaleX(-1); }
+.d-notch::before { left: -10px; }
+.d-notch::after { right: -10px; transform: scaleX(-1); }
 
-/* panel — the app's own reveal: laid out in place, top-anchored mask */
+/* the panel — solid near-black, flared top corners, r24 bottom, no border */
 .d-panel {
   position: absolute;
-  left: 100px; top: 26px;
-  width: 320px;
-  height: 258px;
-  background: #000;
-  border-radius: 0 0 16px 16px;
+  left: 90px; top: 26px;
+  width: 340px;
+  height: 272px;
+  background:
+    linear-gradient(180deg, rgba(255,255,255,0.05) 0, rgba(255,255,255,0.01) 25%, rgba(255,255,255,0) 60%),
+    rgba(3, 3, 5, 0.96);
+  border-radius: 0 0 24px 24px;
   z-index: 3;
-  clip-path: inset(0 0 100% 0);
+  clip-path: inset(0 -10px 100% -10px);
   transition: clip-path 0.45s var(--ease-notch);
   display: flex;
   flex-direction: column;
 }
-.frame.open .d-panel { clip-path: inset(0 0 0 0); }
-.d-strip {
-  height: 28px;
-  position: relative;
-  flex: none;
+.frame.open .d-panel { clip-path: inset(0 -10px -1px -10px); }
+.d-panel::before, .d-panel::after {
+  /* top corners flare outward, like the notch itself */
+  content: "";
+  position: absolute;
+  top: 0; width: 10px; height: 10px;
+  background: radial-gradient(circle at 100% 100%, transparent 10px, rgba(8,8,10,0.97) 10.5px);
 }
+.d-panel::before { left: -10px; }
+.d-panel::after { right: -10px; transform: scaleX(-1); }
+
+/* top strip: history + gear left, pin + new-chat right */
+.d-strip { height: 28px; position: relative; flex: none; }
 .d-icon {
   position: absolute;
-  top: 7px;
-  width: 15px; height: 15px;
-  color: var(--ink-faint);
-  transition: color 0.2s;
+  top: 8px;
+  width: 12px; height: 12px;
+  color: rgba(255,255,255,0.55);
 }
-.d-icon svg { width: 15px; height: 15px; display: block; }
-.d-icon.gear { left: 12px; }
-.d-icon.pin { right: 64px; }
-.d-icon.clock { right: 38px; }
-.d-icon.pencil { right: 12px; }
-.frame.pinned .d-icon.pin { color: var(--spark-a); transform: rotate(-35deg); }
+.d-icon svg { width: 12px; height: 12px; display: block; }
+.d-icon.clock  { left: 14px; }
+.d-icon.gear   { left: 38px; }
+.d-icon.pin    { right: 38px; transition: color 0.15s, transform 0.15s; }
+.d-icon.pencil { right: 14px; }
+.frame.pinned .d-icon.pin { color: var(--accent); }
+.frame.pinned .d-icon.pin .pin-fill { fill: currentColor; }
+
+/* chat area */
 .d-chat {
   flex: 1;
-  padding-left: 12px;
-  padding-right: 12px;
-  padding-top: 4px;
+  padding: 8px 18px 0;
   display: flex;
   flex-direction: column;
-  gap: 7px;
-  font-size: 11.5px;
+  align-items: flex-start;
+  gap: 10px;
+  font-size: 13px;
   line-height: 1.45;
   overflow: hidden;
+  position: relative;
+  -webkit-mask-image: linear-gradient(180deg, #000 78%, rgba(0,0,0,0.6) 88%, transparent 100%);
+          mask-image: linear-gradient(180deg, #000 78%, rgba(0,0,0,0.6) 88%, transparent 100%);
 }
 .d-msg-user {
   align-self: flex-end;
-  background: #1e1e24;
-  border-radius: 12px 12px 3px 12px;
-  padding: 5px 10px;
+  background: rgba(255,255,255,0.14);
+  border-radius: 15px;
+  padding: 5px 11px;
   max-width: 82%;
+  color: #fff;
 }
-.d-msg-steps { color: var(--ink-faint); font-family: var(--mono); font-size: 9.5px; }
-.d-msg-agent { color: var(--ink-dim); max-width: 94%; }
-.d-msg-agent code { font-size: 9.5px; color: var(--ink); background: #1a1a20; padding: 0 4px; border-radius: 4px; }
-.d-empty {
-  margin: auto;
-  color: var(--ink-faint);
+.d-tool {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  color: rgba(255,255,255,0.45);
+  font-size: 11px;
+  white-space: nowrap;
+}
+.d-tool svg { width: 10px; height: 10px; flex: none; }
+.d-fold {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  color: rgba(255,255,255,0.45);
   font-size: 11px;
 }
-.d-composer {
-  flex: none;
-  border-top: 1px solid var(--line);
-  margin-left: 12px;
-  margin-right: 12px;
-  padding-top: 8px;
-  padding-bottom: 10px;
+.d-fold svg { width: 8px; height: 8px; }
+.d-msg-agent { color: rgba(255,255,255,0.88); max-width: 100%; }
+.d-msg-agent code { font-size: 11px; background: rgba(255,255,255,0.08); padding: 0 4px; border-radius: 4px; }
+.d-spin {
   display: flex;
   align-items: center;
   gap: 6px;
-}
-.d-pill {
-  font-size: 9px;
-  color: var(--ink-dim);
-  background: #17171c;
-  border: 1px solid var(--line);
-  border-radius: 999px;
-  padding: 2px 8px;
-  white-space: nowrap;
-  transition: opacity 0.3s;
-}
-.d-pill.hidden { opacity: 0; }
-.d-input {
-  flex: 1;
+  color: rgba(255,255,255,0.5);
   font-size: 11px;
-  color: var(--ink);
-  white-space: nowrap;
-  overflow: hidden;
 }
-.d-input .ph { color: var(--ink-faint); }
+.d-spin .ring {
+  width: 10px; height: 10px;
+  border: 1.5px solid rgba(255,255,255,0.2);
+  border-top-color: rgba(255,255,255,0.7);
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+
+/* empty state — sparkle, "Ask anything." */
+.d-empty {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 3px;
+}
+.d-empty .sp { font-size: 16px; color: rgba(255,255,255,0.3); margin-bottom: 2px; }
+.d-empty .t1 { font-size: 12.5px; color: rgba(255,255,255,0.55); }
+.d-empty .t2 { font-size: 10px; color: rgba(255,255,255,0.3); }
+
+/* composer: text field on top, controls row below */
+.d-composer {
+  flex: none;
+  margin: 4px 22px 12px;
+  background: #1b1b20;
+  border-radius: 12px;
+  padding: 9px 11px 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.d-input { font-size: 13px; color: #fff; white-space: nowrap; overflow: hidden; }
+.d-input .ph { color: rgba(255,255,255,0.35); }
 .d-caret {
   display: inline-block;
-  width: 1px; height: 11px;
-  background: var(--spark-a);
-  vertical-align: -1.5px;
+  width: 1.5px; height: 13px;
+  background: var(--accent);
+  vertical-align: -2px;
   animation: blink 1.1s steps(1) infinite;
 }
 @keyframes blink { 50% { opacity: 0; } }
+.d-ctl {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.d-ctl .ic { width: 12px; height: 12px; color: rgba(255,255,255,0.6); flex: none; }
+.d-ctl .ic svg { width: 12px; height: 12px; display: block; }
+.d-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  font-size: 11px;
+  font-weight: 500;
+  color: rgba(255,255,255,0.75);
+  white-space: nowrap;
+  transition: opacity 0.3s;
+}
+.d-pill svg { width: 6.5px; height: 6.5px; opacity: 0.55; }
+.d-pill.hidden { display: none; }
+.d-send {
+  margin-left: auto;
+  width: 20px; height: 20px;
+  color: rgba(255,255,255,0.25);
+  transition: color 0.2s;
+}
+.d-send.ready { color: rgba(255,255,255,0.85); }
+.d-send svg { width: 20px; height: 20px; display: block; }
 
-/* popovers */
+/* popovers / menus */
 .d-pop {
   position: absolute;
-  background: #141419;
-  border: 1px solid rgba(255,255,255,0.13);
+  background: #232328;
+  border: 1px solid rgba(255,255,255,0.12);
   border-radius: 10px;
   box-shadow: 0 16px 40px rgba(0,0,0,0.7);
   z-index: 5;
-  font-size: 10.5px;
-  padding-top: 4px;
-  padding-bottom: 4px;
   opacity: 0;
-  transform: translateY(4px) scale(0.98);
-  transition: opacity 0.18s ease-out, transform 0.18s ease-out;
+  transform: translateY(3px) scale(0.98);
+  transition: opacity 0.16s ease-out, transform 0.16s ease-out;
   pointer-events: none;
 }
 .d-pop.show { opacity: 1; transform: none; }
-.d-pop .row {
-  padding: 4px 12px;
-  color: var(--ink-dim);
+/* model menu (from the session pill) */
+#pop-model { left: 150px; top: 148px; width: 120px; padding: 4px; font-size: 11.5px; }
+#pop-model .row {
   display: flex;
-  gap: 8px;
   align-items: center;
-  white-space: nowrap;
+  justify-content: space-between;
+  height: 22px;
+  padding: 0 9px;
+  border-radius: 5px;
+  color: rgba(255,255,255,0.85);
+  line-height: 1;
 }
-.d-pop .row .check { width: 10px; color: var(--spark-a); }
-.d-pop .row.hot { background: rgba(255,212,121,0.12); color: var(--ink); border-radius: 6px; }
-.d-pop .row small { color: var(--ink-faint); font-size: 9px; margin-left: auto; padding-left: 14px; }
-#pop-provider { left: 120px; top: 150px; width: 118px; }
-#pop-history { left: 218px; top: 58px; width: 190px; }
+#pop-model .row .sub { font-size: 8px; opacity: 0.45; line-height: 1; }
+#pop-model .row.hot { background: var(--accent); color: #fff; }
+/* history popover */
+#pop-history { left: 100px; top: 58px; width: 230px; padding: 6px; }
+#pop-history .row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 8px;
+  border-radius: 6px;
+}
+#pop-history .row.hot { background: rgba(255,255,255,0.08); }
+#pop-history .tt { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px; line-height: 1.35; }
+#pop-history .tt .a { font-size: 12px; color: rgba(255,255,255,0.9); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+#pop-history .tt .b { font-size: 9.5px; color: rgba(255,255,255,0.45); }
+#pop-history .tr { width: 10px; height: 10px; color: rgba(255,255,255,0.4); flex: none; }
+#pop-history .tr svg { width: 10px; height: 10px; }
 
 /* fake cursor */
 .d-cursor {
   position: absolute;
   left: 0; top: 0;
   z-index: 9;
-  transform: translate(430px, 350px);
+  transform: translate(448px, 365px);
   transition-property: transform;
   transition-timing-function: cubic-bezier(0.3, 0.1, 0.25, 1);
   filter: drop-shadow(0 1px 2px rgba(0,0,0,0.6));
@@ -449,9 +396,8 @@ footer .fbrand img { width: 18px; height: 18px; border-radius: 4px; }
 .d-cursor svg { transition: transform 0.1s; }
 .d-ring {
   position: absolute;
-  left: -14px; top: -14px;
   width: 28px; height: 28px;
-  border: 1.5px solid var(--spark-a);
+  border: 1.5px solid rgba(255,255,255,0.7);
   border-radius: 50%;
   z-index: 8;
   opacity: 0;
@@ -460,192 +406,232 @@ footer .fbrand img { width: 18px; height: 18px; border-radius: 4px; }
 }
 .d-ring.go { animation: ring 0.45s ease-out; }
 @keyframes ring {
-  0% { opacity: 0.9; transform: scale(0.3); }
+  0% { opacity: 0.8; transform: scale(0.3); }
   100% { opacity: 0; transform: scale(1.1); }
 }
 
-/* caption under the frame */
+/* caption */
 .d-caption {
-  margin-top: 18px;
+  margin-top: 16px;
   width: 100%;
   max-width: 520px;
-  display: flex;
-  align-items: center;
+  text-align: center;
+  min-height: 22px;
+  font-size: 13.5px;
+  color: var(--ink-dim);
+}
+
+/* ---------- full-width features ---------- */
+.features { padding-top: 48px; padding-bottom: 24px; }
+.features h2, .install h2 {
+  font-size: 26px;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  margin-bottom: 28px;
+}
+.grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 14px;
-  min-height: 24px;
 }
-.d-caption .idx { font-family: var(--mono); font-size: 12px; color: var(--spark-a); }
-.d-caption .txt { font-size: 13.5px; color: var(--ink-dim); }
-.d-dots {
-  margin-left: auto;
+.card {
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  padding: 20px;
+  background: rgba(255,255,255,0.02);
+}
+.card h3 { font-size: 15px; font-weight: 650; margin-bottom: 6px; }
+.card p { font-size: 13.5px; color: var(--ink-dim); line-height: 1.55; }
+.card p code, .card h3 code { font-size: 12px; color: var(--ink); }
+
+/* ---------- full-width install ---------- */
+.install { padding-top: 56px; padding-bottom: 88px; }
+.inst-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 14px;
+}
+.inst {
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  padding: 20px;
+  background: rgba(255,255,255,0.02);
+}
+.inst .n {
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--spark-a);
+  display: block;
+  margin-bottom: 8px;
+}
+.inst p { font-size: 14px; color: var(--ink-dim); }
+.inst strong { color: var(--ink); font-weight: 600; }
+.inst a { color: var(--ink); }
+pre {
+  margin-top: 10px;
+  background: #101014;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 10px 12px;
+  overflow-x: auto;
+}
+pre code { font-size: 11.5px; color: var(--ink); }
+
+/* ---------- footer ---------- */
+footer {
+  border-top: 1px solid var(--line);
+  padding: 28px 0 44px;
+  color: var(--ink-faint);
+  font-size: 13.5px;
+}
+footer .inner {
   display: flex;
-  gap: 6px;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+  align-items: center;
 }
-.d-dot {
-  width: 6px; height: 6px;
-  border-radius: 50%;
-  background: #2a2a31;
-  border: 0;
-  padding: 0;
-  cursor: pointer;
-  transition: background 0.2s, transform 0.2s;
-}
-.d-dot.active { background: var(--spark-a); transform: scale(1.25); }
+footer a { color: var(--ink-dim); text-decoration: none; }
+footer a:hover { color: var(--ink); }
+footer .fbrand { display: flex; align-items: center; gap: 8px; }
+footer .fbrand img { width: 18px; height: 18px; border-radius: 4px; }
 
 /* ---------- responsive ---------- */
 @media (max-width: 940px) {
-  .layout { grid-template-columns: minmax(0, 1fr); column-gap: 0; }
-  .intro { grid-column: 1; grid-row: 1; }
-  .demo-col { grid-column: 1; grid-row: 2; margin-top: 48px; }
-  .content { grid-column: 1; grid-row: 3; padding-top: 24px; }
-  .demo-sticky { position: static; min-height: 0; padding-top: 0; padding-bottom: 0; }
+  .hero { grid-template-columns: minmax(0, 1fr); min-height: 0; row-gap: 48px; }
+  .grid, .inst-grid { grid-template-columns: minmax(0, 1fr); }
 }
 @media (prefers-reduced-motion: reduce) {
-  .d-cursor, .d-ring, .d-dots { display: none; }
+  .d-cursor, .d-ring { display: none; }
   .d-panel { transition: none; }
-  .d-caret, .d-menubar .spark.busy { animation: none; }
+  .d-caret, .d-menubar .spark.busy, .d-spin .ring { animation: none; }
 }
 </style>
 </head>
 <body>
 
-<div class="layout">
+<div class="wrap topbar">
+  <img src="icon.png" alt="">
+  <span class="name">NotchAgent</span>
+  <a class="gh" href="https://github.com/utmostelf5752/notch-agent">GitHub</a>
+</div>
 
-  <header class="intro">
-    <div class="brand">
-      <img src="icon.png" alt="">
-      <span class="name">NotchAgent</span>
-      <a class="gh" href="https://github.com/utmostelf5752/notch-agent">GitHub</a>
-    </div>
+<section class="wrap hero">
+  <div class="intro">
     <h1>Your coding agent, living in <span class="grad">the notch</span>.</h1>
     <p class="sub">A chat panel that drops out of the camera housing, drives the agent CLIs you already use, and gets out of the way when you click off. No window, no dock icon, no app switch.</p>
     <div class="cta-row">
       <a class="btn primary" href="https://github.com/utmostelf5752/notch-agent/releases/latest/download/NotchAgent.dmg" download>&#8595;&nbsp; Download for macOS</a>
     </div>
     <p class="cta-note">Free &middot; macOS 13+ &middot; built fresh from <code>main</code> by CI &middot; <span class="hotkey">or open with <kbd>&#8997;</kbd> <kbd>space</kbd></span></p>
-  </header>
+  </div>
 
-  <aside class="demo-col" aria-label="Animated demo of NotchAgent">
-    <div class="demo-sticky">
-      <div class="frame-wrap">
-        <div class="frame-scale" id="frame-scale">
-          <div class="frame" id="frame">
-            <div class="d-menubar" aria-hidden="true">
-              <div class="l"><span>&#63743;</span><span class="appname">NotchAgent</span></div>
-              <div class="r"><span class="spark" id="spark">&#10024;</span><span>9:41</span></div>
+  <div class="demo" aria-label="Animated demo of NotchAgent">
+    <div class="frame-wrap">
+      <div class="frame-scale" id="frame-scale">
+        <div class="frame" id="frame">
+          <div class="d-menubar" aria-hidden="true">
+            <div class="l"><span>&#63743;</span><span class="appname">NotchAgent</span></div>
+            <div class="r"><span class="spark" id="spark">&#10022;</span><span>9:41</span></div>
+          </div>
+          <div class="d-notch" aria-hidden="true"></div>
+
+          <div class="d-panel" role="img" aria-label="The NotchAgent chat panel: a question about a failing test, the agent's tool steps, and its answer.">
+            <div class="d-strip">
+              <span class="d-icon clock"><svg viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.1" stroke-linecap="round"><path d="M1.6 6a4.4 4.4 0 1 0 1.3-3.1"/><path d="M2.9 0.7v2.2h2.2"/><path d="M6 3.8v2.4l1.7 1"/></svg></span>
+              <span class="d-icon gear"><svg viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.1"><circle cx="6" cy="6" r="1.9"/><path d="M6 0.8v1.5M6 9.7v1.5M0.8 6h1.5M9.7 6h1.5M2.3 2.3l1.1 1.1M8.6 8.6l1.1 1.1M9.7 2.3L8.6 3.4M3.4 8.6L2.3 9.7"/></svg></span>
+              <span class="d-icon pin" id="icon-pin"><svg viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.1" stroke-linejoin="round"><path class="pin-fill" d="M4.8 1.2l6 6-2.3.4L6.9 10 3.5 6.6 1.6 8.9l-.4-.4L3.5 6.2z" fill="none" transform="scale(0.92)"/><path d="M4.2 7.8L1.4 10.6"/></svg></span>
+              <span class="d-icon pencil"><svg viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.1" stroke-linejoin="round"><rect x="1" y="2.6" width="8.4" height="8.4" rx="1.8"/><path d="M4.6 7.4L10.6 1.4l1 1-6 6-1.4.4z" fill="none"/></svg></span>
             </div>
-            <div class="d-notch" aria-hidden="true"></div>
 
-            <div class="d-panel" id="panel" role="img" aria-label="The NotchAgent chat panel: a question about a failing test, the agent's tool steps, and its answer.">
-              <div class="d-strip">
-                <span class="d-icon gear"><svg viewBox="0 0 15 15" fill="none" stroke="currentColor" stroke-width="1.2"><circle cx="7.5" cy="7.5" r="2.4"/><path d="M7.5 1.5v2M7.5 11.5v2M1.5 7.5h2M11.5 7.5h2M3.3 3.3l1.4 1.4M10.3 10.3l1.4 1.4M11.7 3.3l-1.4 1.4M4.7 10.3l-1.4 1.4"/></svg></span>
-                <span class="d-icon pin" id="icon-pin"><svg viewBox="0 0 15 15" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"><path d="M6 2l7 7-2.5.5L9 12 5.5 8.5 3 9.5 3.5 7z"/><path d="M5.5 9.5L2 13"/></svg></span>
-                <span class="d-icon clock" id="icon-clock"><svg viewBox="0 0 15 15" fill="none" stroke="currentColor" stroke-width="1.2"><circle cx="7.5" cy="7.5" r="5.5"/><path d="M7.5 4.5v3.2l2.2 1.3"/></svg></span>
-                <span class="d-icon pencil" id="icon-pencil"><svg viewBox="0 0 15 15" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"><path d="M2.5 12.5l.8-3L10 2.8l2.2 2.2L5.5 11.7l-3 .8z"/></svg></span>
+            <div class="d-chat" id="chat"></div>
+
+            <div class="d-composer">
+              <div class="d-input" id="input"><span class="ph">Ask anything&hellip;</span></div>
+              <div class="d-ctl">
+                <span class="ic"><svg viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.1" stroke-linecap="round"><path d="M10.4 5.4L6 9.8a2.8 2.8 0 0 1-4-4l4.6-4.6a1.9 1.9 0 0 1 2.7 2.7L4.7 8.5a1 1 0 0 1-1.4-1.4l4-4"/></svg></span>
+                <span class="d-pill" id="pill-session">Opus 4.8 &middot; Med <svg viewBox="0 0 8 8" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M1 2.5l3 3 3-3"/></svg></span>
+                <span class="d-pill" id="pill-folder">api <svg viewBox="0 0 8 8" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M1 2.5l3 3 3-3"/></svg></span>
+                <span class="ic"><svg viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.1"><path d="M1 6s1.9-3.2 5-3.2S11 6 11 6s-1.9 3.2-5 3.2S1 6 1 6z"/><circle cx="6" cy="6" r="1.4"/></svg></span>
+                <span class="d-send" id="send"><svg viewBox="0 0 20 20"><circle cx="10" cy="10" r="9" fill="currentColor"/><path d="M10 14.2V6.4M6.8 9.4L10 6.2l3.2 3.2" stroke="#0a0a0c" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" fill="none"/></svg></span>
               </div>
-              <div class="d-chat" id="chat"></div>
-              <div class="d-composer">
-                <span class="d-pill" id="pill-provider">Claude</span>
-                <span class="d-pill" id="pill-folder">~/code/api</span>
-                <span class="d-input" id="input"><span class="ph">Message&hellip;</span><span class="d-caret"></span></span>
-              </div>
             </div>
+          </div>
 
-            <div class="d-pop" id="pop-provider">
-              <div class="row" data-p="Claude"><span class="check">&#10003;</span>Claude</div>
-              <div class="row" data-p="Codex"><span class="check"></span>Codex</div>
-              <div class="row" data-p="Cursor"><span class="check"></span>Cursor</div>
-              <div class="row" data-p="ChatGPT"><span class="check"></span>ChatGPT</div>
-            </div>
-            <div class="d-pop" id="pop-history">
-              <div class="row hot">Fix failing auth test<small>2m</small></div>
-              <div class="row">Refactor session cache<small>1h</small></div>
-              <div class="row">Explain the CI flake<small>1d</small></div>
-            </div>
+          <div class="d-pop" id="pop-model" aria-hidden="true">
+            <div class="row" data-p="Claude"><span>Claude</span><span class="sub">&#9656;</span></div>
+            <div class="row" data-p="Codex"><span>Codex</span><span class="sub">&#9656;</span></div>
+            <div class="row" data-p="Cursor"><span>Cursor</span><span class="sub">&#9656;</span></div>
+            <div class="row" data-p="ChatGPT"><span>ChatGPT</span></div>
+          </div>
+          <div class="d-pop" id="pop-history" aria-hidden="true">
+            <div class="row hot"><span class="tt"><span class="a">Fix failing auth test</span><span class="b">Claude &middot; Jul 16, 9:38 AM</span></span><span class="tr"><svg viewBox="0 0 10 10" fill="none" stroke="currentColor" stroke-width="1"><path d="M1.5 2.5h7M4 2.5V1.5h2v1M2.5 2.5l.5 6h4l.5-6"/></svg></span></div>
+            <div class="row"><span class="tt"><span class="a">Refactor session cache</span><span class="b">Codex &middot; Jul 15, 4:12 PM</span></span><span class="tr"><svg viewBox="0 0 10 10" fill="none" stroke="currentColor" stroke-width="1"><path d="M1.5 2.5h7M4 2.5V1.5h2v1M2.5 2.5l.5 6h4l.5-6"/></svg></span></div>
+            <div class="row"><span class="tt"><span class="a">Explain the CI flake</span><span class="b">ChatGPT &middot; Jul 14, 11:20 AM</span></span><span class="tr"><svg viewBox="0 0 10 10" fill="none" stroke="currentColor" stroke-width="1"><path d="M1.5 2.5h7M4 2.5V1.5h2v1M2.5 2.5l.5 6h4l.5-6"/></svg></span></div>
+          </div>
 
-            <div class="d-ring" id="ring"></div>
-            <div class="d-cursor" id="cursor" aria-hidden="true">
-              <svg width="20" height="22" viewBox="0 0 20 22"><path d="M4 1 L4 16.5 L7.8 13.2 L10.2 19.2 L13.1 18 L10.7 12.2 L15.8 12.2 Z" fill="#111" stroke="#fff" stroke-width="1.4" stroke-linejoin="round"/></svg>
-            </div>
+          <div class="d-ring" id="ring"></div>
+          <div class="d-cursor" id="cursor" aria-hidden="true">
+            <svg width="20" height="22" viewBox="0 0 20 22"><path d="M4 1 L4 16.5 L7.8 13.2 L10.2 19.2 L13.1 18 L10.7 12.2 L15.8 12.2 Z" fill="#111" stroke="#fff" stroke-width="1.4" stroke-linejoin="round"/></svg>
           </div>
         </div>
       </div>
-      <div class="d-caption">
-        <span class="idx" id="cap-idx">01</span>
-        <span class="txt" id="cap-txt">Hover the notch — the panel drops out.</span>
-        <div class="d-dots" id="dots"></div>
-      </div>
     </div>
-  </aside>
+    <div class="d-caption" id="caption">Hover the notch &mdash; the panel drops out of it.</div>
+  </div>
+</section>
 
-  <main class="content">
-    <section class="tour">
-      <div class="tour-head">
-        <h2>What you're watching</h2>
-        <span class="tour-hint" id="tour-hint">click any step to see it</span>
-      </div>
-      <div class="steps" id="steps">
-        <button class="step" data-i="0">
-          <span class="n">01</span>
-          <span><h3>Hover to open</h3><p>A 0.15s dwell on the camera housing opens the panel in place — no app switch, and it never steals your keyboard on hover.</p></span>
-        </button>
-        <button class="step" data-i="1">
-          <span class="n">02</span>
-          <span><h3>Ask anything</h3><p>Messages run headlessly through the <code>claude</code>, <code>codex</code>, or Cursor <code>agent</code> CLI in a folder you pick. Replies stream; tool activity folds into a steps row.</p></span>
-        </button>
-        <button class="step" data-i="2">
-          <span class="n">03</span>
-          <span><h3>Click away to close</h3><p>A click anywhere else dismisses the panel and hands your keyboard straight back.</p></span>
-        </button>
-        <button class="step" data-i="3">
-          <span class="n">04</span>
-          <span><h3>It remembers</h3><p>Reopen and the transcript is exactly where you left it, mid-thought included.</p></span>
-        </button>
-        <button class="step" data-i="4">
-          <span class="n">05</span>
-          <span><h3>Pin it</h3><p>Pinning disables outside-click closing, so the panel stays up while you work in other apps.</p></span>
-        </button>
-        <button class="step" data-i="5">
-          <span class="n">06</span>
-          <span><h3>Four providers</h3><p>Claude Code, Codex, Cursor, ChatGPT — each keeps its own thread. ChatGPT runs through your signed-in web session; no API key.</p></span>
-        </button>
-        <button class="step" data-i="6">
-          <span class="n">07</span>
-          <span><h3>Chats restore</h3><p>Conversations archive with their provider and session ids; restoring one continues it, threads intact.</p></span>
-        </button>
-        <button class="step" data-i="7">
-          <span class="n">08</span>
-          <span><h3>Fresh start</h3><p>The pencil archives the chat and clears the panel for the next question.</p></span>
-        </button>
-      </div>
-    </section>
+<section class="wrap features">
+  <h2>Small surface, real agent</h2>
+  <div class="grid">
+    <div class="card">
+      <h3>Opens without stealing focus</h3>
+      <p>Spotlight-style non-activating panel: it takes your keystrokes while the app you're in stays frontmost. Esc or click away to dismiss; pin it to keep it up while you work.</p>
+    </div>
+    <div class="card">
+      <h3>Your CLIs, headless</h3>
+      <p>Messages run through the <code>claude</code>, <code>codex</code>, or Cursor <code>agent</code> CLI you're already signed into — your accounts, your usage, your working folder.</p>
+    </div>
+    <div class="card">
+      <h3>ChatGPT without an API key</h3>
+      <p>A hidden web view logged into chatgpt.com sends prompts and scrapes replies. Sign in once; threads resume across restarts.</p>
+    </div>
+    <div class="card">
+      <h3>Streaming, with the work shown</h3>
+      <p>Replies stream in token by token, and tool activity renders live, then folds into an expandable "N steps" row when the turn finishes.</p>
+    </div>
+    <div class="card">
+      <h3>Drop files on the notch</h3>
+      <p>Drag files onto the panel or the notch itself, or grab a screenshot of the full screen or the active window from the paperclip menu.</p>
+    </div>
+    <div class="card">
+      <h3>Chats that come back</h3>
+      <p>Every conversation is archived with its provider and session id. Restore one and it continues where it left off — including ChatGPT threads.</p>
+    </div>
+  </div>
+</section>
 
-    <section class="also">
-      <h2>Also in the box</h2>
-      <ul>
-        <li><kbd>&#8997;</kbd> <kbd>space</kbd> opens it from anywhere — a Carbon hotkey, no accessibility permission needed.</li>
-        <li>Drag files onto the panel or the notch itself, or attach a screenshot from the paperclip menu.</li>
-        <li>A menu-bar sparkle shows it's running and animates while a turn is in flight.</li>
-        <li>Works on notchless displays too — a small black tab is drawn at the top center instead.</li>
-      </ul>
-    </section>
-
-    <section class="install" id="install">
-      <h2>Install</h2>
-      <ol>
-        <li><strong><a href="https://github.com/utmostelf5752/notch-agent/releases/latest/download/NotchAgent.dmg">Download the DMG</a></strong> and drag NotchAgent to Applications.</li>
-        <li><strong>First launch:</strong> the app is ad-hoc signed, so Gatekeeper blocks a plain double-click. Right-click &rarr; <strong>Open</strong> &rarr; confirm, or clear the quarantine flag:
-          <pre><code>xattr -dr com.apple.quarantine /Applications/NotchAgent.app</code></pre>
-        </li>
-        <li><strong>Hover the notch</strong> (or press <kbd>&#8997;</kbd> <kbd>space</kbd>), pick a provider and a working folder, and say hi.</li>
-      </ol>
-    </section>
-  </main>
-
-</div>
+<section class="wrap install" id="install">
+  <h2>Install</h2>
+  <div class="inst-grid">
+    <div class="inst">
+      <span class="n">01</span>
+      <p><strong><a href="https://github.com/utmostelf5752/notch-agent/releases/latest/download/NotchAgent.dmg">Download the DMG</a></strong> and drag NotchAgent to Applications.</p>
+    </div>
+    <div class="inst">
+      <span class="n">02</span>
+      <p><strong>First launch:</strong> the app is ad-hoc signed, so Gatekeeper blocks a plain double-click. Right-click &rarr; <strong>Open</strong> &rarr; confirm, or clear the quarantine flag:</p>
+      <pre><code>xattr -dr com.apple.quarantine /Applications/NotchAgent.app</code></pre>
+    </div>
+    <div class="inst">
+      <span class="n">03</span>
+      <p><strong>Hover the notch</strong> (or press <kbd>&#8997;</kbd> <kbd>space</kbd>), pick a provider and a working folder in the composer, and say hi.</p>
+    </div>
+  </div>
+</section>
 
 <footer>
-  <div class="inner">
+  <div class="wrap inner">
     <div class="fbrand">
       <img src="icon.png" alt="">
       <span>NotchAgent — a prototype, built in Swift, no dock icon.</span>
@@ -662,46 +648,53 @@ footer .fbrand img { width: 18px; height: 18px; border-radius: 4px; }
 (() => {
   const $ = id => document.getElementById(id);
   const frame = $('frame'), chat = $('chat'), input = $('input'), cursor = $('cursor'),
-        ring = $('ring'), spark = $('spark'), capIdx = $('cap-idx'), capTxt = $('cap-txt');
+        ring = $('ring'), spark = $('spark'), caption = $('caption'), send = $('send');
 
   const QUESTION = 'why is test_auth_flow failing?';
-  const STEPS_LINE = '▸ 4 steps · read auth_test.py · ran pytest';
-  const REPLY = 'The token fixture expires at <code>t+0</code> — bump its TTL to 60s and the suite passes.';
+  const REPLY = 'The token fixture expires at <code>t+0</code> — <code>session.py</code> now refreshes 30s early, so the mock is already stale. Bumping the TTL to 60s fixes the suite.';
+  const PH = '<span class="ph">Ask anything…</span>';
 
-  const PH = '<span class="ph">Message…</span><span class="d-caret"></span>';
+  const ICONS = {
+    doc: '<svg viewBox="0 0 10 10" fill="none" stroke="currentColor" stroke-width="1"><path d="M2 1h4l2.5 2.5V9H2z"/><path d="M6 1v2.5h2.5"/></svg>',
+    search: '<svg viewBox="0 0 10 10" fill="none" stroke="currentColor" stroke-width="1.1"><circle cx="4.2" cy="4.2" r="2.8"/><path d="M6.4 6.4L9 9"/></svg>',
+    term: '<svg viewBox="0 0 10 10" fill="none" stroke="currentColor" stroke-width="1"><rect x="0.8" y="1.4" width="8.4" height="7.2" rx="1.2"/><path d="M2.6 4l1.5 1.2-1.5 1.2M5.2 6.6h2.2"/></svg>',
+    chevR: '<svg viewBox="0 0 8 8" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M2.5 1l3 3-3 3"/></svg>',
+  };
+  const TOOLS = [
+    { icon: 'doc', text: 'Read auth_test.py' },
+    { icon: 'search', text: 'Grep expiry' },
+    { icon: 'doc', text: 'Read session.py' },
+    { icon: 'term', text: 'Ran pytest' },
+  ];
 
   // geometry (frame-local px)
   const AT = {
-    notch:    [260, 14],
-    composer: [300, 262],
-    outside:  [70, 380],
-    pin:      [348, 40],
-    clock:    [374, 40],
-    pencil:   [400, 40],
-    provider: [140, 262],
-    chatgpt:  [165, 227],
-    parked:   [452, 366],
+    notch:   [260, 14],
+    inputBox:[190, 238],
+    send:    [396, 266],
+    outside: [60, 382],
+    pin:     [386, 40],
+    clock:   [110, 40],
+    pencil:  [410, 40],
+    session: [180, 266],
+    chatgpt: [200, 229],
+    parked:  [452, 366],
   };
 
   const reduced = matchMedia('(prefers-reduced-motion: reduce)').matches;
+  let gen = 0;
+  let cx = 448, cy = 365;
 
-  let gen = 0;          // bumped to cancel an in-flight run
-  let cx = 452, cy = 366;
-
-  const stale = () => 'stale';
   function sleep(ms, g) {
     return new Promise((res, rej) =>
-      setTimeout(() => (g === gen ? res() : rej(stale())), ms));
+      setTimeout(() => (g === gen ? res() : rej('stale')), ms));
   }
-
   async function move(to, ms, g) {
     [cx, cy] = to;
     cursor.style.transitionDuration = ms + 'ms';
-    // offset so the arrow's tip, not its bounding box, lands on the target
     cursor.style.transform = `translate(${cx - 4}px, ${cy - 1}px)`;
     await sleep(ms + 40, g);
   }
-
   async function click(g) {
     cursor.classList.add('press');
     ring.style.left = (cx - 14) + 'px';
@@ -714,140 +707,135 @@ footer .fbrand img { width: 18px; height: 18px; border-radius: 4px; }
     await sleep(120, g);
   }
 
-  function bubbles(withAll) {
-    let h = '';
-    h += `<div class="d-msg-user">${QUESTION}</div>`;
-    if (withAll) {
-      h += `<div class="d-msg-steps">${STEPS_LINE}</div>`;
-      h += `<div class="d-msg-agent">${REPLY}</div>`;
-    }
-    return h;
+  const userBubble = `<div class="d-msg-user">${QUESTION}</div>`;
+  const foldRow = `<div class="d-fold">${ICONS.chevR}<span>4 steps</span></div>`;
+  const emptyState = `<div class="d-empty"><span class="sp">&#10022;</span><span class="t1">Ask anything.</span><span class="t2">&#8997;Space toggle &middot; Esc close</span></div>`;
+  const fullChat = userBubble + foldRow + `<div class="d-msg-agent">${REPLY}</div>`;
+
+  function toolLine(t) {
+    return `<div class="d-tool"><span class="ic">${ICONS[t.icon]}</span>${t.text}</div>`;
+  }
+  function spinRow(text) {
+    return `<div class="d-spin"><span class="ring"></span>${text}</div>`;
   }
 
   // instantly set the world to the state step i expects
   function applyState(i) {
     frame.classList.toggle('open', i !== 0 && i !== 3);
     frame.classList.toggle('pinned', i >= 5);
-    $('pop-provider').classList.remove('show');
+    $('pop-model').classList.remove('show');
     $('pop-history').classList.remove('show');
     spark.classList.remove('busy');
-    $('pill-provider').textContent = i >= 6 ? 'ChatGPT' : 'Claude';
+    send.classList.remove('ready');
+    $('pill-session').innerHTML = (i >= 6 ? 'ChatGPT' : 'Opus 4.8 &middot; Med') +
+      ' <svg viewBox="0 0 8 8" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M1 2.5l3 3 3-3"/></svg>';
     $('pill-folder').classList.toggle('hidden', i >= 6);
     input.innerHTML = PH;
-    chat.innerHTML = i >= 2 ? bubbles(true) : '<div class="d-empty">New chat</div>';
+    chat.innerHTML = i >= 2 ? fullChat : emptyState;
   }
 
   const steps = [
-    { idx: '01', cap: 'Hover the notch — the panel drops out.',
+    { cap: 'Hover the notch — the panel drops out of it.',
       async fn(g) {
         await move(AT.notch, 900, g);
-        await sleep(350, g);            // the 0.15s dwell, dramatized
+        await sleep(350, g);
         frame.classList.add('open');
-        await sleep(700, g);
+        await sleep(750, g);
       } },
-    { idx: '02', cap: 'Ask. The CLI answers, work shown.',
+    { cap: 'Ask anything. The CLI works; steps fold away.',
       async fn(g) {
-        await move(AT.composer, 500, g);
+        await move(AT.inputBox, 550, g);
         await click(g);
-        chat.innerHTML = '';
         input.innerHTML = '<span class="d-caret"></span>';
         for (let i = 1; i <= QUESTION.length; i++) {
           input.innerHTML = QUESTION.slice(0, i) + '<span class="d-caret"></span>';
-          await sleep(34, g);
+          if (i === 1) send.classList.add('ready');
+          await sleep(32, g);
         }
-        await sleep(260, g);
+        await sleep(200, g);
+        await move(AT.send, 400, g);
+        await click(g);
+        send.classList.remove('ready');
         input.innerHTML = PH;
-        chat.innerHTML = bubbles(false);
+        chat.innerHTML = userBubble + spinRow('Waiting for response');
         spark.classList.add('busy');
-        await sleep(600, g);
-        chat.innerHTML = bubbles(false) + `<div class="d-msg-steps">${STEPS_LINE}</div>`;
-        await sleep(700, g);
+        await sleep(650, g);
+        // tool lines render live while the turn runs
+        let lines = '';
+        for (const t of TOOLS) {
+          lines += toolLine(t);
+          chat.innerHTML = userBubble + lines + spinRow(t.text);
+          await sleep(480, g);
+        }
+        // then the run folds into a "4 steps" row
+        chat.innerHTML = userBubble + foldRow;
+        await sleep(350, g);
         const words = REPLY.split(' ');
         for (let i = 1; i <= words.length; i++) {
-          chat.innerHTML = bubbles(false) +
-            `<div class="d-msg-steps">${STEPS_LINE}</div>` +
+          chat.innerHTML = userBubble + foldRow +
             `<div class="d-msg-agent">${words.slice(0, i).join(' ')}</div>`;
-          await sleep(60, g);
+          await sleep(55, g);
         }
         spark.classList.remove('busy');
-        await sleep(500, g);
+        await sleep(600, g);
       } },
-    { idx: '03', cap: 'Click away — it closes clean.',
+    { cap: "Click anywhere else — it's gone.",
       async fn(g) {
         await move(AT.outside, 600, g);
         await click(g);
         frame.classList.remove('open');
-        await sleep(700, g);
+        await sleep(750, g);
       } },
-    { idx: '04', cap: 'Come back — the chat survived.',
+    { cap: 'Hover again — the chat is still there.',
       async fn(g) {
         await move(AT.notch, 700, g);
         await sleep(350, g);
         frame.classList.add('open');
-        await sleep(900, g);
+        await sleep(950, g);
       } },
-    { idx: '05', cap: 'Pin it while you work elsewhere.',
+    { cap: 'Pin it to keep it up while you work.',
       async fn(g) {
-        await move(AT.pin, 600, g);
+        await move(AT.pin, 650, g);
         await click(g);
         frame.classList.add('pinned');
-        await sleep(700, g);
+        await sleep(750, g);
       } },
-    { idx: '06', cap: 'Pick your provider.',
+    { cap: 'One panel, four providers — pick a model.',
       async fn(g) {
-        await move(AT.provider, 600, g);
+        await move(AT.session, 600, g);
         await click(g);
-        $('pop-provider').classList.add('show');
+        $('pop-model').classList.add('show');
         await sleep(500, g);
         await move(AT.chatgpt, 450, g);
-        const rows = document.querySelectorAll('#pop-provider .row');
+        const rows = document.querySelectorAll('#pop-model .row');
         rows.forEach(r => r.classList.toggle('hot', r.dataset.p === 'ChatGPT'));
-        await sleep(250, g);
+        await sleep(280, g);
         await click(g);
-        $('pop-provider').classList.remove('show');
+        $('pop-model').classList.remove('show');
         rows.forEach(r => r.classList.remove('hot'));
-        $('pill-provider').textContent = 'ChatGPT';
+        $('pill-session').innerHTML = 'ChatGPT <svg viewBox="0 0 8 8" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M1 2.5l3 3 3-3"/></svg>';
         $('pill-folder').classList.add('hidden');   // ChatGPT never touches files
-        await sleep(800, g);
+        await sleep(850, g);
       } },
-    { idx: '07', cap: 'History brings threads back.',
+    { cap: 'Past chats restore with their threads.',
       async fn(g) {
-        await move(AT.clock, 600, g);
+        await move(AT.clock, 650, g);
         await click(g);
         $('pop-history').classList.add('show');
-        await sleep(1400, g);
+        await sleep(1500, g);
         $('pop-history').classList.remove('show');
         await sleep(300, g);
       } },
-    { idx: '08', cap: 'New chat. Go again.',
+    { cap: 'New chat. Go again.',
       async fn(g) {
-        await move(AT.pencil, 500, g);
+        await move(AT.pencil, 550, g);
         await click(g);
-        chat.innerHTML = '<div class="d-empty">New chat</div>';
-        await sleep(900, g);
+        chat.innerHTML = emptyState;
+        await sleep(950, g);
         await move(AT.parked, 700, g);
         await sleep(400, g);
       } },
   ];
-
-  // dots + left-column step rows
-  const dots = $('dots');
-  steps.forEach((s, i) => {
-    const d = document.createElement('button');
-    d.className = 'd-dot';
-    d.setAttribute('aria-label', 'Play demo step ' + s.idx);
-    d.addEventListener('click', () => jump(i));
-    dots.appendChild(d);
-  });
-  document.querySelectorAll('.step').forEach(b =>
-    b.addEventListener('click', () => jump(+b.dataset.i)));
-
-  function setActive(i) {
-    capIdx.textContent = steps[i].idx;
-    capTxt.textContent = steps[i].cap;
-    document.querySelectorAll('.d-dot').forEach((d, j) => d.classList.toggle('active', j === i));
-    document.querySelectorAll('.step').forEach((b, j) => b.classList.toggle('active', j === i));
-  }
 
   async function run(startAt) {
     const g = ++gen;
@@ -855,18 +843,13 @@ footer .fbrand img { width: 18px; height: 18px; border-radius: 4px; }
     try {
       applyState(i);
       while (true) {
-        setActive(i);
+        caption.textContent = steps[i].cap;
         await steps[i].fn(g);
         await sleep(500, g);
         i = (i + 1) % steps.length;
         if (i === 0) { await sleep(400, g); applyState(0); await sleep(300, g); }
       }
     } catch (e) { if (e !== 'stale') throw e; }
-  }
-
-  function jump(i) {
-    cursor.style.transitionDuration = '0ms';
-    run(i);
   }
 
   // scale the fixed-px frame down on narrow screens
@@ -881,13 +864,8 @@ footer .fbrand img { width: 18px; height: 18px; border-radius: 4px; }
   fit();
 
   if (reduced) {
-    // static tableau: open panel, full conversation, no cursor theatre
     applyState(2);
-    frame.classList.add('open');
-    setActive(1);
-    capIdx.textContent = '';
-    capTxt.textContent = 'The panel, open — hover the notch or press ⌥ space.';
-    $('tour-hint').textContent = '';
+    caption.textContent = 'The panel, open — hover the notch or press ⌥ space.';
   } else {
     run(0);
   }

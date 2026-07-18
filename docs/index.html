@@ -511,6 +511,39 @@ footer .fbrand img {
   .hero { grid-template-columns: minmax(0, 1fr); min-height: 0; row-gap: 48px; }
   .grid, .inst-grid { grid-template-columns: minmax(0, 1fr); }
 }
+@media (max-width: 600px) {
+  .wrap { padding-left: 20px; padding-right: 20px; }
+  .topbar { padding-top: 18px; }
+  .topbar .gh {
+    min-height: 44px;
+    display: inline-flex;
+    align-items: center;
+    padding: 7px 16px;
+  }
+  .hero {
+    padding-top: 38px;
+    padding-bottom: 36px;
+    row-gap: 32px;
+  }
+  h1 { font-size: clamp(34px, 10vw, 40px); }
+  .sub { margin-top: 16px; font-size: 16px; line-height: 1.55; }
+  .cta-row { margin-top: 24px; }
+  .btn {
+    width: 100%;
+    min-height: 50px;
+    justify-content: center;
+    padding: 12px 18px;
+  }
+  .cta-note { line-height: 1.55; }
+  .d-caption { margin-top: 12px; padding: 0 10px; line-height: 1.45; }
+  .features { padding-top: 36px; }
+  .features h2, .install h2 { font-size: 24px; margin-bottom: 20px; }
+  .grid, .inst-grid { gap: 12px; }
+  .card, .inst { padding: 18px; border-radius: 14px; }
+  .install { padding-top: 44px; padding-bottom: 64px; }
+  footer { padding: 24px 0 32px; }
+  footer .inner { align-items: flex-start; flex-direction: column; }
+}
 @media (prefers-reduced-motion: reduce) {
   .d-cursor, .d-ring { display: none; }
   .d-panel { transition: none; }

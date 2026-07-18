@@ -647,12 +647,12 @@ struct ChatRootView: View {
             .overlay {
                 if state.dropTargeted {
                     NotchShape(radius: cornerRadius, topRadius: state.notchTopRadius)
-                        .fill(Color.white.opacity(0.06))
+                        .fill(Color.black.opacity(0.82))
                         .overlay {
                             VStack(spacing: 6) {
                                 Image(systemName: "paperclip")
                                     .font(.system(size: 18))
-                                Text("Drop to attach")
+                                Text("drop to attach")
                                     .font(.system(size: 12, weight: .medium))
                             }
                             .foregroundStyle(.white.opacity(0.7))
@@ -668,9 +668,6 @@ struct ChatRootView: View {
             // unrendered until the panel is reopened. Keeping the effect active
             // in both states sidesteps it; 0.9999 is visually identical to 1.
             .saturation(state.stealthMode ? 0 : 0.9999)
-            .onDrop(of: [UTType.fileURL], isTargeted: $state.dropTargeted) { providers in
-                acceptDroppedFiles(providers)
-            }
             // Reveal, not movement: the content is laid out in place and a
             // top-anchored mask wipes downward over it, so the panel appears to
             // be uncovered rather than to slide. Stealth folds out the same way.
@@ -691,6 +688,12 @@ struct ChatRootView: View {
             .overlay(alignment: .bottomTrailing) { if !state.stealthMode { cornerResizeHandle(sign: 1) } }
             .padding(.horizontal, AppState.panelMargin)
             .padding(.bottom, AppState.panelBottomMargin)
+            // Install the drop target after every overlay and outer margin so
+            // files can be released anywhere across the complete panel UI.
+            .contentShape(Rectangle())
+            .onDrop(of: [UTType.fileURL], isTargeted: $state.dropTargeted) { providers in
+                acceptDroppedFiles(providers)
+            }
             .preferredColorScheme(.dark)
             .animation(
                 state.expanded
@@ -1095,7 +1098,9 @@ struct ChatRootView: View {
                 }
             }
             .overlay {
-                if session.messages.isEmpty && !session.isRunning {
+                if let notice = session.usageLimit {
+                    usageLimitScreen(notice)
+                } else if session.messages.isEmpty && !session.isRunning {
                     emptyState
                 }
             }
@@ -1130,6 +1135,84 @@ struct ChatRootView: View {
                 .font(.system(size: 10 * s))
                 .foregroundStyle(.white.opacity(0.3))
         }
+    }
+
+    private func usageLimitScreen(_ notice: ProviderLimitNotice) -> some View {
+        VStack(spacing: 11 * s) {
+            Image(systemName: notice.kind == .uploads ? "tray.full.fill" : "hourglass.circle.fill")
+                .font(.system(size: 24 * s, weight: .medium))
+                .foregroundStyle(notice.kind == .uploads ? AnyShapeStyle(accent) : AnyShapeStyle(amber))
+            Text(notice.title)
+                .font(.system(size: 14 * s, weight: .semibold))
+                .foregroundStyle(.white.opacity(0.92))
+                .multilineTextAlignment(.center)
+            Text(notice.message)
+                .font(.system(size: 11.5 * s))
+                .foregroundStyle(.white.opacity(0.55))
+                .multilineTextAlignment(.center)
+                .fixedSize(horizontal: false, vertical: true)
+            if let detail = notice.providerDetail {
+                Text(detail)
+                    .font(.system(size: 10 * s))
+                    .foregroundStyle(.white.opacity(0.38))
+                    .multilineTextAlignment(.center)
+                    .lineLimit(3)
+            }
+            HStack(spacing: 8 * s) {
+                Button("Dismiss") { session.usageLimit = nil }
+                    .buttonStyle(.plain)
+                    .font(.system(size: 11 * s, weight: .medium))
+                    .foregroundStyle(.white.opacity(0.55))
+                    .padding(.horizontal, 10 * s)
+                    .padding(.vertical, 6 * s)
+
+                if notice.kind == .uploads {
+                    Button {
+                        session.usageLimit = nil
+                        // The blocked files were restored to the composer on
+                        // rollback; continuing without them means dropping them.
+                        session.attachments.removeAll()
+                        inputFocused = true
+                    } label: {
+                        Text("Continue without files")
+                            .font(.system(size: 11 * s, weight: .semibold))
+                            .foregroundStyle(.black)
+                            .padding(.horizontal, 12 * s)
+                            .padding(.vertical, 6 * s)
+                            .background(Capsule().fill(accent))
+                    }
+                    .buttonStyle(.plain)
+                } else {
+                    Menu {
+                        ForEach(AgentProvider.allCases.filter { $0 != notice.provider }) { provider in
+                            Button(provider.label) { session.provider = provider }
+                        }
+                    } label: {
+                        Text("Switch provider")
+                            .font(.system(size: 11 * s, weight: .semibold))
+                            .foregroundStyle(.black)
+                            .padding(.horizontal, 12 * s)
+                            .padding(.vertical, 6 * s)
+                            .background(Capsule().fill(amber))
+                    }
+                    .menuStyle(.button)
+                    .buttonStyle(.plain)
+                    .menuIndicator(.hidden)
+                }
+            }
+        }
+        .padding(.horizontal, 24 * s)
+        .padding(.vertical, 20 * s)
+        .frame(maxWidth: 330 * s)
+        .background(
+            RoundedRectangle(cornerRadius: 18 * s)
+                .fill(Color(red: 0.07, green: 0.07, blue: 0.08).opacity(0.96))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 18 * s)
+                        .strokeBorder(Color.white.opacity(0.12), lineWidth: 1)
+                )
+        )
+        .padding(18 * s)
     }
 
     private let amber = Color(red: 232/255, green: 182/255, blue: 76/255)

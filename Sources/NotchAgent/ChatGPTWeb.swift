@@ -4,9 +4,10 @@ import UniformTypeIdentifiers
 import WebKit
 
 // Embedded chatgpt.com provider: the app owns a persistent WKWebView.
-// First use shows a real chatgpt.com sign-in window (cookies persist in the
-// app's own WebKit store, so it's one-time); afterwards prompts are injected
-// into the hidden web view and the reply is scraped from the DOM.
+// Anonymous text chats use chatgpt.com's signed-out composer. Features that
+// require an account, such as attachments, open a real sign-in window (cookies
+// persist in the app's own WebKit store); prompts are otherwise injected into
+// the hidden web view and the reply is scraped from the DOM.
 // Selector set ported from codex-chatgpt-control's dom helpers.
 final class ChatGPTWeb: NSObject, ObservableObject, WKUIDelegate, WKNavigationDelegate, NSWindowDelegate {
     enum AccountStatus: Equatable {
@@ -20,7 +21,11 @@ final class ChatGPTWeb: NSObject, ObservableObject, WKUIDelegate, WKNavigationDe
         case thread(String)
         case partial(String)
         case message(String)
+        case limit(String, uploadsOnly: Bool)
         case error(String)
+        // The message was posted and consumed usage; only reading the reply
+        // failed. Must not be reported as "message not sent".
+        case replyError(String)
         case done
     }
 
@@ -35,8 +40,15 @@ final class ChatGPTWeb: NSObject, ObservableObject, WKUIDelegate, WKNavigationDe
     private var hostWindow: NSWindow!
     private var loginWindow: NSWindow?
     private var authPopupWindows: [ObjectIdentifier: (webView: WKWebView, window: NSWindow)] = [:]
+    private var completingAuthPopups: Set<ObjectIdentifier> = []
     private var cancelled = false
     private var generation = 0
+    private var preparingSignedOutLogin = false
+    private var presentLoginAfterFreshLoad = false
+    private var freshLoginNavigation: WKNavigation?
+    private var mainAuthFlowInProgress = false
+    private var awaitingAuthResult = false
+    private var authResultChecksRemaining = 0
 
     // Multi-strategy selectors: chatgpt.com renames data-testid / role attrs
     // periodically. Prefer current attrs, then historical / structural fallbacks.
@@ -343,9 +355,28 @@ final class ChatGPTWeb: NSObject, ObservableObject, WKUIDelegate, WKNavigationDe
     // MARK: - Public
 
     func showAccountWindow() {
+        if preparingSignedOutLogin {
+            presentLoginAfterFreshLoad = true
+            return
+        }
+        if accountStatus == .signedOut {
+            prepareFreshSignedOutLogin(presentWhenReady: true)
+            return
+        }
         let current = webView.url?.absoluteString ?? ""
-        if !current.hasPrefix("https://chatgpt.com") {
-            webView.load(URLRequest(url: URL(string: "https://chatgpt.com/")!))
+        let shouldReload: Bool
+        switch accountStatus {
+        case .signedOut:
+            shouldReload = true
+        case .checking:
+            shouldReload = !current.hasPrefix("https://chatgpt.com")
+                && !Self.isAuthenticationFlowURL(webView.url)
+        case .signedIn:
+            shouldReload = !current.hasPrefix("https://chatgpt.com")
+                || Self.isLogoutURL(webView.url)
+        }
+        if shouldReload {
+            webView.load(Self.freshChatGPTRequest())
         }
         presentLoginWindow()
     }
@@ -353,7 +384,17 @@ final class ChatGPTWeb: NSObject, ObservableObject, WKUIDelegate, WKNavigationDe
     func refreshAccountStatus() {
         let current = webView.url?.absoluteString ?? ""
         guard current.hasPrefix("https://chatgpt.com") else {
-            webView.load(URLRequest(url: URL(string: "https://chatgpt.com/")!))
+            if Self.isAuthenticationFlowURL(webView.url) {
+                mainAuthFlowInProgress = true
+                setAccountStatus(.checking)
+            } else {
+                webView.load(Self.freshChatGPTRequest())
+            }
+            return
+        }
+        if Self.isAuthenticationFlowURL(webView.url) {
+            mainAuthFlowInProgress = true
+            setAccountStatus(.checking)
             return
         }
         run(#"""
@@ -384,16 +425,75 @@ final class ChatGPTWeb: NSObject, ObservableObject, WKUIDelegate, WKNavigationDe
             guard let self else { return }
             let info = Self.decode(result) ?? [:]
             if info["signedIn"] as? Bool == true {
+                self.mainAuthFlowInProgress = false
+                self.awaitingAuthResult = false
+                self.authResultChecksRemaining = 0
                 let email = (info["email"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
                 self.setAccountStatus(.signedIn(email: email?.isEmpty == false ? email : nil))
-            } else {
+            } else if self.awaitingAuthResult && self.authResultChecksRemaining > 0 {
+                self.authResultChecksRemaining -= 1
+                let remaining = self.authResultChecksRemaining
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
+                    guard let self else { return }
+                    if remaining % 2 == 0 {
+                        // A late cookie write only takes effect on a fresh
+                        // page; the load's didFinish re-runs this check.
+                        self.webView.load(Self.freshChatGPTRequest())
+                    } else {
+                        // Re-probe in place first: slow hydration resolves
+                        // without a reload, and reloading restarts it.
+                        self.refreshAccountStatus()
+                    }
+                }
+            } else if self.awaitingAuthResult {
+                self.awaitingAuthResult = false
+                // Sign-in may still be settling server-side. Leave cookies
+                // untouched — wiping auth state here logs out a login that
+                // actually succeeded; the next load or manual retry will
+                // pick the session up if it exists.
                 self.setAccountStatus(.signedOut)
+            } else if self.mainAuthFlowInProgress {
+                self.mainAuthFlowInProgress = false
+                self.setAccountStatus(.signedOut)
+                self.prepareFreshSignedOutLogin(presentWhenReady: true)
+            } else {
+                let wasSignedIn: Bool
+                if case .signedIn = self.accountStatus {
+                    wasSignedIn = true
+                } else {
+                    wasSignedIn = false
+                }
+                self.setAccountStatus(.signedOut)
+                if wasSignedIn {
+                    self.prepareFreshSignedOutLogin(
+                        presentWhenReady: self.loginWindow?.isVisible == true
+                    )
+                }
             }
         }
     }
 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
-        guard webView === self.webView else { return }
+        if webView !== self.webView {
+            finishAuthPopupIfReturnedToChatGPT(webView)
+            return
+        }
+        if Self.isAuthenticationFlowURL(webView.url) {
+            mainAuthFlowInProgress = true
+            setAccountStatus(.checking)
+            return
+        }
+        if preparingSignedOutLogin && navigation !== freshLoginNavigation {
+            return
+        }
+        if preparingSignedOutLogin {
+            preparingSignedOutLogin = false
+            freshLoginNavigation = nil
+            if presentLoginAfterFreshLoad {
+                presentLoginAfterFreshLoad = false
+                presentLoginWindow()
+            }
+        }
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
             self?.refreshAccountStatus()
         }
@@ -454,7 +554,7 @@ final class ChatGPTWeb: NSObject, ObservableObject, WKUIDelegate, WKNavigationDe
     ) {
         guard !cancelled, gen == generation else { return }
         guard Date() < deadline else {
-            onEvent(.error("Timed out waiting for ChatGPT sign-in. Screenshots require a signed-in ChatGPT session."))
+            onEvent(.error("Timed out waiting for ChatGPT sign-in. Pictures and files require a signed-in ChatGPT session."))
             onEvent(.done)
             return
         }
@@ -465,14 +565,19 @@ final class ChatGPTWeb: NSObject, ObservableObject, WKUIDelegate, WKNavigationDe
           const labels = Array.from(document.querySelectorAll("button, [aria-label], [role='alert'], [role='dialog']"))
             .map(node => String(node.getAttribute("aria-label") || node.innerText || node.textContent || "").trim())
             .filter(Boolean);
+          const signedOut = labels.some(label =>
+            /^(log in|sign up|sign up for free)$/i.test(label)
+          );
           const loginReason = labels.find(label =>
             /(?:add|upload).*(?:file|image).*log in to use/i.test(label)
           ) || "";
           const limitReason = labels.find(label =>
-            /(?:file|image|upload).*(?:limit|quota|free plan|upgrade|try again later|not available)/i.test(label)
+            /(?:file|image|upload|attachment)/i.test(label) &&
+            /(?:limit|quota|allowance|free plan|upgrade|try again later|temporarily unavailable|not available)/i.test(label)
           ) || "";
           return JSON.stringify({
-            ready: inputs.length > 0 && !loginReason && !limitReason,
+            ready: inputs.length > 0 && !signedOut && !loginReason && !limitReason,
+            signedOut,
             loginReason,
             limitReason: limitReason.slice(0, 240),
             inputCount: inputs.length
@@ -487,16 +592,17 @@ final class ChatGPTWeb: NSObject, ObservableObject, WKUIDelegate, WKNavigationDe
                 return
             }
             if let reason = info["limitReason"] as? String, !reason.isEmpty {
-                onEvent(.error("ChatGPT cannot attach this screenshot: \(reason)"))
+                onEvent(.limit(reason, uploadsOnly: true))
                 onEvent(.done)
                 return
             }
             var shown = loginShown
-            let needsLogin = (info["loginReason"] as? String)?.isEmpty == false
+            let needsLogin = info["signedOut"] as? Bool == true
+                || (info["loginReason"] as? String)?.isEmpty == false
             if needsLogin, !shown {
                 self.setAccountStatus(.signedOut)
                 self.presentLoginWindow()
-                onEvent(.status("Sign in to ChatGPT to attach screenshots"))
+                onEvent(.status("Pictures and files require a ChatGPT account — sign in in the popup"))
                 shown = true
             }
             let shownFinal = shown
@@ -562,9 +668,31 @@ final class ChatGPTWeb: NSObject, ObservableObject, WKUIDelegate, WKNavigationDe
         const browserFile = new File([bytes], filename, { type: mimeType });
         const dt = new DataTransfer();
         dt.items.add(browserFile);
+        window.__notchAgentUploadProblem = "";
+        const rememberUploadProblem = node => {
+          const value = String(node && (node.innerText || node.textContent) || "").trim();
+          if (!value || value.length > 600) return;
+          if (/(?:upload|file|image|attachment)/i.test(value) &&
+              /(?:limit|quota|allowance|upgrade|free plan|try again later|temporarily unavailable|not available)/i.test(value)) {
+            window.__notchAgentUploadProblem = value.slice(0, 240);
+          }
+        };
+        const uploadObserver = new MutationObserver(records => {
+          records.forEach(record => {
+            if (record.type === "characterData") {
+              rememberUploadProblem(record.target.parentElement || record.target);
+            }
+            record.addedNodes.forEach(rememberUploadProblem);
+          });
+        });
+        uploadObserver.observe(document.body, { childList: true, subtree: true, characterData: true });
+        setTimeout(() => uploadObserver.disconnect(), 35000);
         const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "files")?.set;
         if (!setter) return JSON.stringify({ ok: false, reason: "no-files-setter" });
         setter.call(input, dt.files);
+        const injectedExactFile = Array.from(input.files || [])
+          .some(file => file.name === filename && file.size === bytes.length);
+        if (!injectedExactFile) return JSON.stringify({ ok: false, reason: "file-input-rejected" });
         input.dispatchEvent(new Event("input", { bubbles: true }));
         input.dispatchEvent(new Event("change", { bubbles: true }));
         return JSON.stringify({
@@ -592,7 +720,7 @@ final class ChatGPTWeb: NSObject, ObservableObject, WKUIDelegate, WKNavigationDe
                 file: file,
                 baseline: info["baseline"] as? Int ?? 0,
                 gen: gen,
-                deadline: Date().addingTimeInterval(45),
+                deadline: Date().addingTimeInterval(30),
                 onEvent: onEvent
             ) {
                 self.uploadFiles(rest, gen: gen, onEvent: onEvent, then: then)
@@ -609,11 +737,7 @@ final class ChatGPTWeb: NSObject, ObservableObject, WKUIDelegate, WKNavigationDe
         then: @escaping () -> Void
     ) {
         guard !cancelled, gen == generation else { return }
-        guard Date() < deadline else {
-            onEvent(.error("chatgpt.com never finished attaching \(file.lastPathComponent)."))
-            onEvent(.done)
-            return
-        }
+        let expired = Date() >= deadline
         let name = Self.jsonString(file.lastPathComponent) ?? "\"file\""
         let js = """
         (() => {
@@ -630,13 +754,27 @@ final class ChatGPTWeb: NSObject, ObservableObject, WKUIDelegate, WKNavigationDe
           const pending = !!root.querySelector(
             "[role='progressbar'], [data-testid*='upload-progress'], [aria-label*='Uploading' i]"
           ) || /uploading|processing file/i.test(text);
-          const blockedReason = Array.from(document.querySelectorAll("[role='alert'], [role='dialog'], [data-testid*='toast']"))
+          const notices = Array.from(document.querySelectorAll(
+            "[role='alert'], [role='dialog'], [aria-live], [data-testid*='toast']"
+          ))
             .map(node => String(node.innerText || node.textContent || "").trim())
-            .find(value => /(?:file|image|upload).*(?:limit|quota|free plan|upgrade|try again later|not available|failed)/i.test(value)) || "";
+            .filter(Boolean);
+          const uploadLimitReason = window.__notchAgentUploadProblem || notices.find(value =>
+            /(?:upload|file|image|attachment)/i.test(value) &&
+            /(?:limit|quota|allowance|upgrade|free plan|try again later|temporarily unavailable|not available)/i.test(value)
+          ) || "";
+          const blockedReason = notices.find(value =>
+            /(?:file|image|upload|attachment).*(?:failed|could not|couldn't)/i.test(value)
+          ) || "";
           return JSON.stringify({
+            // uploadFiles already proved the exact name and byte count were
+            // installed in the composer input. React may clear that input as
+            // it converts the file into an image-only preview, so the resulting
+            // composer-local preview increase is the completion signal here.
             ready: (signals > \(baseline) || text.includes(\(name))) && !pending,
             signals,
             pending,
+            uploadLimitReason: uploadLimitReason.slice(0, 240),
             blockedReason: blockedReason.slice(0, 240)
           });
         })()
@@ -644,6 +782,11 @@ final class ChatGPTWeb: NSObject, ObservableObject, WKUIDelegate, WKNavigationDe
         run(js) { [weak self] result in
             guard let self, !self.cancelled, gen == self.generation else { return }
             let info = Self.decode(result) ?? [:]
+            if let reason = info["uploadLimitReason"] as? String, !reason.isEmpty {
+                onEvent(.limit(reason, uploadsOnly: true))
+                onEvent(.done)
+                return
+            }
             if let reason = info["blockedReason"] as? String, !reason.isEmpty {
                 onEvent(.error("ChatGPT cannot attach \(file.lastPathComponent): \(reason)"))
                 onEvent(.done)
@@ -651,6 +794,11 @@ final class ChatGPTWeb: NSObject, ObservableObject, WKUIDelegate, WKNavigationDe
             }
             if info["ready"] as? Bool == true {
                 then()
+                return
+            }
+            if expired {
+                onEvent(.error("chatgpt.com never finished attaching \(file.lastPathComponent)."))
+                onEvent(.done)
                 return
             }
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
@@ -740,6 +888,37 @@ final class ChatGPTWeb: NSObject, ObservableObject, WKUIDelegate, WKNavigationDe
           const el = __composer();
           if (!el) return JSON.stringify({s: "no-composer", probe: __probeUI()});
           const P = \(promptJSON);
+          window.__notchAgentUsageProblem = "";
+          // Only alert/toast/dialog containers count: the user's own echoed
+          // prompt and the streamed reply mutate constantly and can mention
+          // plans, rates, and limits without any limit being hit.
+          const noticeSelector = "[role='alert'], [role='dialog'], [data-testid*='toast']";
+          const noticeHost = node => {
+            const el = node instanceof Element ? node : (node ? node.parentElement : null);
+            if (!el) return null;
+            return el.closest(noticeSelector)
+              || (el.querySelector ? el.querySelector(noticeSelector) : null);
+          };
+          const rememberUsageProblem = node => {
+            const host = noticeHost(node);
+            if (!host) return;
+            const value = String(host.innerText || host.textContent || "").trim();
+            if (!value || value.length > 600) return;
+            if (/(?:usage|quota|credits|requests|plan|rate)/i.test(value) &&
+                /(?:limit|reached|exceeded|exhausted|try again|reset|upgrade)/i.test(value)) {
+              window.__notchAgentUsageProblem = value.slice(0, 240);
+            }
+          };
+          const usageObserver = new MutationObserver(records => {
+            records.forEach(record => {
+              if (record.type === "characterData") {
+                rememberUsageProblem(record.target.parentElement || record.target);
+              }
+              record.addedNodes.forEach(rememberUsageProblem);
+            });
+          });
+          usageObserver.observe(document.body, { childList: true, subtree: true, characterData: true });
+          setTimeout(() => usageObserver.disconnect(), 30000);
           el.focus();
           if (el instanceof HTMLTextAreaElement || el instanceof HTMLInputElement) {
             const proto = el instanceof HTMLTextAreaElement
@@ -795,15 +974,16 @@ final class ChatGPTWeb: NSObject, ObservableObject, WKUIDelegate, WKNavigationDe
             let uBase = obj["uBase"] as? Int ?? 0
             // Give the composer a beat to enable its send button.
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.45) {
-                self.submit(gen: gen, aBase: aBase, aLast: aLast, uBase: uBase, onEvent: onEvent)
+                self.submit(prompt: prompt, gen: gen, aBase: aBase, aLast: aLast, uBase: uBase, onEvent: onEvent)
             }
         }
     }
 
     // Step 2: click send if a button is found, otherwise synthesize Enter.
     // A disabled button usually means an attachment is still uploading —
-    // retry for up to ~30s before falling back.
-    private func submit(gen: Int, aBase: Int, aLast: String, uBase: Int, attempt: Int = 0, onEvent: @escaping (Event) -> Void) {
+    // the composer preview appears before the server upload finishes, so
+    // keep retrying for up to ~30s before falling back.
+    private func submit(prompt: String, gen: Int, aBase: Int, aLast: String, uBase: Int, attempt: Int = 0, onEvent: @escaping (Event) -> Void) {
         let js = """
         (() => {
           \(Self.domHelpersJS)
@@ -822,12 +1002,12 @@ final class ChatGPTWeb: NSObject, ObservableObject, WKUIDelegate, WKNavigationDe
             guard let self, !self.cancelled, gen == self.generation else { return }
             if (result as? String) == "disabled" && attempt < 40 {
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.75) {
-                    self.submit(gen: gen, aBase: aBase, aLast: aLast, uBase: uBase, attempt: attempt + 1, onEvent: onEvent)
+                    self.submit(prompt: prompt, gen: gen, aBase: aBase, aLast: aLast, uBase: uBase, attempt: attempt + 1, onEvent: onEvent)
                 }
                 return
             }
             DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
-                self.verifySubmitted(gen: gen, aBase: aBase, aLast: aLast, uBase: uBase, onEvent: onEvent)
+                self.verifySubmitted(prompt: prompt, gen: gen, aBase: aBase, aLast: aLast, uBase: uBase, onEvent: onEvent)
             }
         }
     }
@@ -835,6 +1015,7 @@ final class ChatGPTWeb: NSObject, ObservableObject, WKUIDelegate, WKNavigationDe
     // Step 3: confirm the message actually left the composer; if not, report
     // what buttons exist so the failure is self-diagnosing.
     private func verifySubmitted(
+        prompt: String,
         gen: Int,
         aBase: Int,
         aLast: String,
@@ -842,6 +1023,7 @@ final class ChatGPTWeb: NSObject, ObservableObject, WKUIDelegate, WKNavigationDe
         attempt: Int = 0,
         onEvent: @escaping (Event) -> Void
     ) {
+        let promptJSON = Self.jsonString(prompt) ?? "\"\""
         let js = """
         (() => {
           \(Self.domHelpersJS)
@@ -851,12 +1033,22 @@ final class ChatGPTWeb: NSObject, ObservableObject, WKUIDelegate, WKNavigationDe
           const composerText = composer
             ? String(("value" in composer ? composer.value : composer.innerText || composer.textContent) || "").trim()
             : "";
+          const latestUserText = u.nodes.length
+            ? String(u.nodes[u.nodes.length - 1].innerText || u.nodes[u.nodes.length - 1].textContent || "").trim()
+            : "";
+          const composerEmpty = !!composer && composerText.length === 0;
+          const collapse = value => __normalizeMarkdown(value).replace(/\\s+/g, " ");
           return JSON.stringify({
             a: a.nodes.length,
             u: u.nodes.length,
             uStrategy: u.strategy,
             streaming: __isStreaming(),
-            composerEmpty: !!composer && composerText.length === 0,
+            composerEmpty,
+            exactPromptAccepted: u.nodes.length > \(uBase)
+              && collapse(latestUserText).includes(collapse(\(promptJSON))),
+            acceptedFallback: composerEmpty
+              && (__isStreaming() || a.nodes.length > \(aBase) || u.nodes.length > \(uBase)),
+            usageLimitReason: window.__notchAgentUsageProblem || "",
             probe: __probeUI()
           });
         })()
@@ -864,21 +1056,29 @@ final class ChatGPTWeb: NSObject, ObservableObject, WKUIDelegate, WKNavigationDe
         run(js) { [weak self] result in
             guard let self, !self.cancelled, gen == self.generation else { return }
             let obj = Self.decode(result) ?? [:]
-            // ChatGPT's lightweight UI can keep the accepted turn in a hidden
-            // optimistic transcript. A cleared visible composer, a new reply,
-            // or active streaming is therefore as decisive as a user node.
-            let sent = (obj["u"] as? Int ?? 0) > uBase
-                || (obj["a"] as? Int ?? 0) > aBase
-                || (obj["streaming"] as? Bool ?? false)
-                || (obj["composerEmpty"] as? Bool ?? false)
+            // Unrelated activity in the visible ChatGPT window must never
+            // satisfy this transaction: require either the exact prompt as a
+            // user node, or the composer WE filled having been consumed plus
+            // fresh turn activity (the lightweight UI can keep the accepted
+            // turn in a hidden optimistic transcript with no user node).
+            let sent = obj["exactPromptAccepted"] as? Bool == true
+                || obj["acceptedFallback"] as? Bool == true
             if sent {
                 self.pollReply(gen: gen, baseline: aBase, baselineText: aLast, lastText: "", stableCount: 0,
                                deadline: Date().addingTimeInterval(240), onEvent: onEvent)
                 return
             }
+            // Only a limit that actually blocked the send is a limit; a
+            // notice appearing after acceptance must not abort the turn.
+            if let reason = obj["usageLimitReason"] as? String, !reason.isEmpty {
+                onEvent(.limit(reason, uploadsOnly: false))
+                onEvent(.done)
+                return
+            }
             if attempt < 20 {
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
                     self.verifySubmitted(
+                        prompt: prompt,
                         gen: gen,
                         aBase: aBase,
                         aLast: aLast,
@@ -979,7 +1179,7 @@ final class ChatGPTWeb: NSObject, ObservableObject, WKUIDelegate, WKNavigationDe
     ) {
         guard !cancelled, gen == generation else { return }
         guard Date() < deadline else {
-            onEvent(.error("Timed out waiting for the reply."))
+            onEvent(.replyError("Timed out waiting for the reply."))
             onEvent(.done)
             return
         }
@@ -1025,7 +1225,7 @@ final class ChatGPTWeb: NSObject, ObservableObject, WKUIDelegate, WKNavigationDe
             let text = obj["text"] as? String ?? ""
             let href = obj["href"] as? String ?? ""
             if (obj["landmarksGone"] as? Bool) == true {
-                onEvent(.error("ChatGPT UI changed — message landmarks disappeared mid-reply."))
+                onEvent(.replyError("ChatGPT UI changed — message landmarks disappeared mid-reply."))
                 onEvent(.done)
                 return
             }
@@ -1076,6 +1276,7 @@ final class ChatGPTWeb: NSObject, ObservableObject, WKUIDelegate, WKNavigationDe
         )
         popup.customUserAgent = self.webView.customUserAgent
         popup.uiDelegate = self
+        popup.navigationDelegate = self
 
         let width = windowFeatures.width.map { CGFloat(truncating: $0) } ?? 540
         let height = windowFeatures.height.map { CGFloat(truncating: $0) } ?? 720
@@ -1099,20 +1300,34 @@ final class ChatGPTWeb: NSObject, ObservableObject, WKUIDelegate, WKNavigationDe
     func webViewDidClose(_ webView: WKWebView) {
         let key = ObjectIdentifier(webView)
         guard let entry = authPopupWindows.removeValue(forKey: key) else { return }
+        completingAuthPopups.remove(key)
+        webView.navigationDelegate = nil
         entry.window.delegate = nil
         entry.window.orderOut(nil)
         entry.window.close()
+        reloadMainViewAfterAuthPopup()
     }
 
     func windowWillClose(_ notification: Notification) {
         guard let closedWindow = notification.object as? NSWindow else { return }
         if closedWindow === loginWindow {
             mountMainWebViewInHost()
+            // Abandoning sign-in with the web view parked on an identity
+            // provider would otherwise pin accountStatus at .checking
+            // forever: nothing re-navigates, and showAccountWindow declines
+            // to reload while .checking on an auth URL.
+            if mainAuthFlowInProgress || Self.isAuthenticationFlowURL(webView.url) {
+                mainAuthFlowInProgress = false
+                webView.load(Self.freshChatGPTRequest())
+            }
             return
         }
         guard let match = authPopupWindows.first(where: { $0.value.window === closedWindow }) else { return }
         match.value.webView.uiDelegate = nil
+        match.value.webView.navigationDelegate = nil
         authPopupWindows.removeValue(forKey: match.key)
+        completingAuthPopups.remove(match.key)
+        reloadMainViewAfterAuthPopup()
     }
 
     private func presentLoginWindow() {
@@ -1153,6 +1368,153 @@ final class ChatGPTWeb: NSObject, ObservableObject, WKUIDelegate, WKNavigationDe
     }
 
     // MARK: - Helpers
+
+    private func clearSignedOutAuthState(completion: @escaping () -> Void) {
+        let store = webView.configuration.websiteDataStore
+        store.httpCookieStore.getAllCookies { cookies in
+            let authCookies = cookies.filter(Self.isTransientAuthCookie)
+            guard !authCookies.isEmpty else {
+                DispatchQueue.main.async(execute: completion)
+                return
+            }
+            let cookieCleanup = DispatchGroup()
+            for cookie in authCookies {
+                cookieCleanup.enter()
+                store.httpCookieStore.delete(cookie) {
+                    cookieCleanup.leave()
+                }
+            }
+            cookieCleanup.notify(queue: .main) {
+                completion()
+            }
+        }
+    }
+
+    private func finishAuthPopupIfReturnedToChatGPT(_ popup: WKWebView) {
+        guard let host = popup.url?.host?.lowercased(),
+              host == "chatgpt.com" || host.hasSuffix(".chatgpt.com"),
+              !Self.isAuthenticationFlowURL(popup.url),
+              authPopupWindows[ObjectIdentifier(popup)] != nil else { return }
+
+        let key = ObjectIdentifier(popup)
+        guard completingAuthPopups.insert(key).inserted else { return }
+
+        // ChatGPT's callback page can finish its cookie exchange after the
+        // navigation itself completes. Keep the popup alive for that work;
+        // closing it immediately can strand the main view in a signed-out
+        // state even though the identity provider succeeded.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+            guard let self else { return }
+            self.completingAuthPopups.remove(key)
+            guard let entry = self.authPopupWindows.removeValue(forKey: key) else { return }
+            popup.uiDelegate = nil
+            popup.navigationDelegate = nil
+            entry.window.delegate = nil
+            entry.window.orderOut(nil)
+            entry.window.close()
+            self.reloadMainViewAfterAuthPopup()
+        }
+    }
+
+    private func closeAuthPopupWindows() {
+        let entries = Array(authPopupWindows.values)
+        authPopupWindows.removeAll()
+        completingAuthPopups.removeAll()
+        for entry in entries {
+            entry.webView.uiDelegate = nil
+            entry.webView.navigationDelegate = nil
+            entry.window.delegate = nil
+            entry.window.orderOut(nil)
+            entry.window.close()
+        }
+    }
+
+    private func reloadMainViewAfterAuthPopup() {
+        // A popup may close itself before its last cookie write reaches the
+        // shared data store. Reload after a short grace period in either the
+        // self-close or callback-navigation path.
+        awaitingAuthResult = true
+        authResultChecksRemaining = 6
+        setAccountStatus(.checking)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+            guard let self else { return }
+            self.webView.load(Self.freshChatGPTRequest())
+            self.presentLoginWindow()
+        }
+    }
+
+    private func prepareFreshSignedOutLogin(presentWhenReady: Bool) {
+        if preparingSignedOutLogin {
+            presentLoginAfterFreshLoad = presentLoginAfterFreshLoad || presentWhenReady
+            return
+        }
+        preparingSignedOutLogin = true
+        presentLoginAfterFreshLoad = presentWhenReady
+        mainAuthFlowInProgress = false
+        awaitingAuthResult = false
+        authResultChecksRemaining = 0
+        setAccountStatus(.checking)
+        closeAuthPopupWindows()
+        hideLoginWindow()
+        clearSignedOutAuthState { [weak self] in
+            guard let self else { return }
+            self.freshLoginNavigation = self.webView.load(Self.freshChatGPTRequest())
+        }
+    }
+
+    private static func freshChatGPTRequest() -> URLRequest {
+        URLRequest(
+            url: URL(string: "https://chatgpt.com/")!,
+            cachePolicy: .reloadIgnoringLocalCacheData,
+            timeoutInterval: 60
+        )
+    }
+
+    private static func isTransientAuthCookie(_ cookie: HTTPCookie) -> Bool {
+        let domain = cookie.domain.lowercased().trimmingCharacters(in: CharacterSet(charactersIn: "."))
+        let name = cookie.name.lowercased()
+        if domain == "chatgpt.com" || domain.hasSuffix(".chatgpt.com") {
+            // The session token IS the sign-in; deleting it logs out a valid
+            // session. Only pre-login handshake state is transient.
+            if name.contains("session-token") { return false }
+            return name.contains("next-auth")
+                || name.contains("oauth")
+                || name.contains("csrf")
+        }
+        guard domain == "auth.openai.com"
+                || domain.hasSuffix(".auth.openai.com")
+                || domain == "auth0.com"
+                || domain.hasSuffix(".auth0.com") else { return false }
+        return name != "__cf_bm"
+            && name != "__cflb"
+            && name != "cf_clearance"
+    }
+
+    private static func isAuthenticationFlowURL(_ url: URL?) -> Bool {
+        guard let url, let host = url.host?.lowercased() else { return false }
+        if host == "chatgpt.com" || host.hasSuffix(".chatgpt.com") {
+            let path = url.path.lowercased()
+            return path.hasPrefix("/api/auth/") || path.hasPrefix("/auth/")
+        }
+        return host == "auth.openai.com"
+            || host.hasSuffix(".auth.openai.com")
+            || host == "appleid.apple.com"
+            || host.hasSuffix(".appleid.apple.com")
+            || host == "accounts.google.com"
+            || host == "login.microsoftonline.com"
+            || host.hasSuffix(".login.microsoftonline.com")
+            || host == "login.live.com"
+            || host == "auth0.com"
+            || host.hasSuffix(".auth0.com")
+    }
+
+    private static func isLogoutURL(_ url: URL?) -> Bool {
+        guard let value = url?.absoluteString.lowercased() else { return false }
+        return value.contains("logout")
+            || value.contains("log-out")
+            || value.contains("signout")
+            || value.contains("sign-out")
+    }
 
     private func setAccountStatus(_ status: AccountStatus) {
         accountStatus = status

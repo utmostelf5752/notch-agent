@@ -373,6 +373,31 @@ enum AgentProvider: String, CaseIterable, Identifiable, Codable {
     }
 }
 
+// A provider-reported account limit is materially different from a transport
+// or UI failure: it needs a durable, actionable state instead of a red debug
+// bubble. Upload limits are separate because ChatGPT text chat can still work.
+struct ProviderLimitNotice: Equatable {
+    enum Kind: Equatable {
+        case usage
+        case uploads
+    }
+
+    let provider: AgentProvider
+    let kind: Kind
+    let providerDetail: String?
+
+    var title: String {
+        kind == .uploads ? "ChatGPT uploads unavailable" : "\(provider.label) usage limit reached"
+    }
+
+    var message: String {
+        if kind == .uploads {
+            return "Your message wasn't sent. ChatGPT isn't accepting more uploads for this account right now. You can keep chatting without attachments or try again after your upload allowance resets."
+        }
+        return "Your message wasn't sent. \(provider.label) reports that usage is unavailable for this account right now. Switch providers or try again after the limit resets."
+    }
+}
+
 // One entry in a model or permission-mode menu. `label` is the menu item,
 // `short` is what fits in the composer pill. `dangerous` modes get a warning
 // tint on the composer.
@@ -686,7 +711,12 @@ final class AgentSession: ObservableObject {
     @Published var turnStartedAt: Date?
     @Published var turnChars = 0
     @Published var lastTurnDuration: TimeInterval = 0
-    @Published var provider: AgentProvider = .claude
+    @Published var usageLimit: ProviderLimitNotice?
+    @Published var provider: AgentProvider = .claude {
+        didSet {
+            if usageLimit?.provider != provider { usageLimit = nil }
+        }
+    }
     // Missing key = provider default (no flag). Keyed per provider so
     // switching between Claude and Codex remembers each one's choices.
     @Published var modelChoice: [AgentProvider: String] = [
@@ -964,6 +994,7 @@ final class AgentSession: ObservableObject {
 
     func send(_ text: String) {
         guard !isRunning else { return }
+        usageLimit = nil
         turnStartedAt = Date()
         turnChars = 0
         let files = attachments
@@ -1114,9 +1145,9 @@ final class AgentSession: ObservableObject {
                 if proc.terminationStatus != 0 {
                     let msg = String(data: errData, encoding: .utf8)?
                         .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-                    self.appendError(msg.isEmpty
+                    self.presentProviderFailure(msg.isEmpty
                         ? "claude exited with status \(proc.terminationStatus)"
-                        : msg)
+                        : msg, provider: .claude)
                 }
             }
         }
@@ -1230,7 +1261,7 @@ final class AgentSession: ObservableObject {
             guard let self else { return }
             if let error {
                 self.isRunning = false
-                self.appendError(error)
+                self.presentProviderFailure(error, provider: .codex)
                 return
             }
             guard let threadID else { return }
@@ -1262,7 +1293,7 @@ final class AgentSession: ObservableObject {
                 guard let self else { return }
                 if let error {
                     self.isRunning = false
-                    self.appendError(error)
+                    self.presentProviderFailure(error, provider: .codex)
                     return
                 }
                 self.codexActiveTurnID = turnID
@@ -1488,9 +1519,9 @@ final class AgentSession: ObservableObject {
                 if proc.terminationStatus != 0 {
                     let msg = String(data: errData, encoding: .utf8)?
                         .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-                    self.appendError(msg.isEmpty
+                    self.presentProviderFailure(msg.isEmpty
                         ? "agent exited with status \(proc.terminationStatus)"
-                        : msg)
+                        : msg, provider: .cursor)
                 }
             }
         }
@@ -1539,7 +1570,7 @@ final class AgentSession: ObservableObject {
             if event["is_error"] as? Bool == true,
                let result = event["result"] as? String,
                !result.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                appendError(result)
+                presentProviderFailure(result, provider: .cursor)
             }
         default:
             break
@@ -1627,9 +1658,9 @@ final class AgentSession: ObservableObject {
             isRunning = false
             codexActiveTurnID = nil
             pendingPermission = nil
-            if let failureMessage { appendError(failureMessage) }
+            if let failureMessage { presentProviderFailure(failureMessage, provider: .codex) }
         case .serverError(let message):
-            appendError(message)
+            presentProviderFailure(message, provider: .codex)
         case .approvalRequest(let kind, let payload, let respond):
             presentCodexApproval(kind: kind, payload: payload, respond: respond)
         }
@@ -1746,6 +1777,7 @@ final class AgentSession: ObservableObject {
         currentArchiveID = nil
         messages.removeAll()
         attachments.removeAll()
+        usageLimit = nil
         claudeSessionID = nil
         codexThreadID = nil
         chatgptThreadID = nil
@@ -1758,6 +1790,7 @@ final class AgentSession: ObservableObject {
         currentArchiveID = chat.id
         messages = chat.messages
         provider = chat.provider
+        usageLimit = nil
         claudeSessionID = chat.claudeSessionID
         codexThreadID = chat.codexThreadID
         chatgptThreadID = chat.chatgptThreadID
@@ -1816,7 +1849,29 @@ final class AgentSession: ObservableObject {
                 case .partial(let t), .message(let t):
                     self.setStreamingAssistant(t)
                 case .error(let m):
-                    self.appendError(m)
+                    self.isRunning = false
+                    self.appendError("Message failed — \(m)\nYour message was not sent.")
+                case .replyError(let m):
+                    self.isRunning = false
+                    self.appendError("Reply failed — \(m)\nYour message was sent, but the reply couldn't be read.")
+                case .limit(let detail, let uploadsOnly):
+                    self.isRunning = false
+                    // The notice says the message wasn't sent — make the
+                    // transcript and composer agree: withdraw the optimistic
+                    // user bubble (and this turn's tool chips) and put the
+                    // text and files back.
+                    if let idx = self.messages.lastIndex(where: { $0.role == .user && $0.text == text }) {
+                        self.messages.removeSubrange(idx...)
+                    }
+                    if self.draft.isEmpty { self.draft = text }
+                    for file in files where !self.attachments.contains(file) {
+                        self.attachments.append(file)
+                    }
+                    self.usageLimit = ProviderLimitNotice(
+                        provider: .chatgpt,
+                        kind: uploadsOnly ? .uploads : .usage,
+                        providerDetail: Self.conciseLimitDetail(detail)
+                    )
                 case .done:
                     self.isRunning = false
                 }
@@ -1864,6 +1919,11 @@ final class AgentSession: ObservableObject {
         case "result":
             // Resumed runs get a fresh session id; always track the latest.
             if let id = event["session_id"] as? String { claudeSessionID = id }
+            if event["is_error"] as? Bool == true,
+               let result = event["result"] as? String,
+               !result.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                presentProviderFailure(result, provider: .claude)
+            }
             // The turn is over; closing stdin lets the process exit.
             try? claudeStdin?.close()
             claudeStdin = nil
@@ -2044,11 +2104,70 @@ final class AgentSession: ObservableObject {
         }
     }
 
-    private func appendError(_ text: String) {
+    private func appendError(_ text: String, provider errorProvider: AgentProvider? = nil) {
         // Codex emits the same failure as both an `error` and a `turn.failed`.
-        let text = Self.withLoginHint(text, provider: provider)
+        let text = Self.withLoginHint(text, provider: errorProvider ?? provider)
         if messages.last?.role == .error, messages.last?.text == text { return }
         messages.append(ChatMessage(role: .error, text: text))
+    }
+
+    private func presentProviderFailure(_ text: String, provider: AgentProvider) {
+        if Self.isUsageLimit(text) {
+            // Providers report one limit through both their structured stream
+            // and process termination — one notice is enough. And a trailing
+            // event from a provider the user already switched away from must
+            // not raise a stale overlay over the new provider's session.
+            guard usageLimit?.provider != provider, provider == self.provider else { return }
+            usageLimit = ProviderLimitNotice(
+                provider: provider,
+                kind: .usage,
+                providerDetail: Self.conciseLimitDetail(text)
+            )
+            return
+        }
+        // A distinct non-limit failure is real information even while a limit
+        // notice is up; appendError's exact-text dedup handles true repeats.
+        appendError(text, provider: provider)
+    }
+
+    // Provider wording changes frequently, so match the stable semantic forms
+    // seen across Claude, Codex, and Cursor rather than one exact sentence.
+    // Deliberately avoid a bare "limit" match, "token limit", and transient
+    // 429 phrasings ("too many requests", "rate limit exceeded"): file-size,
+    // context-window, and momentary-throttle errors should remain ordinary
+    // errors, not be mislabeled as a durable account usage cap.
+    static func isUsageLimit(_ text: String) -> Bool {
+        let lower = text.lowercased()
+        let patterns = [
+            #"insufficient[_ -]?quota"#,
+            #"resource[_ -]?exhausted"#,
+            #"usage[_ -]?(?:limit|cap)"#,
+            #"quota.{0,40}(?:reached|exceeded|exhausted|depleted)"#,
+            #"(?:reached|hit|exceeded).{0,50}(?:usage|weekly|monthly|daily|spend|plan|request).{0,20}limit"#,
+            #"(?:usage|weekly|monthly|daily|spend|plan|request).{0,20}limit.{0,20}(?:reached|exceeded|exhausted|depleted)"#,
+            #"(?:out of|no|zero).{0,20}(?:usage|credits).{0,20}(?:left|remaining|available)?"#,
+            // Tokens/requests need the trailing word: "out of tokens" alone is
+            // how context-window errors read.
+            #"(?:out of|no|zero).{0,20}(?:tokens|requests).{0,12}(?:left|remaining|available)"#,
+            #"(?:credit|balance).{0,40}(?:exhausted|depleted|too low|insufficient)"#,
+            #"(?:limit|quota).{0,50}reset(?:s|ting)?(?: at| in| on)?"#,
+            // Lookbehind keeps the trailing 0 of "1000 tokens left" from
+            // matching as a zero balance.
+            #"(?<![\d.,])0 ?(?:weighted )?tokens?.{0,12}left"#,
+        ]
+        return patterns.contains { lower.range(of: $0, options: .regularExpression) != nil }
+    }
+
+    private static func conciseLimitDetail(_ text: String) -> String? {
+        let lines = text
+            .components(separatedBy: .newlines)
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+        guard let line = lines.first(where: isUsageLimit) ?? lines.first else { return nil }
+        // Avoid putting a JSON/log dump onto the screen. The generic copy is
+        // enough when the provider did not return one short human sentence.
+        guard line.count <= 240, !line.hasPrefix("{"), !line.hasPrefix("[") else { return nil }
+        return line
     }
 
     // If a CLI failure looks like an auth problem, append the Terminal command.

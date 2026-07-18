@@ -1,4 +1,165 @@
+import AppKit
 import Foundation
+import UniformTypeIdentifiers
+
+enum AppPaths {
+    static let supportDirectory: URL = {
+        let directory = FileManager.default.urls(
+            for: .applicationSupportDirectory, in: .userDomainMask
+        )[0].appendingPathComponent("NotchAgent", isDirectory: true)
+        try? FileManager.default.createDirectory(
+            at: directory, withIntermediateDirectories: true
+        )
+        return directory
+    }()
+
+    static let screenshotsDirectory: URL = {
+        let directory = supportDirectory.appendingPathComponent("Screenshots", isDirectory: true)
+        try? FileManager.default.createDirectory(
+            at: directory, withIntermediateDirectories: true
+        )
+        return directory
+    }()
+
+    static let attachmentsDirectory: URL = {
+        let directory = supportDirectory.appendingPathComponent("Attachments", isDirectory: true)
+        try? FileManager.default.createDirectory(
+            at: directory, withIntermediateDirectories: true
+        )
+        return directory
+    }()
+
+    static func existingScreenshot(named name: String) -> URL? {
+        let candidates = [
+            screenshotsDirectory.appendingPathComponent(name),
+            URL(fileURLWithPath: "/tmp", isDirectory: true).appendingPathComponent(name),
+        ]
+        return candidates.first { FileManager.default.fileExists(atPath: $0.path) }
+    }
+
+    static func migrateLegacyScreenshots() {
+        let manager = FileManager.default
+        let temporaryDirectory = URL(fileURLWithPath: "/tmp", isDirectory: true)
+        guard let files = try? manager.contentsOfDirectory(
+            at: temporaryDirectory,
+            includingPropertiesForKeys: nil,
+            options: [.skipsHiddenFiles]
+        ) else { return }
+
+        for source in files where source.lastPathComponent.hasPrefix("notchagent-screenshot-") {
+            let destination = screenshotsDirectory.appendingPathComponent(source.lastPathComponent)
+            guard !manager.fileExists(atPath: destination.path) else { continue }
+            try? manager.moveItem(at: source, to: destination)
+        }
+    }
+}
+
+enum ImageAttachmentNormalizer {
+    static let maximumBytes = 4_500_000
+
+    static func isImage(_ url: URL) -> Bool {
+        guard let type = UTType(filenameExtension: url.pathExtension) else { return false }
+        return type.conforms(to: .image)
+    }
+
+    static func jpegURL(for source: URL) throws -> URL {
+        guard isImage(source) else { return source }
+
+        let extensionName = source.pathExtension.lowercased()
+        let sourceBytes = (try? source.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? Int.max
+        if ["jpg", "jpeg"].contains(extensionName), sourceBytes <= maximumBytes {
+            return source
+        }
+
+        guard let image = NSImage(contentsOf: source) else {
+            throw NSError(
+                domain: "NotchAgent.ImageAttachment",
+                code: 1,
+                userInfo: [NSLocalizedDescriptionKey: "the image could not be decoded"]
+            )
+        }
+
+        let pixelWidth = image.representations.map(\.pixelsWide).max() ?? Int(image.size.width)
+        let pixelHeight = image.representations.map(\.pixelsHigh).max() ?? Int(image.size.height)
+        guard pixelWidth > 0, pixelHeight > 0 else {
+            throw NSError(
+                domain: "NotchAgent.ImageAttachment",
+                code: 2,
+                userInfo: [NSLocalizedDescriptionKey: "the image has no readable pixels"]
+            )
+        }
+
+        let screenshot = source.lastPathComponent.hasPrefix("notchagent-screenshot-")
+        let directory = screenshot ? AppPaths.screenshotsDirectory : AppPaths.attachmentsDirectory
+        let baseName = source.deletingPathExtension().lastPathComponent
+        let managedSource = source.deletingLastPathComponent().standardizedFileURL == directory.standardizedFileURL
+        let destination = directory.appendingPathComponent(
+            managedSource ? "\(baseName).jpg" : "\(baseName)-\(UUID().uuidString.prefix(8)).jpg"
+        )
+
+        var longestSide = max(pixelWidth, pixelHeight)
+        var lastData: Data?
+        while true {
+            let scale = min(1, CGFloat(longestSide) / CGFloat(max(pixelWidth, pixelHeight)))
+            let width = max(1, Int((CGFloat(pixelWidth) * scale).rounded()))
+            let height = max(1, Int((CGFloat(pixelHeight) * scale).rounded()))
+            guard let bitmap = renderedBitmap(image, width: width, height: height) else {
+                throw NSError(
+                    domain: "NotchAgent.ImageAttachment",
+                    code: 3,
+                    userInfo: [NSLocalizedDescriptionKey: "the JPEG renderer could not be created"]
+                )
+            }
+
+            for quality in [0.86, 0.72, 0.58] {
+                guard let data = bitmap.representation(
+                    using: .jpeg,
+                    properties: [.compressionFactor: quality]
+                ) else { continue }
+                lastData = data
+                if data.count <= maximumBytes {
+                    try data.write(to: destination, options: .atomic)
+                    return destination
+                }
+            }
+
+            if longestSide <= 1024, let lastData {
+                try lastData.write(to: destination, options: .atomic)
+                return destination
+            }
+            longestSide = max(1024, Int(CGFloat(longestSide) * 0.75))
+        }
+    }
+
+    private static func renderedBitmap(_ image: NSImage, width: Int, height: Int) -> NSBitmapImageRep? {
+        guard let bitmap = NSBitmapImageRep(
+            bitmapDataPlanes: nil,
+            pixelsWide: width,
+            pixelsHigh: height,
+            bitsPerSample: 8,
+            samplesPerPixel: 3,
+            hasAlpha: false,
+            isPlanar: false,
+            colorSpaceName: .deviceRGB,
+            bytesPerRow: 0,
+            bitsPerPixel: 0
+        ), let context = NSGraphicsContext(bitmapImageRep: bitmap) else { return nil }
+
+        NSGraphicsContext.saveGraphicsState()
+        NSGraphicsContext.current = context
+        context.imageInterpolation = .high
+        NSColor.white.setFill()
+        NSRect(x: 0, y: 0, width: width, height: height).fill()
+        image.draw(
+            in: NSRect(x: 0, y: 0, width: width, height: height),
+            from: NSRect(origin: .zero, size: image.size),
+            operation: .sourceOver,
+            fraction: 1
+        )
+        NSGraphicsContext.restoreGraphicsState()
+        return bitmap
+    }
+}
 
 struct ChatMessage: Identifiable, Equatable, Codable {
     enum Role: String, Equatable, Codable { case user, assistant, tool, error }
@@ -6,12 +167,44 @@ struct ChatMessage: Identifiable, Equatable, Codable {
     let role: Role
     var text: String
     var icon: String?
+    // Optional keeps decoding compatible with chats saved before attachments
+    // were persisted as clickable paths.
+    var attachmentPaths: [String]?
 
-    init(role: Role, text: String, icon: String? = nil) {
+    init(role: Role, text: String, icon: String? = nil, attachments: [URL] = []) {
         self.id = UUID()
         self.role = role
         self.text = text
         self.icon = icon
+        self.attachmentPaths = attachments.isEmpty ? nil : attachments.map(\.path)
+    }
+
+    var attachmentURLs: [URL] {
+        if let attachmentPaths, !attachmentPaths.isEmpty {
+            return attachmentPaths.map(URL.init(fileURLWithPath:))
+        }
+
+        // Older user messages retained only "Attached: <filename>". Recover
+        // legacy NotchAgent screenshots while those files still exist or after
+        // they have been migrated into Application Support.
+        guard role == .user,
+              let attachedLine = text.split(separator: "\n", omittingEmptySubsequences: false)
+                .last(where: { $0.hasPrefix("Attached: ") })
+        else { return [] }
+        return attachedLine.dropFirst("Attached: ".count)
+            .split(separator: ",")
+            .compactMap { raw in
+                let name = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard name.hasPrefix("notchagent-screenshot-") else { return nil }
+                return AppPaths.existingScreenshot(named: name)
+            }
+    }
+
+    var displayText: String {
+        guard attachmentPaths == nil, !attachmentURLs.isEmpty else { return text }
+        return text.split(separator: "\n", omittingEmptySubsequences: false)
+            .filter { !$0.hasPrefix("Attached: ") }
+            .joined(separator: "\n")
     }
 }
 
@@ -532,14 +725,10 @@ final class AgentSession: ObservableObject {
     // entry instead of inserting a duplicate.
     private var currentArchiveID: UUID?
 
-    private static let chatsURL: URL = {
-        let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("NotchAgent", isDirectory: true)
-        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        return dir.appendingPathComponent("chats.json")
-    }()
+    private static let chatsURL = AppPaths.supportDirectory.appendingPathComponent("chats.json")
 
     init() {
+        AppPaths.migrateLegacyScreenshots()
         if let saved = UserDefaults.standard.dictionary(forKey: Self.cursorContextDefaultsKey)
             as? [String: String] {
             var migrated = saved
@@ -558,6 +747,23 @@ final class AgentSession: ObservableObject {
             pastChats = Array(chats.prefix(Self.maxPastChats))
         }
         refreshCursorModelCatalog()
+    }
+
+    func addAttachments(_ urls: [URL]) {
+        for url in urls {
+            guard ImageAttachmentNormalizer.isImage(url) else {
+                attachments.append(url)
+                continue
+            }
+            do {
+                attachments.append(try ImageAttachmentNormalizer.jpegURL(for: url))
+            } catch {
+                messages.append(ChatMessage(
+                    role: .error,
+                    text: "Couldn't convert \(url.lastPathComponent) to JPEG — \(error.localizedDescription)."
+                ))
+            }
+        }
     }
 
     func modelMenuGroups(for provider: AgentProvider) -> [AgentModelMenuGroup] {
@@ -763,11 +969,7 @@ final class AgentSession: ObservableObject {
         let files = attachments
         attachments = []
 
-        var display = text
-        if !files.isEmpty {
-            display += "\nAttached: " + files.map(\.lastPathComponent).joined(separator: ", ")
-        }
-        messages.append(ChatMessage(role: .user, text: display))
+        messages.append(ChatMessage(role: .user, text: text, attachments: files))
 
         // A reopened chat sits in place in history until actually continued;
         // the first new message bumps it to the top.
@@ -778,22 +980,36 @@ final class AgentSession: ObservableObject {
         }
 
         if provider == .chatgpt {
+            // The website receives the user's exact text plus real file
+            // uploads. Do not append hidden behavioral instructions.
             sendViaChatGPTWeb(text, files: files)
             return
         }
 
-        // CLI agents have filesystem tools: hand them the paths.
-        var text = text
-        if !files.isEmpty {
-            text += "\n\nAttached files (read them if relevant):\n" + files.map(\.path).joined(separator: "\n")
-        }
-
         switch provider {
-        case .claude: sendViaClaude(text)
-        case .codex: sendViaCodex(text)
-        case .cursor: sendViaCursor(text)
+        case .claude:
+            let images = files.filter(Self.isImageAttachment)
+            let nonImages = files.filter { !images.contains($0) }
+            sendViaClaude(Self.withAttachmentPaths(text, files: nonImages), images: images)
+        case .codex:
+            // Codex app-server supports native localImage and mention inputs,
+            // so attachments do not need to be described inside the prompt.
+            sendViaCodex(text, files: files)
+        case .cursor:
+            // Cursor's CLI has no attachment argument. Preserve its working
+            // path transport without adding any behavioral prompt around it.
+            sendViaCursor(Self.withAttachmentPaths(text, files: files))
         case .chatgpt: break // handled above
         }
+    }
+
+    private static func withAttachmentPaths(_ text: String, files: [URL]) -> String {
+        guard !files.isEmpty else { return text }
+        return text + "\n\n" + files.map(\.path).joined(separator: "\n")
+    }
+
+    private static func isImageAttachment(_ url: URL) -> Bool {
+        ImageAttachmentNormalizer.isImage(url)
     }
 
     // GUI apps inherit a minimal PATH; both CLIs need node and friends.
@@ -809,7 +1025,7 @@ final class AgentSession: ObservableObject {
     // One process per turn. The user message goes in over stdin as stream-json
     // and stdin stays open so `--permission-prompt-tool stdio` can ask us for
     // tool permissions (control_request/can_use_tool -> control_response).
-    private func sendViaClaude(_ text: String) {
+    private func sendViaClaude(_ text: String, images: [URL]) {
         guard let claudePath else {
             appendError("""
                 claude CLI not found on PATH.
@@ -824,11 +1040,11 @@ final class AgentSession: ObservableObject {
                 self.isRunning = false
                 return
             }
-            self.launchClaude(text: text, executable: claudePath)
+            self.launchClaude(text: text, images: images, executable: claudePath)
         }
     }
 
-    private func launchClaude(text: String, executable: String) {
+    private func launchClaude(text: String, images: [URL], executable: String) {
         var args = [
             "-p",
             "--input-format", "stream-json",
@@ -909,9 +1125,29 @@ final class AgentSession: ObservableObject {
             try p.run()
             process = p
             claudeStdin = stdin.fileHandleForWriting
+            var content: [[String: Any]] = []
+            for image in images {
+                guard let data = try? Data(contentsOf: image), data.count <= 5_000_000,
+                      let type = UTType(filenameExtension: image.pathExtension),
+                      let mime = type.preferredMIMEType,
+                      ["image/jpeg", "image/png", "image/gif", "image/webp"].contains(mime)
+                else {
+                    appendError("Skipped \(image.lastPathComponent) (unsupported, unreadable, or over 5 MB).")
+                    continue
+                }
+                content.append([
+                    "type": "image",
+                    "source": [
+                        "type": "base64",
+                        "media_type": mime,
+                        "data": data.base64EncodedString(),
+                    ],
+                ])
+            }
+            content.append(["type": "text", "text": text])
             writeClaudeLine([
                 "type": "user",
-                "message": ["role": "user", "content": [["type": "text", "text": text]]],
+                "message": ["role": "user", "content": content],
             ])
         } catch {
             isRunning = false
@@ -950,7 +1186,7 @@ final class AgentSession: ObservableObject {
 
     // MARK: - Codex (app-server JSON-RPC)
 
-    private func sendViaCodex(_ text: String) {
+    private func sendViaCodex(_ text: String, files: [URL]) {
         guard let codexPath else {
             appendError("""
                 codex CLI not found on PATH.
@@ -965,11 +1201,11 @@ final class AgentSession: ObservableObject {
                 self.isRunning = false
                 return
             }
-            self.launchCodex(text: text, executable: codexPath)
+            self.launchCodex(text: text, files: files, executable: codexPath)
         }
     }
 
-    private func launchCodex(text: String, executable: String) {
+    private func launchCodex(text: String, files: [URL], executable: String) {
         if !codexServer.isRunning {
             do {
                 try codexServer.start(executable: executable, environment: Self.cliEnvironment())
@@ -1000,11 +1236,24 @@ final class AgentSession: ObservableObject {
             guard let threadID else { return }
             self.codexThreadID = threadID
 
+            var input: [[String: Any]] = [["type": "text", "text": text]]
+            for file in files {
+                if Self.isImageAttachment(file) {
+                    input.append(["type": "localImage", "path": file.path])
+                } else {
+                    input.append([
+                        "type": "mention",
+                        "name": file.lastPathComponent,
+                        "path": file.path,
+                    ])
+                }
+            }
+
             var turnParams: [String: Any] = [
                 "threadId": threadID,
                 "approvalPolicy": mode.approvalPolicy,
                 "sandboxPolicy": ["type": mode.sandboxPolicyType],
-                "input": [["type": "text", "text": text]],
+                "input": input,
                 "serviceTier": self.effectiveFastMode(for: .codex) ? "priority" : NSNull(),
             ]
             if let model = self.modelChoice[.codex] { turnParams["model"] = model }
@@ -1405,7 +1654,14 @@ final class AgentSession: ObservableObject {
         case "webSearch":
             appendTool("Searching \(String((item["query"] as? String ?? "the web").prefix(50)))", icon: "globe")
         case "mcpToolCall":
-            appendTool("Using \(item["tool"] as? String ?? "a tool")", icon: "wrench.fill")
+            let tool = item["tool"] as? String ?? "a tool"
+            let lower = tool.lowercased()
+            if lower.contains("screenshot") || lower.contains("image")
+                || lower.contains("computer") || lower.contains("zoom") {
+                appendTool("Reading screenshot", icon: "camera.viewfinder")
+            } else {
+                appendTool("Using \(tool)", icon: "wrench.fill")
+            }
         default:
             break // userMessage echo, reasoning, plan, todoList
         }
@@ -1553,7 +1809,8 @@ final class AgentSession: ObservableObject {
                 guard let self else { return }
                 switch event {
                 case .status(let t):
-                    self.appendTool(t, icon: "globe")
+                    let icon = t == "Reading screenshot" ? "camera.viewfinder" : "globe"
+                    self.updateTool(t, icon: icon)
                 case .thread(let id):
                     self.chatgptThreadID = id
                 case .partial(let t), .message(let t):
@@ -1740,7 +1997,7 @@ final class AgentSession: ObservableObject {
         default:
             let lower = name.lowercased()
             if lower.contains("screenshot") || lower.contains("computer") || lower.contains("zoom") {
-                return ("camera.viewfinder", "Looking at your screen")
+                return ("camera.viewfinder", "Reading screenshot")
             }
             if lower.contains("click") || lower.contains("type") || lower.contains("key") || lower.contains("scroll") {
                 return ("cursorarrow.click.2", "Controlling the screen")
@@ -1774,6 +2031,17 @@ final class AgentSession: ObservableObject {
 
     private func appendTool(_ text: String, icon: String = "wrench.fill") {
         messages.append(ChatMessage(role: .tool, text: text, icon: icon))
+    }
+
+    // Browser phases are one live activity row, not a separate step for each
+    // internal upload/navigation transition.
+    private func updateTool(_ text: String, icon: String) {
+        if let last = messages.indices.last, messages[last].role == .tool {
+            messages[last].text = text
+            messages[last].icon = icon
+        } else {
+            appendTool(text, icon: icon)
+        }
     }
 
     private func appendError(_ text: String) {

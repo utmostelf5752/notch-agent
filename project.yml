@@ -1,0 +1,44 @@
+name: NotchAgent
+
+options:
+  bundleIdPrefix: com.jagruth
+  deploymentTarget:
+    macOS: "13.0"
+  createIntermediateGroups: true
+
+settings:
+  base:
+    SWIFT_VERSION: "5.9"
+    MACOSX_DEPLOYMENT_TARGET: "13.0"
+    MARKETING_VERSION: "0.1.0"
+    CURRENT_PROJECT_VERSION: "1"
+    CODE_SIGN_STYLE: Manual
+    CODE_SIGN_IDENTITY: "Apple Development"
+    DEVELOPMENT_TEAM: WJZ957T3P9
+    ENABLE_HARDENED_RUNTIME: NO
+    ENABLE_DEBUG_DYLIB: NO
+
+targets:
+  NotchAgent:
+    type: application
+    platform: macOS
+    sources:
+      - path: Sources/NotchAgent
+      - path: Support/AppIcon.icns
+        buildPhase: resources
+      - path: Support/MenuBarIcon.png
+        buildPhase: resources
+    settings:
+      base:
+        PRODUCT_NAME: NotchAgent
+        PRODUCT_BUNDLE_IDENTIFIER: com.jagruth.notchagent
+        INFOPLIST_FILE: Support/Info.plist
+        GENERATE_INFOPLIST_FILE: NO
+
+schemes:
+  NotchAgent:
+    build:
+      targets:
+        NotchAgent: all
+    run:
+      config: Debug

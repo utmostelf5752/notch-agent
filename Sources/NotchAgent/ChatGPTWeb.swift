@@ -1,4 +1,5 @@
 import AppKit
+import Combine
 import UniformTypeIdentifiers
 import WebKit
 
@@ -7,7 +8,13 @@ import WebKit
 // app's own WebKit store, so it's one-time); afterwards prompts are injected
 // into the hidden web view and the reply is scraped from the DOM.
 // Selector set ported from codex-chatgpt-control's dom helpers.
-final class ChatGPTWeb: NSObject {
+final class ChatGPTWeb: NSObject, ObservableObject, WKUIDelegate, WKNavigationDelegate, NSWindowDelegate {
+    enum AccountStatus: Equatable {
+        case checking
+        case signedOut
+        case signedIn(email: String?)
+    }
+
     enum Event {
         case status(String)
         case thread(String)
@@ -19,9 +26,15 @@ final class ChatGPTWeb: NSObject {
 
     static let shared = ChatGPTWeb()
 
+    @Published private(set) var accountStatus: AccountStatus = .checking
+
+    private static let accountStateKey = "chatgptAccountState"
+    private static let accountEmailKey = "chatgptAccountEmail"
+
     private var webView: WKWebView!
     private var hostWindow: NSWindow!
     private var loginWindow: NSWindow?
+    private var authPopupWindows: [ObjectIdentifier: (webView: WKWebView, window: NSWindow)] = [:]
     private var cancelled = false
     private var generation = 0
 
@@ -36,7 +49,7 @@ final class ChatGPTWeb: NSObject {
     const __visible = (el) => !!(el && el.getClientRects && el.getClientRects().length > 0);
     const __composer = () => {
       const cands = document.querySelectorAll(
-        "#prompt-textarea, [data-testid='prompt-textarea'], div[role='textbox'], " +
+        "#prompt-textarea, #mobile-composer-prompt, [data-testid='prompt-textarea'], div[role='textbox'], " +
         "main [contenteditable='true'], [contenteditable='true'], main textarea, form textarea"
       );
       for (const el of cands) { if (__visible(el)) return el; }
@@ -51,12 +64,16 @@ final class ChatGPTWeb: NSObject {
     };
     const __assistantQuery = () => __nodesByStrategies([
       { name: "data-message-author-role", fn: () => document.querySelectorAll("[data-message-author-role='assistant']") },
+      { name: "data-message-role-visible", fn: () => Array.from(document.querySelectorAll("[data-message-role='assistant']")).filter(n => !n.closest("[hidden]")) },
+      { name: "data-message-role", fn: () => document.querySelectorAll("[data-message-role='assistant']") },
       { name: "data-testid-assistant", fn: () => document.querySelectorAll("[data-testid='assistant-message'], [data-testid='conversation-turn-assistant']") },
       { name: "data-turn", fn: () => document.querySelectorAll("[data-turn='assistant'], article[data-turn='assistant']") },
       { name: "aria-assistant", fn: () => document.querySelectorAll("[aria-label*='ChatGPT said'], [data-message-id][data-author='assistant']") }
     ]);
     const __userQuery = () => __nodesByStrategies([
       { name: "data-message-author-role", fn: () => document.querySelectorAll("[data-message-author-role='user']") },
+      { name: "data-message-role-visible", fn: () => Array.from(document.querySelectorAll("[data-message-role='user']")).filter(n => !n.closest("[hidden]")) },
+      { name: "data-message-role", fn: () => document.querySelectorAll("[data-message-role='user']") },
       { name: "data-testid-user", fn: () => document.querySelectorAll("[data-testid='user-message'], [data-testid='conversation-turn-user']") },
       { name: "data-turn", fn: () => document.querySelectorAll("[data-turn='user'], article[data-turn='user']") },
       { name: "aria-user", fn: () => document.querySelectorAll("[aria-label*='You said'], [data-message-id][data-author='user']") }
@@ -123,6 +140,8 @@ final class ChatGPTWeb: NSObject {
       const tag = el.tagName;
       if (["SCRIPT", "STYLE", "NOSCRIPT", "TEMPLATE", "SVG", "BUTTON", "INPUT", "TEXTAREA"].includes(tag)) return "";
       if (el.getAttribute("aria-hidden") === "true") return "";
+      if (el.matches("[data-message-attribution], [role='status'], [data-streaming-placeholder]")) return "";
+      if (/(?:^|[_\s-])sr-?only(?:[_\s-]|$)/i.test(String(el.className || ""))) return "";
 
       if (el.matches(".katex, .katex-display")) {
         const annotation = el.querySelector("annotation[encoding='application/x-tex']");
@@ -181,15 +200,37 @@ final class ChatGPTWeb: NSObject {
       return __serializeChildren(el);
     };
     const __messageContentRoot = (node) => {
-      if (!node || !node.querySelector) return node;
-      if (node.matches && node.matches("[data-message-content], .markdown, .prose")) return node;
-      return node.querySelector("[data-message-content], .markdown, .prose") || node;
+      if (!node || !node.querySelector) return null;
+      const selector = "[data-message-content], [data-assistant-markdown], .markdown, .prose";
+      if (node.matches && node.matches(selector)) return node;
+      // Never fall back to the whole assistant turn. Before the response body
+      // mounts it contains UI chrome such as “Analyzing image” and the hidden
+      // screen-reader attribution “ChatGPT says:”.
+      return node.querySelector(selector);
+    };
+    const __stripAssistantChrome = (value) => {
+      let text = __normalizeMarkdown(value);
+      const prefixes = [
+        /^Analyzing (?:the )?image(?:\.{3}|…)?\s*/i,
+        /^ChatGPT (?:says|said):?\s*/i
+      ];
+      let changed = true;
+      while (changed) {
+        changed = false;
+        for (const prefix of prefixes) {
+          const next = text.replace(prefix, "");
+          if (next !== text) { text = next; changed = true; }
+        }
+      }
+      return text.trim();
     };
     const __assistantMarkdown = (node) => {
       if (!node) return "";
-      const plain = __normalizeMarkdown(node.innerText || node.textContent || "");
+      const root = __messageContentRoot(node);
+      if (!root) return "";
+      const plain = __stripAssistantChrome(root.innerText || root.textContent || "");
       try {
-        const semantic = __normalizeMarkdown(__serializeMarkdownNode(__messageContentRoot(node)));
+        const semantic = __stripAssistantChrome(__serializeMarkdownNode(root));
         return semantic || plain;
       } catch (_) {
         return plain;
@@ -227,6 +268,7 @@ final class ChatGPTWeb: NSObject {
       }
       return null;
     };
+    const __isStreaming = () => !!__stopButton() || !!document.querySelector("[data-streaming-dot]");
     const __probeUI = () => {
       const a = __assistantQuery();
       const u = __userQuery();
@@ -254,9 +296,20 @@ final class ChatGPTWeb: NSObject {
 
     private override init() {
         super.init()
+        let defaults = UserDefaults.standard
+        switch defaults.string(forKey: Self.accountStateKey) {
+        case "signedIn":
+            accountStatus = .signedIn(email: defaults.string(forKey: Self.accountEmailKey))
+        case "signedOut":
+            accountStatus = .signedOut
+        default:
+            break
+        }
         let config = WKWebViewConfiguration()
         config.websiteDataStore = .default()
         webView = WKWebView(frame: NSRect(x: 0, y: 0, width: 1100, height: 800), configuration: config)
+        webView.uiDelegate = self
+        webView.navigationDelegate = self
         // Safari UA: chatgpt.com and its SSO providers reject the default
         // WKWebView agent string.
         webView.customUserAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.6 Safari/605.1.15"
@@ -281,9 +334,70 @@ final class ChatGPTWeb: NSObject {
         host.contentView?.addSubview(webView)
         host.orderFrontRegardless()
         hostWindow = host
+
+        // Check the persistent WebKit session once at app launch. The last
+        // result stays visible immediately while this background refresh runs.
+        webView.load(URLRequest(url: URL(string: "https://chatgpt.com/")!))
     }
 
     // MARK: - Public
+
+    func showAccountWindow() {
+        let current = webView.url?.absoluteString ?? ""
+        if !current.hasPrefix("https://chatgpt.com") {
+            webView.load(URLRequest(url: URL(string: "https://chatgpt.com/")!))
+        }
+        presentLoginWindow()
+    }
+
+    func refreshAccountStatus() {
+        let current = webView.url?.absoluteString ?? ""
+        guard current.hasPrefix("https://chatgpt.com") else {
+            webView.load(URLRequest(url: URL(string: "https://chatgpt.com/")!))
+            return
+        }
+        run(#"""
+        (() => {
+          const visible = node => !!(node && node.getClientRects && node.getClientRects().length);
+          const controls = Array.from(document.querySelectorAll("button, a"));
+          const signedOut = controls.some(node => {
+            if (!visible(node)) return false;
+            const label = String(node.getAttribute("aria-label") || node.innerText || node.textContent || "").trim();
+            return /^(log in|sign up|sign up for free)$/i.test(label)
+              || /\blog in to use\b/i.test(label);
+          });
+          const composer = document.querySelector(
+            "#prompt-textarea, #mobile-composer-prompt, [data-testid='prompt-textarea'], " +
+            "div[role='textbox'], main [contenteditable='true'], main textarea"
+          );
+          const accountNodes = Array.from(document.querySelectorAll(
+            "[data-testid*='account'], [data-testid*='profile'], [aria-label*='account' i], " +
+            "[aria-label*='profile' i], [title*='account' i], [title*='profile' i]"
+          ));
+          const accountText = accountNodes.map(node => [
+            node.getAttribute("aria-label"), node.getAttribute("title"), node.innerText, node.textContent
+          ].filter(Boolean).join(" ")).join("\n");
+          const email = accountText.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i)?.[0] || null;
+          return JSON.stringify({ signedIn: !!composer && !signedOut, email });
+        })()
+        """#) { [weak self] result in
+            guard let self else { return }
+            let info = Self.decode(result) ?? [:]
+            if info["signedIn"] as? Bool == true {
+                let email = (info["email"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
+                self.setAccountStatus(.signedIn(email: email?.isEmpty == false ? email : nil))
+            } else {
+                self.setAccountStatus(.signedOut)
+            }
+        }
+    }
+
+    func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+        guard webView === self.webView else { return }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+            self?.refreshAccountStatus()
+        }
+    }
 
     func send(_ prompt: String, thread: String?, files: [URL] = [], onEvent: @escaping (Event) -> Void) {
         cancelled = false
@@ -301,19 +415,107 @@ final class ChatGPTWeb: NSObject {
         if !onTarget, let url = URL(string: target) {
             webView.load(URLRequest(url: url))
         }
-        onEvent(.status("Opening chatgpt.com"))
+        let hasScreenshot = files.contains {
+            $0.lastPathComponent.hasPrefix("notchagent-screenshot-")
+        }
+        let initialStatus = files.isEmpty
+            ? "Opening chatgpt.com"
+            : (hasScreenshot ? "Reading screenshot" : "Reading attachment")
+        onEvent(.status(initialStatus))
 
         waitForComposer(gen: gen, deadline: Date().addingTimeInterval(300), loginShown: false, onEvent: onEvent) { [weak self] in
             guard let self, !self.cancelled, gen == self.generation else { return }
-            self.hideLoginWindow()
-            self.uploadFiles(files, gen: gen, onEvent: onEvent) {
-                self.baselineAndSend(prompt: prompt, gen: gen, onEvent: onEvent)
+            let uploadAndSend = {
+                self.hideLoginWindow()
+                self.uploadFiles(files, gen: gen, onEvent: onEvent) {
+                    self.baselineAndSend(prompt: prompt, gen: gen, onEvent: onEvent)
+                }
+            }
+            if files.isEmpty {
+                uploadAndSend()
+            } else {
+                self.waitForFileUploads(
+                    gen: gen,
+                    deadline: Date().addingTimeInterval(300),
+                    loginShown: false,
+                    onEvent: onEvent,
+                    then: uploadAndSend
+                )
             }
         }
     }
 
-    // Attach files by loading their bytes into a synthetic File and pushing it
-    // through chatgpt.com's hidden <input type="file">.
+    private func waitForFileUploads(
+        gen: Int,
+        deadline: Date,
+        loginShown: Bool,
+        onEvent: @escaping (Event) -> Void,
+        then: @escaping () -> Void
+    ) {
+        guard !cancelled, gen == generation else { return }
+        guard Date() < deadline else {
+            onEvent(.error("Timed out waiting for ChatGPT sign-in. Screenshots require a signed-in ChatGPT session."))
+            onEvent(.done)
+            return
+        }
+        run(#"""
+        (() => {
+          const inputs = Array.from(document.querySelectorAll("input[type='file']"))
+            .filter(input => input.isConnected && !input.disabled);
+          const labels = Array.from(document.querySelectorAll("button, [aria-label], [role='alert'], [role='dialog']"))
+            .map(node => String(node.getAttribute("aria-label") || node.innerText || node.textContent || "").trim())
+            .filter(Boolean);
+          const loginReason = labels.find(label =>
+            /(?:add|upload).*(?:file|image).*log in to use/i.test(label)
+          ) || "";
+          const limitReason = labels.find(label =>
+            /(?:file|image|upload).*(?:limit|quota|free plan|upgrade|try again later|not available)/i.test(label)
+          ) || "";
+          return JSON.stringify({
+            ready: inputs.length > 0 && !loginReason && !limitReason,
+            loginReason,
+            limitReason: limitReason.slice(0, 240),
+            inputCount: inputs.length
+          });
+        })()
+        """#) { [weak self] result in
+            guard let self, !self.cancelled, gen == self.generation else { return }
+            let info = Self.decode(result) ?? [:]
+            if info["ready"] as? Bool == true {
+                self.refreshAccountStatus()
+                then()
+                return
+            }
+            if let reason = info["limitReason"] as? String, !reason.isEmpty {
+                onEvent(.error("ChatGPT cannot attach this screenshot: \(reason)"))
+                onEvent(.done)
+                return
+            }
+            var shown = loginShown
+            let needsLogin = (info["loginReason"] as? String)?.isEmpty == false
+            if needsLogin, !shown {
+                self.setAccountStatus(.signedOut)
+                self.presentLoginWindow()
+                onEvent(.status("Sign in to ChatGPT to attach screenshots"))
+                shown = true
+            }
+            let shownFinal = shown
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
+                self.waitForFileUploads(
+                    gen: gen,
+                    deadline: deadline,
+                    loginShown: shownFinal,
+                    onEvent: onEvent,
+                    then: then
+                )
+            }
+        }
+    }
+
+    // Attach files by loading their bytes into the composer-owned file input.
+    // ChatGPT keeps stale/hidden inputs elsewhere in the page, so selecting the
+    // first input and sleeping can leave the send button disabled forever.
+    // Wait for a real attachment preview before moving on or sending the prompt.
     private func uploadFiles(_ files: [URL], gen: Int, onEvent: @escaping (Event) -> Void, then: @escaping () -> Void) {
         guard !cancelled, gen == generation else { return }
         guard let file = files.first else {
@@ -322,34 +524,144 @@ final class ChatGPTWeb: NSObject {
         }
         let rest = Array(files.dropFirst())
         guard let data = try? Data(contentsOf: file), data.count <= 10_000_000 else {
-            onEvent(.error("Skipped \(file.lastPathComponent) (unreadable or over 10 MB)."))
-            uploadFiles(rest, gen: gen, onEvent: onEvent, then: then)
+            onEvent(.error("Couldn't attach \(file.lastPathComponent) (unreadable or over 10 MB)."))
+            onEvent(.done)
             return
         }
-        onEvent(.status("Attaching \(file.lastPathComponent)"))
-        let name = Self.jsonString(file.lastPathComponent) ?? "\"file\""
         let mime = UTType(filenameExtension: file.pathExtension)?.preferredMIMEType ?? "application/octet-stream"
+        let js = #"""
+        const composer = document.querySelector(
+          "#prompt-textarea, [data-testid='prompt-textarea'], div[role='textbox'], main [contenteditable='true'], main textarea"
+        );
+        const form = composer && composer.closest("form");
+        const inputs = Array.from(document.querySelectorAll("input[type='file']"))
+          .filter(input => input.isConnected && !input.disabled);
+        const score = input => {
+          let value = 0;
+          if (form && input.closest("form") === form) value += 100;
+          if (composer && composer.parentElement && composer.parentElement.contains(input)) value += 60;
+          const accept = String(input.accept || "").toLowerCase();
+          if (accept.includes("image") || accept.includes("*/*")) value += 20;
+          if (input.multiple) value += 5;
+          return value;
+        };
+        inputs.sort((a, b) => score(b) - score(a));
+        const input = inputs[0];
+        if (!input) return JSON.stringify({ ok: false, reason: "no-input" });
+
+        const root = form || (composer && composer.parentElement) || document.querySelector("main") || document.body;
+        const signalCount = () => {
+          const nodes = root.querySelectorAll(
+            "[data-testid*='attachment'], [data-testid*='file-preview'], [aria-label*='Remove file' i], " +
+            "[aria-label*='Remove attachment' i], img[src^='blob:'], img[src^='data:image']"
+          );
+          return nodes.length;
+        };
+        const baseline = signalCount();
+        const bytes = Uint8Array.from(atob(base64), c => c.charCodeAt(0));
+        const browserFile = new File([bytes], filename, { type: mimeType });
+        const dt = new DataTransfer();
+        dt.items.add(browserFile);
+        const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "files")?.set;
+        if (!setter) return JSON.stringify({ ok: false, reason: "no-files-setter" });
+        setter.call(input, dt.files);
+        input.dispatchEvent(new Event("input", { bubbles: true }));
+        input.dispatchEvent(new Event("change", { bubbles: true }));
+        return JSON.stringify({
+          ok: true,
+          baseline,
+          inputCount: inputs.length,
+          score: score(input),
+          accept: input.accept || ""
+        });
+        """#
+        runAsync(js, arguments: [
+            "base64": data.base64EncodedString(),
+            "filename": file.lastPathComponent,
+            "mimeType": mime,
+        ]) { [weak self] result in
+            guard let self, !self.cancelled, gen == self.generation else { return }
+            let info = Self.decode(result) ?? [:]
+            guard info["ok"] as? Bool == true else {
+                let reason = info["reason"] as? String ?? "upload script failed"
+                onEvent(.error("Couldn't attach \(file.lastPathComponent) on chatgpt.com (\(reason))."))
+                onEvent(.done)
+                return
+            }
+            self.waitForAttachment(
+                file: file,
+                baseline: info["baseline"] as? Int ?? 0,
+                gen: gen,
+                deadline: Date().addingTimeInterval(45),
+                onEvent: onEvent
+            ) {
+                self.uploadFiles(rest, gen: gen, onEvent: onEvent, then: then)
+            }
+        }
+    }
+
+    private func waitForAttachment(
+        file: URL,
+        baseline: Int,
+        gen: Int,
+        deadline: Date,
+        onEvent: @escaping (Event) -> Void,
+        then: @escaping () -> Void
+    ) {
+        guard !cancelled, gen == generation else { return }
+        guard Date() < deadline else {
+            onEvent(.error("chatgpt.com never finished attaching \(file.lastPathComponent)."))
+            onEvent(.done)
+            return
+        }
+        let name = Self.jsonString(file.lastPathComponent) ?? "\"file\""
         let js = """
         (() => {
-          const input = document.querySelector("input[type='file']");
-          if (!input) return "no-input";
-          const bytes = Uint8Array.from(atob("\(data.base64EncodedString())"), c => c.charCodeAt(0));
-          const file = new File([bytes], \(name), { type: "\(mime)" });
-          const dt = new DataTransfer();
-          dt.items.add(file);
-          input.files = dt.files;
-          input.dispatchEvent(new Event("change", { bubbles: true }));
-          return "ok";
+          const composer = document.querySelector(
+            "#prompt-textarea, [data-testid='prompt-textarea'], div[role='textbox'], main [contenteditable='true'], main textarea"
+          );
+          const root = (composer && composer.closest("form")) ||
+            (composer && composer.parentElement) || document.querySelector("main") || document.body;
+          const signals = root.querySelectorAll(
+            "[data-testid*='attachment'], [data-testid*='file-preview'], [aria-label*='Remove file' i], " +
+            "[aria-label*='Remove attachment' i], img[src^='blob:'], img[src^='data:image']"
+          ).length;
+          const text = String(root.innerText || root.textContent || "");
+          const pending = !!root.querySelector(
+            "[role='progressbar'], [data-testid*='upload-progress'], [aria-label*='Uploading' i]"
+          ) || /uploading|processing file/i.test(text);
+          const blockedReason = Array.from(document.querySelectorAll("[role='alert'], [role='dialog'], [data-testid*='toast']"))
+            .map(node => String(node.innerText || node.textContent || "").trim())
+            .find(value => /(?:file|image|upload).*(?:limit|quota|free plan|upgrade|try again later|not available|failed)/i.test(value)) || "";
+          return JSON.stringify({
+            ready: (signals > \(baseline) || text.includes(\(name))) && !pending,
+            signals,
+            pending,
+            blockedReason: blockedReason.slice(0, 240)
+          });
         })()
         """
         run(js) { [weak self] result in
             guard let self, !self.cancelled, gen == self.generation else { return }
-            if (result as? String) != "ok" {
-                onEvent(.error("chatgpt.com exposed no file input — \(file.lastPathComponent) skipped."))
+            let info = Self.decode(result) ?? [:]
+            if let reason = info["blockedReason"] as? String, !reason.isEmpty {
+                onEvent(.error("ChatGPT cannot attach \(file.lastPathComponent): \(reason)"))
+                onEvent(.done)
+                return
             }
-            // Give the upload a moment to register before the next one.
-            DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
-                self.uploadFiles(rest, gen: gen, onEvent: onEvent, then: then)
+            if info["ready"] as? Bool == true {
+                then()
+                return
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
+                self.waitForAttachment(
+                    file: file,
+                    baseline: baseline,
+                    gen: gen,
+                    deadline: deadline,
+                    onEvent: onEvent,
+                    then: then
+                )
             }
         }
     }
@@ -420,8 +732,8 @@ final class ChatGPTWeb: NSObject {
             onEvent(.done)
             return
         }
-        // Step 1: insert the prompt (execCommand first; direct DOM fallback)
-        // and record message baselines.
+        // Step 1: use the native value setter for React-controlled textareas,
+        // fall back to contenteditable insertion, and record message baselines.
         let insertJS = """
         (() => {
           \(Self.domHelpersJS)
@@ -429,22 +741,37 @@ final class ChatGPTWeb: NSObject {
           if (!el) return JSON.stringify({s: "no-composer", probe: __probeUI()});
           const P = \(promptJSON);
           el.focus();
-          document.execCommand("selectAll", false, null);
-          const ok = document.execCommand("insertText", false, P);
-          const text = (el.innerText ?? el.value ?? "").trim();
-          if (!ok || text.length === 0) {
-            if ("value" in el) {
-              el.value = P;
-            } else {
+          if (el instanceof HTMLTextAreaElement || el instanceof HTMLInputElement) {
+            const proto = el instanceof HTMLTextAreaElement
+              ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+            const setter = Object.getOwnPropertyDescriptor(proto, "value")?.set;
+            if (!setter) return JSON.stringify({s: "no-value-setter", probe: __probeUI()});
+            setter.call(el, P);
+            el.dispatchEvent(new InputEvent("input", {
+              bubbles: true,
+              inputType: "insertText",
+              data: P
+            }));
+            el.dispatchEvent(new Event("change", { bubbles: true }));
+          } else {
+            document.execCommand("selectAll", false, null);
+            const ok = document.execCommand("insertText", false, P);
+            if (!ok || !(el.innerText || el.textContent || "").trim()) {
               el.textContent = P;
+              el.dispatchEvent(new InputEvent("input", {
+                bubbles: true,
+                inputType: "insertText",
+                data: P
+              }));
             }
-            el.dispatchEvent(new InputEvent("input", { bubbles: true, data: P }));
           }
           const a = __assistantQuery();
           const u = __userQuery();
+          const aLast = a.nodes.length ? __assistantMarkdown(a.nodes[a.nodes.length - 1]) : "";
           return JSON.stringify({
             s: "inserted",
             aBase: a.nodes.length,
+            aLast,
             uBase: u.nodes.length,
             aStrategy: a.strategy,
             uStrategy: u.strategy
@@ -464,10 +791,11 @@ final class ChatGPTWeb: NSObject {
                 return
             }
             let aBase = obj["aBase"] as? Int ?? 0
+            let aLast = obj["aLast"] as? String ?? ""
             let uBase = obj["uBase"] as? Int ?? 0
             // Give the composer a beat to enable its send button.
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.45) {
-                self.submit(gen: gen, aBase: aBase, uBase: uBase, onEvent: onEvent)
+                self.submit(gen: gen, aBase: aBase, aLast: aLast, uBase: uBase, onEvent: onEvent)
             }
         }
     }
@@ -475,7 +803,7 @@ final class ChatGPTWeb: NSObject {
     // Step 2: click send if a button is found, otherwise synthesize Enter.
     // A disabled button usually means an attachment is still uploading —
     // retry for up to ~30s before falling back.
-    private func submit(gen: Int, aBase: Int, uBase: Int, attempt: Int = 0, onEvent: @escaping (Event) -> Void) {
+    private func submit(gen: Int, aBase: Int, aLast: String, uBase: Int, attempt: Int = 0, onEvent: @escaping (Event) -> Void) {
         let js = """
         (() => {
           \(Self.domHelpersJS)
@@ -494,27 +822,41 @@ final class ChatGPTWeb: NSObject {
             guard let self, !self.cancelled, gen == self.generation else { return }
             if (result as? String) == "disabled" && attempt < 40 {
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.75) {
-                    self.submit(gen: gen, aBase: aBase, uBase: uBase, attempt: attempt + 1, onEvent: onEvent)
+                    self.submit(gen: gen, aBase: aBase, aLast: aLast, uBase: uBase, attempt: attempt + 1, onEvent: onEvent)
                 }
                 return
             }
             DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
-                self.verifySubmitted(gen: gen, aBase: aBase, uBase: uBase, onEvent: onEvent)
+                self.verifySubmitted(gen: gen, aBase: aBase, aLast: aLast, uBase: uBase, onEvent: onEvent)
             }
         }
     }
 
     // Step 3: confirm the message actually left the composer; if not, report
     // what buttons exist so the failure is self-diagnosing.
-    private func verifySubmitted(gen: Int, aBase: Int, uBase: Int, onEvent: @escaping (Event) -> Void) {
+    private func verifySubmitted(
+        gen: Int,
+        aBase: Int,
+        aLast: String,
+        uBase: Int,
+        attempt: Int = 0,
+        onEvent: @escaping (Event) -> Void
+    ) {
         let js = """
         (() => {
           \(Self.domHelpersJS)
+          const a = __assistantQuery();
           const u = __userQuery();
+          const composer = __composer();
+          const composerText = composer
+            ? String(("value" in composer ? composer.value : composer.innerText || composer.textContent) || "").trim()
+            : "";
           return JSON.stringify({
+            a: a.nodes.length,
             u: u.nodes.length,
             uStrategy: u.strategy,
-            streaming: !!__stopButton(),
+            streaming: __isStreaming(),
+            composerEmpty: !!composer && composerText.length === 0,
             probe: __probeUI()
           });
         })()
@@ -522,13 +864,29 @@ final class ChatGPTWeb: NSObject {
         run(js) { [weak self] result in
             guard let self, !self.cancelled, gen == self.generation else { return }
             let obj = Self.decode(result) ?? [:]
-            // Strict: only a new user message node or active streaming counts
-            // as sent — an empty composer can be a hidden fallback element.
+            // ChatGPT's lightweight UI can keep the accepted turn in a hidden
+            // optimistic transcript. A cleared visible composer, a new reply,
+            // or active streaming is therefore as decisive as a user node.
             let sent = (obj["u"] as? Int ?? 0) > uBase
+                || (obj["a"] as? Int ?? 0) > aBase
                 || (obj["streaming"] as? Bool ?? false)
+                || (obj["composerEmpty"] as? Bool ?? false)
             if sent {
-                self.pollReply(gen: gen, baseline: aBase, lastText: "", stableCount: 0,
+                self.pollReply(gen: gen, baseline: aBase, baselineText: aLast, lastText: "", stableCount: 0,
                                deadline: Date().addingTimeInterval(240), onEvent: onEvent)
+                return
+            }
+            if attempt < 20 {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
+                    self.verifySubmitted(
+                        gen: gen,
+                        aBase: aBase,
+                        aLast: aLast,
+                        uBase: uBase,
+                        attempt: attempt + 1,
+                        onEvent: onEvent
+                    )
+                }
                 return
             }
             let probe = obj["probe"] as? [String: Any] ?? [:]
@@ -576,13 +934,29 @@ final class ChatGPTWeb: NSObject {
             assistantCount: a.nodes.length,
             assistantStrategy: a.strategy,
             userCount: __userQuery().nodes.length,
-            streaming: !!__stopButton(),
+            streaming: __isStreaming(),
             lastAssistant: last ? last.innerText.slice(0, 200) : null,
             lastAssistantTC: last ? last.textContent.slice(0, 200) : null,
             lastAssistantHTML: last ? last.innerHTML.slice(0, 400) : null,
             lastAssistantMarkdown: last ? __assistantMarkdown(last).slice(0, 1200) : null,
             roleAttrs: Array.from(document.querySelectorAll("[data-message-author-role]")).slice(0, 6).map(n => n.getAttribute("data-message-author-role")),
             composer: (() => { const el = __composer(); return el ? el.outerHTML.slice(0, 400) : null; })(),
+            fileInputs: Array.from(document.querySelectorAll("input[type='file']")).map(input => ({
+              accept: input.accept,
+              multiple: input.multiple,
+              disabled: input.disabled,
+              connected: input.isConnected,
+              form: !!input.closest("form")
+            })),
+            attachmentSignals: Array.from(document.querySelectorAll(
+              "[data-testid*='attachment'], [data-testid*='file-preview'], [aria-label*='Remove file' i], " +
+              "[aria-label*='Remove attachment' i], img[src^='blob:'], img[src^='data:image']"
+            )).slice(0, 12).map(node => ({
+              tag: node.tagName,
+              testid: node.getAttribute("data-testid"),
+              aria: node.getAttribute("aria-label"),
+              text: String(node.innerText || node.textContent || "").slice(0, 100)
+            })),
             buttons: Array.from(document.querySelectorAll("main button, form button")).slice(0, 20)
               .map(b => ({ testid: b.getAttribute("data-testid"), aria: b.getAttribute("aria-label"), disabled: b.disabled }))
           }, null, 1);
@@ -594,7 +968,15 @@ final class ChatGPTWeb: NSObject {
         }
     }
 
-    private func pollReply(gen: Int, baseline: Int, lastText: String, stableCount: Int, deadline: Date, onEvent: @escaping (Event) -> Void) {
+    private func pollReply(
+        gen: Int,
+        baseline: Int,
+        baselineText: String,
+        lastText: String,
+        stableCount: Int,
+        deadline: Date,
+        onEvent: @escaping (Event) -> Void
+    ) {
         guard !cancelled, gen == generation else { return }
         guard Date() < deadline else {
             onEvent(.error("Timed out waiting for the reply."))
@@ -614,10 +996,14 @@ final class ChatGPTWeb: NSObject {
             const t = __assistantMarkdown(nodes[i]);
             if (t.length > 0) { text = t; break; }
           }
+          if (!text && q.nodes.length) {
+            const latest = __assistantMarkdown(q.nodes[q.nodes.length - 1]);
+            if (latest && latest !== \(Self.jsonString(baselineText) ?? "\"\"") ) text = latest;
+          }
           return JSON.stringify({
             count: q.nodes.length,
             strategy: q.strategy,
-            streaming: !!__stopButton(),
+            streaming: __isStreaming(),
             text,
             href: location.href,
             landmarksGone: q.strategy === "none" && !__composer() && !!document.querySelector("main")
@@ -630,7 +1016,7 @@ final class ChatGPTWeb: NSObject {
                   let data = raw.data(using: .utf8),
                   let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
-                    self.pollReply(gen: gen, baseline: baseline, lastText: lastText, stableCount: 0, deadline: deadline, onEvent: onEvent)
+                    self.pollReply(gen: gen, baseline: baseline, baselineText: baselineText, lastText: lastText, stableCount: 0, deadline: deadline, onEvent: onEvent)
                 }
                 return
             }
@@ -649,7 +1035,7 @@ final class ChatGPTWeb: NSObject {
                 onEvent(.partial(text))
             }
 
-            let replied = count > baseline && !text.isEmpty
+            let replied = (count > baseline || text != baselineText) && !text.isEmpty
             let stable = replied && text == lastText && !streaming
             let nextStable = stable ? stableCount + 1 : 0
 
@@ -664,12 +1050,70 @@ final class ChatGPTWeb: NSObject {
                 return
             }
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
-                self.pollReply(gen: gen, baseline: baseline, lastText: text, stableCount: nextStable, deadline: deadline, onEvent: onEvent)
+                self.pollReply(gen: gen, baseline: baseline, baselineText: baselineText, lastText: text, stableCount: nextStable, deadline: deadline, onEvent: onEvent)
             }
         }
     }
 
     // MARK: - Login window
+
+    // OAuth providers such as Sign in with Apple open a separate browsing
+    // context and communicate back through window.opener. Without a
+    // WKUIDelegate WebKit silently discards that popup. Host it in a child
+    // WKWebView created from the supplied configuration so it shares the
+    // parent page's process pool, website data store, and authentication flow.
+    func webView(
+        _ webView: WKWebView,
+        createWebViewWith configuration: WKWebViewConfiguration,
+        for navigationAction: WKNavigationAction,
+        windowFeatures: WKWindowFeatures
+    ) -> WKWebView? {
+        guard navigationAction.targetFrame == nil else { return nil }
+
+        let popup = WKWebView(
+            frame: NSRect(x: 0, y: 0, width: 540, height: 720),
+            configuration: configuration
+        )
+        popup.customUserAgent = self.webView.customUserAgent
+        popup.uiDelegate = self
+
+        let width = windowFeatures.width.map { CGFloat(truncating: $0) } ?? 540
+        let height = windowFeatures.height.map { CGFloat(truncating: $0) } ?? 720
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: max(width, 460), height: max(height, 620)),
+            styleMask: [.titled, .closable, .miniaturizable, .resizable],
+            backing: .buffered,
+            defer: false
+        )
+        window.title = "ChatGPT Sign In"
+        window.isReleasedWhenClosed = false
+        window.delegate = self
+        window.contentView = popup
+        window.center()
+        authPopupWindows[ObjectIdentifier(popup)] = (popup, window)
+        NSApp.activate(ignoringOtherApps: true)
+        window.makeKeyAndOrderFront(nil)
+        return popup
+    }
+
+    func webViewDidClose(_ webView: WKWebView) {
+        let key = ObjectIdentifier(webView)
+        guard let entry = authPopupWindows.removeValue(forKey: key) else { return }
+        entry.window.delegate = nil
+        entry.window.orderOut(nil)
+        entry.window.close()
+    }
+
+    func windowWillClose(_ notification: Notification) {
+        guard let closedWindow = notification.object as? NSWindow else { return }
+        if closedWindow === loginWindow {
+            mountMainWebViewInHost()
+            return
+        }
+        guard let match = authPopupWindows.first(where: { $0.value.window === closedWindow }) else { return }
+        match.value.webView.uiDelegate = nil
+        authPopupWindows.removeValue(forKey: match.key)
+    }
 
     private func presentLoginWindow() {
         if loginWindow == nil {
@@ -681,6 +1125,7 @@ final class ChatGPTWeb: NSObject {
             )
             window.title = "ChatGPT — NotchAgent"
             window.isReleasedWhenClosed = false
+            window.delegate = self
             window.center()
             loginWindow = window
         }
@@ -695,7 +1140,12 @@ final class ChatGPTWeb: NSObject {
     private func hideLoginWindow() {
         guard let window = loginWindow, window.isVisible else { return }
         window.orderOut(nil)
-        // Re-mount in the invisible host so the page keeps rendering.
+        mountMainWebViewInHost()
+    }
+
+    private func mountMainWebViewInHost() {
+        // Re-mount in the invisible host so the page keeps rendering after
+        // sign-in completes or the account window is closed.
         webView.removeFromSuperview()
         webView.autoresizingMask = []
         webView.frame = NSRect(x: 0, y: 0, width: 1100, height: 800)
@@ -704,9 +1154,48 @@ final class ChatGPTWeb: NSObject {
 
     // MARK: - Helpers
 
+    private func setAccountStatus(_ status: AccountStatus) {
+        accountStatus = status
+        let defaults = UserDefaults.standard
+        switch status {
+        case .checking:
+            return
+        case .signedOut:
+            defaults.set("signedOut", forKey: Self.accountStateKey)
+            defaults.removeObject(forKey: Self.accountEmailKey)
+        case .signedIn(let email):
+            defaults.set("signedIn", forKey: Self.accountStateKey)
+            if let email, !email.isEmpty {
+                defaults.set(email, forKey: Self.accountEmailKey)
+            } else {
+                defaults.removeObject(forKey: Self.accountEmailKey)
+            }
+        }
+    }
+
     private func run(_ js: String, completion: @escaping (Any?) -> Void) {
         webView.evaluateJavaScript(js) { result, _ in
             completion(result)
+        }
+    }
+
+    private func runAsync(
+        _ js: String,
+        arguments: [String: Any],
+        completion: @escaping (Any?) -> Void
+    ) {
+        Task { @MainActor in
+            do {
+                let value = try await webView.callAsyncJavaScript(
+                    js,
+                    arguments: arguments,
+                    in: nil,
+                    contentWorld: .page
+                )
+                completion(value)
+            } catch {
+                completion(nil)
+            }
         }
     }
 

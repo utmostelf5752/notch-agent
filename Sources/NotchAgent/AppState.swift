@@ -666,14 +666,15 @@ final class AppState: ObservableObject {
             guard inside != self.notchHovering else { return }
             self.notchHovering = inside
             guard inside else { return }
-            // Short dwell so flybys toward the menu bar don't open it. Only the
-            // idle notch hover-expands; in a background state (working alert /
-            // permission / question) hovering must not steal the click aimed at
-            // the notch's own buttons. Stealth has no notch buttons, so it
-            // hover-expands in every state.
+            // Short dwell so flybys toward the menu bar don't open it. Idle and
+            // working states hover-expand; permission / question states keep
+            // hover disabled so it cannot steal a click aimed at the notch's
+            // own buttons. Stealth has no notch buttons, so it hover-expands in
+            // every state.
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [weak self] in
                 guard let self else { return }
-                if self.notchHovering && !self.expanded && (self.notchMode == .idle || self.stealthMode) {
+                if self.notchHovering && !self.expanded
+                    && (self.notchMode == .idle || self.notchMode == .working || self.stealthMode) {
                     NSLog("NotchAgent: hover-expanding")
                     self.expand(takeKeyboard: false)
                 }

@@ -17,11 +17,150 @@ func acceptDroppedFiles(_ providers: [NSItemProvider]) -> Bool {
             }
             guard let url else { return }
             DispatchQueue.main.async {
-                AppState.shared.session.attachments.append(url)
+                AppState.shared.session.addAttachments([url])
             }
         }
     }
     return accepted
+}
+
+enum ScreenshotTarget: Equatable {
+    case fullScreen
+    case activeAppWindow
+
+    var fileLabel: String {
+        switch self {
+        case .fullScreen: return "full"
+        case .activeAppWindow: return "window"
+        }
+    }
+}
+
+// Shared by the attachment menu and the app's signal-driven debug harness so
+// the exact production capture path can be exercised without UI automation.
+enum ScreenshotCapture {
+    static func capture(_ target: ScreenshotTarget, state: AppState = .shared) {
+        let path = AppPaths.screenshotsDirectory
+            .appendingPathComponent(
+                "notchagent-screenshot-\(target.fileLabel)-\(UUID().uuidString).jpg"
+            ).path
+        var args = ["-x", "-t", "jpg"]
+        var fadedWindows: [(window: NSWindow, alpha: CGFloat)] = []
+        var statusItemAlpha: CGFloat?
+
+        switch target {
+        case .activeAppWindow:
+            guard let windowID = frontmostExternalWindowID() else {
+                state.session.messages.append(ChatMessage(
+                    role: .error,
+                    text: "Screenshot failed — no open window was found in the active app."
+                ))
+                return
+            }
+            args += ["-l", String(windowID)]
+        case .fullScreen:
+            state.suspendCollapse = true
+            // Keep our all-Spaces windows ordered and the panel key. Ordering
+            // them out can reactivate an app on another Space before capture.
+            fadedWindows = NSApp.windows
+                .filter(\.isVisible)
+                .map { ($0, $0.alphaValue) }
+            fadedWindows.forEach { $0.window.alphaValue = 0 }
+            statusItemAlpha = (NSApp.delegate as? AppDelegate)?.setStatusItemAlpha(0)
+        }
+        args.append(path)
+
+        let restoreAppChrome = {
+            guard target == .fullScreen else { return }
+            fadedWindows.forEach { $0.window.alphaValue = $0.alpha }
+            if let statusItemAlpha {
+                (NSApp.delegate as? AppDelegate)?.setStatusItemAlpha(statusItemAlpha)
+            }
+            state.suspendCollapse = false
+        }
+
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/sbin/screencapture")
+        process.arguments = args
+        process.terminationHandler = { _ in
+            DispatchQueue.main.async {
+                restoreAppChrome()
+                if FileManager.default.fileExists(atPath: path) {
+                    state.session.addAttachments([URL(fileURLWithPath: path)])
+                } else {
+                    state.session.messages.append(ChatMessage(
+                        role: .error,
+                        text: "Screenshot failed — grant Screen Recording permission to NotchAgent in System Settings > Privacy."
+                    ))
+                }
+            }
+        }
+
+        let launchCapture = {
+            do {
+                try process.run()
+            } catch {
+                restoreAppChrome()
+                state.session.messages.append(ChatMessage(
+                    role: .error,
+                    text: "Screenshot failed — \(error.localizedDescription)"
+                ))
+            }
+        }
+        if target == .fullScreen {
+            // Give WindowServer a frame to apply the transparent app chrome.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.15, execute: launchCapture)
+        } else {
+            // Window capture is isolated from overlapping windows by id.
+            launchCapture()
+        }
+    }
+
+    // Prefer the frontmost application's first normal window. If opening one
+    // of our controls made any NotchAgent instance frontmost, the z-ordered
+    // fallback finds the first normal window behind all NotchAgent processes.
+    private static func frontmostExternalWindowID() -> CGWindowID? {
+        guard let list = CGWindowListCopyWindowInfo(
+            [.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID
+        ) as? [[String: Any]] else { return nil }
+
+        let frontmostPID = NSWorkspace.shared.frontmostApplication?.processIdentifier
+
+        func isNotchAgent(_ pid: pid_t, info: [String: Any]) -> Bool {
+            if pid == ProcessInfo.processInfo.processIdentifier { return true }
+            let normalize: (String) -> String = {
+                $0.lowercased().filter(\.isLetter)
+            }
+            let owner = info[kCGWindowOwnerName as String] as? String ?? ""
+            if normalize(owner) == "notchagent" { return true }
+            guard let app = NSRunningApplication(processIdentifier: pid) else { return false }
+            if normalize(app.localizedName ?? "") == "notchagent" { return true }
+            if normalize(app.executableURL?.lastPathComponent ?? "") == "notchagent" { return true }
+            let ownBundleID = Bundle.main.bundleIdentifier ?? "com.jagruth.notchagent"
+            return app.bundleIdentifier == ownBundleID
+                || app.bundleIdentifier == "com.jagruth.notchagent"
+        }
+
+        func firstWindow(ownedBy requiredPID: pid_t?) -> CGWindowID? {
+            for info in list {
+                guard let pid = info[kCGWindowOwnerPID as String] as? pid_t,
+                      !isNotchAgent(pid, info: info),
+                      requiredPID == nil || pid == requiredPID,
+                      (info[kCGWindowLayer as String] as? Int) == 0,
+                      (info[kCGWindowAlpha as String] as? Double ?? 1) > 0,
+                      let number = info[kCGWindowNumber as String] as? UInt32
+                else { continue }
+                return CGWindowID(number)
+            }
+            return nil
+        }
+
+        if let frontmostPID,
+           let windowID = firstWindow(ownedBy: frontmostPID) {
+            return windowID
+        }
+        return firstWindow(ownedBy: nil)
+    }
 }
 
 // The notch silhouette: rounded bottom corners, and optionally top corners
@@ -466,6 +605,7 @@ struct LiveDot: View {
 struct ChatRootView: View {
     @ObservedObject var state: AppState
     @ObservedObject var session: AgentSession
+    @ObservedObject private var chatgptWeb = ChatGPTWeb.shared
     @FocusState private var inputFocused: Bool
 
     private let cornerRadius: CGFloat = 24
@@ -1312,19 +1452,39 @@ struct ChatRootView: View {
             HStack(spacing: 6) {
                 ForEach(Array(session.attachments.enumerated()), id: \.offset) { index, url in
                     HStack(spacing: 4) {
-                        Image(systemName: "doc.fill")
-                            .font(.system(size: 9 * s))
-                        Text(url.lastPathComponent)
-                            .font(.system(size: 10.5 * s))
-                            .lineLimit(1)
+                        Button {
+                            NSWorkspace.shared.open(url)
+                        } label: {
+                            HStack(spacing: 4) {
+                                Image(systemName: ["jpg", "jpeg", "png", "gif", "heic", "tiff", "webp"]
+                                    .contains(url.pathExtension.lowercased()) ? "photo.fill" : "doc.fill")
+                                    .font(.system(size: 9 * s))
+                                    .fixedSize()
+                                Text(url.lastPathComponent)
+                                    .font(.system(size: 10.5 * s))
+                                    .lineLimit(1)
+                                    .truncationMode(.middle)
+                                    .frame(maxWidth: 145 * s, alignment: .leading)
+                            }
+                        }
+                        .buttonStyle(.plain)
+                        .help("Open \(url.path)")
+                        .contextMenu {
+                            Button("Open") { NSWorkspace.shared.open(url) }
+                            Button("Show in Finder") {
+                                NSWorkspace.shared.activateFileViewerSelecting([url])
+                            }
+                        }
                         Button {
                             session.attachments.remove(at: index)
                         } label: {
                             Image(systemName: "xmark.circle.fill")
                                 .font(.system(size: 10 * s))
                                 .foregroundStyle(.white.opacity(0.5))
+                                .fixedSize()
                         }
                         .buttonStyle(.plain)
+                        .layoutPriority(1)
                     }
                     .padding(.horizontal, 8)
                     .padding(.vertical, 4)
@@ -1339,8 +1499,12 @@ struct ChatRootView: View {
         Menu {
             Button("Choose Files…", action: pickFiles)
             Divider()
-            Button("Screenshot: Full Screen") { captureScreenshot(activeWindowOnly: false) }
-            Button("Screenshot: Active App Window") { captureScreenshot(activeWindowOnly: true) }
+            Button("Screenshot: Full Screen") {
+                ScreenshotCapture.capture(.fullScreen, state: state)
+            }
+            Button("Screenshot: Active App Window") {
+                ScreenshotCapture.capture(.activeAppWindow, state: state)
+            }
         } label: {
             Image(systemName: "paperclip")
                 .font(.system(size: 12 * s))
@@ -1352,50 +1516,6 @@ struct ChatRootView: View {
         .fixedSize()
         .help("Attach files or a screenshot")
         .disabled(session.isRunning)
-    }
-
-    // screencapture needs the Screen Recording permission on first use; macOS
-    // prompts for it once. -x = no shutter sound.
-    private func captureScreenshot(activeWindowOnly: Bool) {
-        let path = "/tmp/notchagent-shot-\(Int(Date().timeIntervalSince1970)).png"
-        var args = ["-x"]
-        if activeWindowOnly, let windowID = Self.frontmostWindowID() {
-            args += ["-l", String(windowID)]
-        }
-        args.append(path)
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/sbin/screencapture")
-        process.arguments = args
-        process.terminationHandler = { _ in
-            DispatchQueue.main.async {
-                if FileManager.default.fileExists(atPath: path) {
-                    AppState.shared.session.attachments.append(URL(fileURLWithPath: path))
-                } else {
-                    AppState.shared.session.messages.append(ChatMessage(
-                        role: .error,
-                        text: "Screenshot failed — grant Screen Recording permission to NotchAgent in System Settings > Privacy."
-                    ))
-                }
-            }
-        }
-        try? process.run()
-    }
-
-    // First layer-0 window of the frontmost app. Our panel is non-activating,
-    // so the frontmost app is whatever the user is actually working in.
-    private static func frontmostWindowID() -> CGWindowID? {
-        guard let app = NSWorkspace.shared.frontmostApplication,
-              let list = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]]
-        else { return nil }
-        for info in list {
-            guard let pid = info[kCGWindowOwnerPID as String] as? Int32,
-                  pid == app.processIdentifier,
-                  (info[kCGWindowLayer as String] as? Int) == 0,
-                  let number = info[kCGWindowNumber as String] as? UInt32
-            else { continue }
-            return CGWindowID(number)
-        }
-        return nil
     }
 
     private func pickFiles() {
@@ -1412,7 +1532,7 @@ struct ChatRootView: View {
         state.suspendCollapse = false
         state.chatPanel?.makeKeyAndOrderFront(nil)
         if response == .OK {
-            session.attachments.append(contentsOf: panel.urls)
+            session.addAttachments(panel.urls)
         }
     }
 
@@ -1441,6 +1561,32 @@ struct ChatRootView: View {
                         if groups.isEmpty {
                             menuItem("Web", checked: session.provider == provider) {
                                 session.provider = provider
+                            }
+                            if provider == .chatgpt {
+                                Divider()
+                                switch chatgptWeb.accountStatus {
+                                case .checking:
+                                    Button("Checking account…") {}
+                                        .disabled(true)
+                                    Button("Open Account…") {
+                                        session.provider = .chatgpt
+                                        chatgptWeb.showAccountWindow()
+                                    }
+                                case .signedOut:
+                                    Button("Not signed in") {}
+                                        .disabled(true)
+                                    Button("Sign In…") {
+                                        session.provider = .chatgpt
+                                        chatgptWeb.showAccountWindow()
+                                    }
+                                case .signedIn(let email):
+                                    Button(email ?? "Logged in") {}
+                                        .disabled(true)
+                                    Button("Change…") {
+                                        session.provider = .chatgpt
+                                        chatgptWeb.showAccountWindow()
+                                    }
+                                }
                             }
                         } else {
                             ForEach(groups) { group in
@@ -1757,10 +1903,17 @@ struct MessageBubble: View {
         case .user:
             HStack {
                 Spacer(minLength: 40)
-                Text(message.text)
-                    .font(.system(size: 13 * scale))
-                    .foregroundStyle(.white)
-                    .textSelection(.enabled)
+                VStack(alignment: .leading, spacing: 7 * scale) {
+                    if !message.displayText.isEmpty {
+                        Text(message.displayText)
+                            .font(.system(size: 13 * scale))
+                            .foregroundStyle(.white)
+                            .textSelection(.enabled)
+                    }
+                    ForEach(Array(message.attachmentURLs.enumerated()), id: \.offset) { _, url in
+                        MessageAttachmentButton(url: url, scale: scale)
+                    }
+                }
                     .padding(.horizontal, 11 * scale)
                     .padding(.vertical, 7 * scale)
                     .background(RoundedRectangle(cornerRadius: 15 * scale).fill(Color.white.opacity(0.14)))
@@ -1787,6 +1940,56 @@ struct MessageBubble: View {
                 .padding(.horizontal, 10 * scale)
                 .padding(.vertical, 7 * scale)
                 .background(RoundedRectangle(cornerRadius: 12 * scale).fill(Color(red: 1, green: 0.3, blue: 0.3).opacity(0.12)))
+        }
+    }
+}
+
+struct MessageAttachmentButton: View {
+    let url: URL
+    var scale: CGFloat = 1
+
+    private var exists: Bool {
+        FileManager.default.fileExists(atPath: url.path)
+    }
+
+    private var isImage: Bool {
+        ["png", "jpg", "jpeg", "gif", "heic", "tiff", "webp"]
+            .contains(url.pathExtension.lowercased())
+    }
+
+    var body: some View {
+        Button {
+            guard exists else { NSSound.beep(); return }
+            NSWorkspace.shared.open(url)
+        } label: {
+            HStack(spacing: 5 * scale) {
+                Image(systemName: isImage ? "photo.fill" : "doc.fill")
+                    .font(.system(size: 10 * scale))
+                    .fixedSize()
+                Text(url.lastPathComponent)
+                    .font(.system(size: 10.5 * scale, weight: .medium))
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                    .frame(maxWidth: 175 * scale, alignment: .leading)
+                Image(systemName: "arrow.up.forward.app")
+                    .font(.system(size: 8.5 * scale))
+                    .fixedSize()
+                    .layoutPriority(1)
+            }
+            .foregroundStyle(exists ? Color.white.opacity(0.82) : Color.white.opacity(0.35))
+            .padding(.horizontal, 8 * scale)
+            .padding(.vertical, 5 * scale)
+            .background(Capsule().fill(Color.black.opacity(0.26)))
+        }
+        .buttonStyle(.plain)
+        .help(exists ? "Open \(url.path)" : "File no longer exists: \(url.path)")
+        .contextMenu {
+            Button("Open") { NSWorkspace.shared.open(url) }
+                .disabled(!exists)
+            Button("Show in Finder") {
+                NSWorkspace.shared.activateFileViewerSelecting([url])
+            }
+            .disabled(!exists)
         }
     }
 }

@@ -10,6 +10,16 @@ APP=build/NotchAgent.app
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp Support/AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"
+cp Support/MenuBarIcon.png "$APP/Contents/Resources/MenuBarIcon.png"
+cp Support/Info.plist "$APP/Contents/Info.plist"
+
+# Expand the same build-setting placeholders that Xcode resolves when it
+# builds the native app target. Keeping one plist makes shell and Xcode runs
+# use the same bundle identity and metadata.
+sed -i '' \
+    -e 's/$(EXECUTABLE_NAME)/NotchAgent/g' \
+    -e 's/$(PRODUCT_BUNDLE_IDENTIFIER)/com.jagruth.notchagent/g' \
+    "$APP/Contents/Info.plist"
 
 swiftc -O -o "$APP/Contents/MacOS/NotchAgent" \
     -Xlinker -sectcreate -Xlinker __TEXT -Xlinker __info_plist \
@@ -23,25 +33,20 @@ swiftc -O -o "$APP/Contents/MacOS/NotchAgent" \
     Sources/NotchAgent/MarkdownText.swift \
     Sources/NotchAgent/Views.swift
 
-cat > "$APP/Contents/Info.plist" <<'EOF'
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-    <key>CFBundleExecutable</key><string>NotchAgent</string>
-    <key>CFBundleIdentifier</key><string>com.jagruth.notchagent</string>
-    <key>CFBundleName</key><string>NotchAgent</string>
-    <key>CFBundlePackageType</key><string>APPL</string>
-    <key>CFBundleShortVersionString</key><string>0.1.0</string>
-    <key>CFBundleVersion</key><string>1</string>
-    <key>CFBundleIconFile</key><string>AppIcon</string>
-    <key>LSMinimumSystemVersion</key><string>13.0</string>
-    <key>LSUIElement</key><true/>
-    <key>NSHighResolutionCapable</key><true/>
-</dict>
-</plist>
-EOF
-
-codesign --force --sign - "$APP"
+# A stable Apple Development identity keeps macOS privacy permissions attached
+# across rebuilds. CI and machines without this team's certificate retain the
+# previous ad-hoc fallback so release packaging still works there.
+SIGNING_IDENTITY="${NOTCHAGENT_SIGN_IDENTITY:-}"
+if [ -z "$SIGNING_IDENTITY" ]; then
+    SIGNING_IDENTITY=$(security find-identity -v -p codesigning 2>/dev/null \
+        | awk '/"Apple Development:/ { print $2; exit }')
+fi
+if [ -z "$SIGNING_IDENTITY" ]; then
+    SIGNING_IDENTITY="-"
+    echo "No Apple Development certificate found; using ad-hoc signing."
+else
+    echo "Signing with the installed Apple Development certificate"
+fi
+codesign --force --sign "$SIGNING_IDENTITY" --identifier com.jagruth.notchagent "$APP"
 echo "Built $APP"
 echo "Run with: open $APP"

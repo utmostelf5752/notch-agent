@@ -111,6 +111,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 try? out.write(toFile: "/tmp/notchagent-msgs.txt", atomically: true, encoding: .utf8)
             } else if cmd == "dump" {
                 ChatGPTWeb.shared.dumpState(to: "/tmp/notchagent-dom.txt")
+            } else if cmd == "screenshot:full" {
+                ScreenshotCapture.capture(.fullScreen)
+            } else if cmd == "screenshot:window" {
+                ScreenshotCapture.capture(.activeAppWindow)
             } else if cmd.hasPrefix("resize:") {
                 let parts = cmd.dropFirst(7).split(separator: ",").compactMap { Double($0) }
                 if parts.count == 2 {
@@ -188,7 +192,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     private func setUpStatusItem(state: AppState) {
         let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
-        item.button?.image = Self.statusImage(running: false)
+        Self.configureStatusButton(item.button, running: false)
 
         let menu = NSMenu()
         let toggle = NSMenuItem(title: "Toggle Panel", action: #selector(togglePanel), keyEquivalent: "")
@@ -210,18 +214,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         runningObserver = state.session.$isRunning
             .receive(on: DispatchQueue.main)
             .sink { [weak self] running in
-                self?.statusItem?.button?.image = Self.statusImage(running: running)
+                Self.configureStatusButton(self?.statusItem?.button, running: running)
             }
     }
 
-    private static func statusImage(running: Bool) -> NSImage? {
-        let name = running ? "sparkles" : "sparkle"
-        let image = NSImage(
-            systemSymbolName: name,
-            accessibilityDescription: running ? "NotchAgent (working)" : "NotchAgent"
-        )
+    private static func configureStatusButton(_ button: NSStatusBarButton?, running: Bool) {
+        guard let button else { return }
+        let image = Bundle.main.url(forResource: "MenuBarIcon", withExtension: "png")
+            .flatMap(NSImage.init(contentsOf:))
+            ?? NSImage(systemSymbolName: "terminal", accessibilityDescription: nil)
+        image?.size = NSSize(width: 18, height: 18)
         image?.isTemplate = true
-        return image
+        image?.accessibilityDescription = running ? "NotchAgent (working)" : "NotchAgent"
+        button.image = image
+        button.contentTintColor = running ? .controlAccentColor : nil
+        button.toolTip = running ? "NotchAgent is working" : "NotchAgent"
+    }
+
+    // Full-screen screenshots fade the status button without removing its
+    // status item, which avoids reflowing the menu bar or changing Spaces.
+    @discardableResult
+    func setStatusItemAlpha(_ alpha: CGFloat) -> CGFloat {
+        let previous = statusItem?.button?.alphaValue ?? 1
+        statusItem?.button?.alphaValue = alpha
+        return previous
     }
 
     @objc private func togglePanel() {

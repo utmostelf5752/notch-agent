@@ -219,7 +219,7 @@ h1 {
 @keyframes pulse { 50% { opacity: 0.34; transform: scale(0.82); } }
 @keyframes drain { to { transform: scaleX(0); } }
 
-/* the panel — scaled from the real app proportions in the visual guide */
+/* the panel, scaled from the real app proportions in the visual guide */
 .d-panel {
   position: absolute;
   left: 80px; top: 0;
@@ -420,7 +420,7 @@ h1 {
 }
 @keyframes spin { to { transform: rotate(360deg); } }
 
-/* empty state — sparkle, "Ask anything." */
+/* empty state: sparkle, "Ask anything." */
 .d-empty {
   position: absolute;
   inset: 0;
@@ -894,7 +894,7 @@ h1 {
   overflow-x: auto;
 }
 .install-steps pre code { font-family: var(--mono); font-size: 11.5px; color: var(--ink); }
-/* Substeps for the Gatekeeper walkthrough — numbered separately from the
+/* Substeps for the Gatekeeper walkthrough, numbered separately from the
    three top-level install steps so 01/02/03 keep their meaning. */
 .gate-steps {
   margin: 12px 0 0;
@@ -1108,7 +1108,7 @@ footer .fbrand img {
                   <button type="button" role="radio" aria-checked="false" data-panel-style="smoke">Smoke</button>
                   <button type="button" role="radio" aria-checked="false" data-panel-style="clear">Clear</button>
                 </div>
-                <span class="settings-caption" id="panel-style-caption">Solid black — the panel hides what's behind it</span>
+                <span class="settings-caption" id="panel-style-caption">Solid black: the panel hides what's behind it</span>
               </div>
               <div class="settings-footer"><span>Hover the notch or press ⌥ Space to open.</span><button class="settings-quit" id="settings-quit" type="button">Quit</button></div>
             </div>
@@ -1116,7 +1116,7 @@ footer .fbrand img {
         </div>
       </div>
     </div>
-    <div class="d-caption" id="caption">Switch providers, change the folder, or attach a file — then hit Send.</div>
+    <div class="d-caption" id="caption">Switch providers, change the folder, or attach a file, then hit Send.</div>
   </div>
 </section>
 
@@ -1132,7 +1132,7 @@ footer .fbrand img {
     </article>
     <article class="note">
       <h3>ChatGPT without setting up an API</h3>
-      <p>There's a web view logged into chatgpt.com. Sign in once and keep chatting — same as the site, just from the notch.</p>
+      <p>There's a web view logged into chatgpt.com. Sign in once and keep chatting. Same as the site, just from the notch.</p>
     </article>
     <article class="note">
       <h3>You can watch it work</h3>
@@ -1140,7 +1140,7 @@ footer .fbrand img {
     </article>
     <article class="note">
       <h3>Drag stuff in</h3>
-      <p>Drop a file on the panel or the notch. Or attach a screenshot — the whole screen, or just the window in front of you.</p>
+      <p>Drop a file on the panel or the notch. Or attach a screenshot: the whole screen, or just the window in front of you.</p>
     </article>
     <article class="note">
       <h3>Old chats don't vanish</h3>
@@ -1158,9 +1158,9 @@ footer .fbrand img {
     </article>
     <article class="note">
       <span class="install-n">02</span>
-      <p><strong>First launch:</strong> Eave isn't signed with a paid Apple developer certificate yet, so macOS blocks it the first time. This is expected — you open it once through Settings, and every launch after that is a normal double-click.</p>
+      <p><strong>First launch:</strong> Eave isn't signed with a paid Apple developer certificate yet, so macOS blocks it the first time. This is expected. You open it once through Settings, and every launch after that is a normal double-click.</p>
       <ol class="gate-steps">
-        <li>Open Eave from Applications. macOS says it can't verify the developer. Click <strong>Done</strong> — not Move to Trash.</li>
+        <li>Open Eave from Applications. macOS says it can't verify the developer. Click <strong>Done</strong>, not Move to Trash.</li>
         <li>Go to <strong>Apple menu &#63743; &rarr; System Settings &rarr; Privacy &amp; Security</strong> and scroll down to <strong>Security</strong>.</li>
         <li>Next to &ldquo;Eave was blocked&rdquo;, click <strong>Open Anyway</strong>. This button only shows for about an hour after step 1, so if it's missing, try opening Eave again.</li>
         <li>Enter your login password, click <strong>OK</strong>, then confirm <strong>Open Anyway</strong>.</li>
@@ -1179,7 +1179,7 @@ footer .fbrand img {
   <div class="wrap inner">
     <div class="fbrand">
       <img src="icon.png" alt="">
-      <span>Eave — your coding agents, right above your work.</span>
+      <span>Eave: your coding agents, right above your work.</span>
     </div>
     <div>
       <a href="https://github.com/utmostelf5752/notch-agent">GitHub</a>
@@ -1266,7 +1266,7 @@ footer .fbrand img {
     },
   };
   const histories = {
-    auth: ['why is test_auth_flow failing?', 'The token fixture expires at <code>t+0</code> — <code>session.py</code> now refreshes 30s early, so the mock is already stale. Bumping the TTL to 60s fixes the suite.'],
+    auth: ['why is test_auth_flow failing?', 'The token fixture expires at <code>t+0</code>. <code>session.py</code> now refreshes 30s early, so the mock is already stale. Bumping the TTL to 60s fixes the suite.'],
     cache: ['refactor the session cache', 'I moved cache ownership into the session store and kept the existing resume behavior. The next step is to run the provider smoke test.'],
     ci: ['explain the CI flake', 'The release job races the generated project file. Generating once before the matrix starts removes the intermittent mismatch.'],
   };
@@ -1408,7 +1408,7 @@ footer .fbrand img {
     });
     const captions = {
       standard: 'Live activity text and buttons around the notch',
-      compact: 'A hairline sliver under the notch — color shows what\'s happening',
+      compact: 'A hairline sliver under the notch: color shows what\'s happening',
       stealth: 'Silent while working; dim notch-width panel',
     };
     $('notch-style-caption').textContent = captions[style];
@@ -1426,9 +1426,9 @@ footer .fbrand img {
       button.setAttribute('aria-checked', String(selected));
     });
     const captions = {
-      black: 'Solid black — the panel hides what\'s behind it',
-      smoke: 'Dark frosted glass — smoked blur of what\'s behind',
-      clear: 'Clear pane — the panel shows what\'s behind it',
+      black: 'Solid black: the panel hides what\'s behind it',
+      smoke: 'Dark frosted glass: smoked blur of what\'s behind',
+      clear: 'Clear pane: the panel shows what\'s behind it',
     };
     $('panel-style-caption').textContent = captions[style];
   }
@@ -1450,7 +1450,7 @@ footer .fbrand img {
     frame.classList.remove('settings-open');
     settingsWindow.setAttribute('aria-hidden', 'true');
     settingsButton.setAttribute('aria-expanded', 'false');
-    setOpen(true, 'Back to the panel — try notch style or panel material.');
+    setOpen(true, 'Back to the panel. Try notch style or panel material.');
     settingsButton.focus();
   }
 
@@ -1586,7 +1586,7 @@ footer .fbrand img {
         frame.classList.add('background-running');
         setCaption(state.pinned
           ? 'Pin keeps the panel open while it works.'
-          : 'Panel tucked away — follow progress in the notch.');
+          : 'Panel tucked away. Follow progress in the notch.');
       }
 
       if (elapsed >= RUN_DURATION) break;
@@ -1603,7 +1603,7 @@ footer .fbrand img {
       ? 'The auth flow now refreshes the fixture before expiry, and the verification step passes. This scripted reply mirrors a resumed ChatGPT web thread.'
       : `The stale token fixture was the cause. I updated the refresh boundary in <code>session.py</code> and the auth test now passes with ${escapeHTML(providerConfig().model)}.`;
     renderConversation(SCRIPTED_PROMPT, reply, true);
-    setCaption('Done — the notch lights up briefly when a run finishes.');
+    setCaption('Done. The notch lights up briefly when a run finishes.');
 
     if (!await waitFor(1800, turnId)) return;
     frame.classList.remove('background-done');
@@ -1613,11 +1613,11 @@ footer .fbrand img {
   }
 
   $('notch-toggle').addEventListener('pointerenter', event => {
-    if (event.pointerType !== 'touch') setOpen(true, 'Everything here is clickable — poke around.');
+    if (event.pointerType !== 'touch') setOpen(true, 'Everything here is clickable. Poke around.');
   });
   $('notch-toggle').addEventListener('click', event => {
     event.stopPropagation();
-    if (!state.open) setOpen(true, 'Everything here is clickable — poke around.');
+    if (!state.open) setOpen(true, 'Everything here is clickable. Poke around.');
   });
   panel.addEventListener('click', event => event.stopPropagation());
   frame.addEventListener('click', event => {
@@ -1751,17 +1751,17 @@ footer .fbrand img {
 
   pinButton.addEventListener('click', () => {
     setPinned(!state.pinned);
-    setCaption(state.pinned ? 'Pinned — stays open while you work elsewhere.' : 'Unpinned — closes when you click away.');
+    setCaption(state.pinned ? 'Pinned: stays open while you work elsewhere.' : 'Unpinned: closes when you click away.');
   });
   $('settings-pin-toggle').addEventListener('click', () => {
     setPinned(!state.pinned);
-    setCaption(state.pinned ? 'Pinned — stays open while you work elsewhere.' : 'Unpinned.');
+    setCaption(state.pinned ? 'Pinned: stays open while you work elsewhere.' : 'Unpinned.');
   });
   privacyButton.addEventListener('click', () => {
     cancelScriptedDemo();
     const nextStyle = state.stealth ? state.previousNotchStyle : 'stealth';
     setNotchStyle(nextStyle);
-    setCaption(state.stealth ? 'Stealth shrinks and dims the panel — composer still works.' : 'Back to the full panel.');
+    setCaption(state.stealth ? 'Stealth shrinks and dims the panel. Composer still works.' : 'Back to the full panel.');
   });
   document.querySelectorAll('[data-notch-style]').forEach(button => button.addEventListener('click', () => setNotchStyle(button.dataset.notchStyle)));
   document.querySelectorAll('[data-panel-style]').forEach(button => button.addEventListener('click', () => setPanelStyle(button.dataset.panelStyle)));
@@ -1776,7 +1776,7 @@ footer .fbrand img {
     const conversation = histories[row.dataset.history];
     renderConversation(conversation[0], conversation[1]);
     closePopovers();
-    setCaption('Old thread — in the app this picks up where you left off.');
+    setCaption('Old thread: in the app this picks up where you left off.');
   }));
 
   chat.addEventListener('click', event => {

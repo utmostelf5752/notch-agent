@@ -19,9 +19,13 @@ final class FirstMouseHostingView<Content: View>: NSHostingView<Content> {
 }
 
 final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
-    private var hotKeyRef: EventHotKeyRef?
+    private struct HotKeyID {
+        static let toggle: UInt32 = 1
+        static let screenshot: UInt32 = 2
+    }
+    private var toggleHotKeyRef: EventHotKeyRef?
+    private var screenshotHotKeyRef: EventHotKeyRef?
     private var hotKeyHandlerRef: EventHandlerRef?
-    private var nextHotKeyID: UInt32 = 1
     private var statusItem: NSStatusItem?
     private var runningObserver: AnyCancellable?
     private var shortcutObserver: AnyCancellable?
@@ -208,7 +212,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         let settings = NSMenuItem(title: "Settings…", action: #selector(openSettings), keyEquivalent: ",")
         settings.target = self
         menu.addItem(settings)
-        let hint = NSMenuItem(title: "Hover the notch or press \(state.toggleShortcut.displayName)", action: nil, keyEquivalent: "")
+        let hint = NSMenuItem(title: Self.menuHint(toggle: state.toggleShortcut, screenshot: state.screenshotShortcut), action: nil, keyEquivalent: "")
         hint.isEnabled = false
         menu.addItem(hint)
         menu.addItem(.separator())
@@ -221,12 +225,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         runningObserver = state.session.$isRunning
             .receive(on: DispatchQueue.main)
             .sink { [weak self] running in
-                Self.configureStatusButton(self?.statusItem?.button, running: running)
+                // Silent screenshot turns keep the status bar appearance idle
+                // so there is no visible "working" indicator anywhere.
+                let silent = state.silentTurn
+                Self.configureStatusButton(self?.statusItem?.button, running: running && !silent)
             }
-        shortcutObserver = state.$toggleShortcut
+        shortcutObserver = Publishers.CombineLatest(state.$toggleShortcut, state.$screenshotShortcut)
             .receive(on: DispatchQueue.main)
-            .sink { shortcut in
-                hint.title = "Hover the notch or press \(shortcut.displayName)"
+            .sink { toggle, screenshot in
+                hint.title = Self.menuHint(toggle: toggle, screenshot: screenshot)
             }
     }
 
@@ -241,6 +248,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         button.image = image
         button.contentTintColor = running ? .controlAccentColor : nil
         button.toolTip = running ? "Eave is working" : "Eave"
+    }
+
+    private static func menuHint(toggle: GlobalShortcut, screenshot: GlobalShortcut) -> String {
+        "Hover the notch or press \(toggle.displayName) to open; \(screenshot.displayName) to answer multiple choice."
     }
 
     // Full-screen screenshots fade the status button without removing its
@@ -367,20 +378,51 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             eventClass: OSType(kEventClassKeyboard),
             eventKind: UInt32(kEventHotKeyPressed)
         )
-        InstallEventHandler(GetApplicationEventTarget(), { _, _, _ in
-            DispatchQueue.main.async { AppState.shared.toggle() }
+        InstallEventHandler(GetApplicationEventTarget(), { _, eventRef, _ in
+            guard let eventRef else { return noErr }
+            var hotKeyID = EventHotKeyID()
+            let result = GetEventParameter(
+                eventRef,
+                EventParamName(kEventParamDirectObject),
+                EventParamType(typeEventHotKeyID),
+                nil,
+                MemoryLayout<EventHotKeyID>.size,
+                nil,
+                &hotKeyID
+            )
+            guard result == noErr else { return noErr }
+            DispatchQueue.main.async {
+                switch hotKeyID.id {
+                case HotKeyID.toggle:
+                    AppState.shared.toggle()
+                case HotKeyID.screenshot:
+                    AppDelegate.handleScreenshotHotKey()
+                default:
+                    break
+                }
+            }
             return noErr
         }, 1, &eventType, nil, &hotKeyHandlerRef)
 
-        state.installShortcutRegistrationHandler { [unowned self] shortcut in
-            replaceHotKey(with: shortcut)
+        state.installShortcutRegistrationHandler { [unowned self] kind, shortcut in
+            replaceHotKey(kind: kind, shortcut: shortcut)
         }
     }
 
     /// Registers the new shortcut before releasing the old one, so a conflict
     /// can never leave the user without their previously working shortcut.
-    private func replaceHotKey(with shortcut: GlobalShortcut) -> String? {
-        let hotKeyID = EventHotKeyID(signature: OSType(0x45415645), id: nextHotKeyID) // 'EAVE'
+    private func replaceHotKey(kind: GlobalShortcut.Kind, shortcut: GlobalShortcut) -> String? {
+        let hotKeyIDValue: UInt32
+        var oldRef: EventHotKeyRef?
+        switch kind {
+        case .toggle:
+            hotKeyIDValue = HotKeyID.toggle
+            oldRef = toggleHotKeyRef
+        case .screenshot:
+            hotKeyIDValue = HotKeyID.screenshot
+            oldRef = screenshotHotKeyRef
+        }
+        let hotKeyID = EventHotKeyID(signature: OSType(0x45415645), id: hotKeyIDValue) // 'EAVE'
         var replacement: EventHotKeyRef?
         let status = RegisterEventHotKey(
             shortcut.keyCode,
@@ -391,16 +433,38 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             &replacement
         )
         guard status == noErr, let replacement else {
-            NSLog("Eave: failed to register shortcut \(shortcut.displayName), status=\(status)")
+            NSLog("Eave: failed to register \(kind) shortcut \(shortcut.displayName), status=\(status)")
             if status == eventHotKeyExistsErr {
                 return "\(shortcut.displayName) is already used by macOS or another app."
             }
             return "\(shortcut.displayName) could not be registered (error \(status))."
         }
-        if let hotKeyRef { UnregisterEventHotKey(hotKeyRef) }
-        hotKeyRef = replacement
-        nextHotKeyID &+= 1
-        NSLog("Eave: registered shortcut \(shortcut.displayName)")
+        if let oldRef { UnregisterEventHotKey(oldRef) }
+        switch kind {
+        case .toggle: toggleHotKeyRef = replacement
+        case .screenshot: screenshotHotKeyRef = replacement
+        }
+        NSLog("Eave: registered \(kind) shortcut \(shortcut.displayName)")
         return nil
+    }
+
+    private static func handleScreenshotHotKey() {
+        let state = AppState.shared
+        guard !state.session.isRunning else { return }
+        // Screenshot turns are meant to be invisible: switch to stealth notch
+        // and a clear glass panel before the capture.
+        state.notchStyle = .stealth
+        state.panelStyle = .clear
+        let prompt = """
+            First, determine whether the image shows a multiple-choice question with up to four answer choices. \
+            If it does, identify the correct choice(s). The choices are ordered from first to fourth. \
+            If they are already labeled with letters or numbers, use those labels. \
+            Otherwise, count from the top: the first choice is A (or 1), the second is B (or 2), \
+            the third is C (or 3), and the fourth is D (or 4). \
+            Reply with ONLY the letter or number of each correct choice, separated by commas. \
+            If only one choice is correct, reply with only that single letter or number. \
+            If the image is NOT a multiple-choice question, respond normally to what is shown.
+            """
+        ScreenshotCapture.capture(.fullScreen, state: state, prompt: prompt)
     }
 }

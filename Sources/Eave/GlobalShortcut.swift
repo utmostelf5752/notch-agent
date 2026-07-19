@@ -4,12 +4,72 @@ import Carbon.HIToolbox
 /// A Carbon-compatible global keyboard shortcut. Carbon is used for the
 /// registration so the app does not need Accessibility permission.
 struct GlobalShortcut: Equatable {
-    static let defaultShortcut = GlobalShortcut(
-        keyCode: UInt32(kVK_Space),
-        modifiers: UInt32(optionKey),
-        keyLabel: "Space"
-    )
+    /// Distinct shortcuts the app registers globally. `toggle` keeps the
+    /// original UserDefaults keys so existing users keep their setting.
+    enum Kind: String, CaseIterable {
+        case toggle, screenshot
 
+        private var defaultsKeys: (keyCode: String, modifiers: String, keyLabel: String) {
+            switch self {
+            case .toggle:
+                return ("toggleShortcutKeyCode", "toggleShortcutModifiers", "toggleShortcutKeyLabel")
+            case .screenshot:
+                return ("screenshotShortcutKeyCode", "screenshotShortcutModifiers", "screenshotShortcutKeyLabel")
+            }
+        }
+
+        var defaultShortcut: GlobalShortcut {
+            switch self {
+            case .toggle:
+                return GlobalShortcut(
+                    keyCode: UInt32(kVK_Space),
+                    modifiers: UInt32(optionKey),
+                    keyLabel: "Space"
+                )
+            case .screenshot:
+                return GlobalShortcut(
+                    keyCode: UInt32(kVK_Space),
+                    modifiers: UInt32(controlKey | optionKey),
+                    keyLabel: "Space"
+                )
+            }
+        }
+
+        func load(from defaults: UserDefaults) -> GlobalShortcut? {
+            let keys = defaultsKeys
+            guard defaults.object(forKey: keys.keyCode) != nil,
+                  defaults.object(forKey: keys.modifiers) != nil else {
+                return nil
+            }
+            guard let keyCode = UInt32(exactly: defaults.integer(forKey: keys.keyCode)),
+                  let modifiers = UInt32(exactly: defaults.integer(forKey: keys.modifiers)) else {
+                return nil
+            }
+            let allowedModifiers = UInt32(cmdKey | optionKey | controlKey | shiftKey)
+            let hasPrimaryModifier = modifiers & UInt32(cmdKey | optionKey | controlKey) != 0
+            guard modifiers & ~allowedModifiers == 0, hasPrimaryModifier else { return nil }
+            let savedLabel = defaults.string(forKey: keys.keyLabel)
+                .flatMap { $0.isEmpty || $0.count > 12 ? nil : $0 }
+            return GlobalShortcut(
+                keyCode: keyCode,
+                modifiers: modifiers,
+                keyLabel: savedLabel ?? GlobalShortcut.keyLabel(for: keyCode, fallback: nil)
+            )
+        }
+
+        func persist(_ shortcut: GlobalShortcut, to defaults: UserDefaults) {
+            let keys = defaultsKeys
+            defaults.set(Int(shortcut.keyCode), forKey: keys.keyCode)
+            defaults.set(Int(shortcut.modifiers), forKey: keys.modifiers)
+            defaults.set(shortcut.keyLabel, forKey: keys.keyLabel)
+        }
+    }
+
+    static let defaultShortcut = Kind.toggle.defaultShortcut
+    static let defaultScreenshotShortcut = Kind.screenshot.defaultShortcut
+
+    // Original keys for the toggle-only API; the new `Kind` overloads handle
+    // both shortcuts while preserving existing persisted settings.
     private static let keyCodeDefaultsKey = "toggleShortcutKeyCode"
     private static let modifiersDefaultsKey = "toggleShortcutModifiers"
     private static let keyLabelDefaultsKey = "toggleShortcutKeyLabel"
@@ -52,6 +112,14 @@ struct GlobalShortcut: Equatable {
         )
     }
 
+    init(defaults: UserDefaults, kind: Kind) {
+        if let saved = kind.load(from: defaults) {
+            self = saved
+        } else {
+            self = kind.defaultShortcut
+        }
+    }
+
     init?(event: NSEvent) {
         let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
         var modifiers: UInt32 = 0
@@ -84,6 +152,10 @@ struct GlobalShortcut: Equatable {
         defaults.set(Int(keyCode), forKey: Self.keyCodeDefaultsKey)
         defaults.set(Int(modifiers), forKey: Self.modifiersDefaultsKey)
         defaults.set(keyLabel, forKey: Self.keyLabelDefaultsKey)
+    }
+
+    func persist(to defaults: UserDefaults = .standard, kind: Kind) {
+        kind.persist(self, to: defaults)
     }
 
     private static func keyLabel(for keyCode: UInt32, fallback: String?) -> String {

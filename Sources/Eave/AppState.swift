@@ -1,6 +1,9 @@
 import AppKit
 import SwiftUI
 import Combine
+import Carbon.HIToolbox
+import IOKit
+import IOKit.hid
 
 // SkyLight SPI: Gaussian-blurs whatever is behind a window's translucent
 // pixels. Every NSVisualEffectView material is far too frosted for a clear
@@ -14,6 +17,101 @@ private func CGSDefaultConnectionForThread() -> CGSConnectionID
 private func CGSSetWindowBackgroundBlurRadius(
     _ cid: CGSConnectionID, _ wid: UInt32, _ radius: Int32
 ) -> Int32
+
+// Feedback style for response completion and multiple-choice answers.
+enum FeedbackMode: String, CaseIterable, Identifiable {
+    case haptic, capsLock
+
+    var id: String { rawValue }
+    var label: String {
+        switch self {
+        case .haptic: return "Haptic"
+        case .capsLock: return "Caps Lock LED"
+        }
+    }
+}
+
+// Controls the Caps Lock LED by toggling the system modifier lock state.
+// On modern macOS this is the only reliable way to drive the built-in
+// keyboard LED; direct HID output element access is gated for sandboxed/user
+// apps. Note: this briefly changes the actual Caps Lock modifier state, so
+// it is only suitable as a transient feedback signal.
+final class CapsLockLED {
+    static let shared = CapsLockLED()
+
+    private var connect: io_connect_t = 0
+    var available: Bool { connect != 0 }
+
+    private static let logPath = "/tmp/eave-led.log"
+    private static let dateFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.dateFormat = "yyyy-MM-dd HH:mm:ss.SSS"
+        return f
+    }()
+
+    private init() {
+        guard let matching = IOServiceMatching(kIOHIDSystemClass) else {
+            log("no IOHIDSystem matching dictionary")
+            return
+        }
+        let service = IOServiceGetMatchingService(kIOMainPortDefault, matching)
+        guard service != 0 else {
+            log("no IOHIDSystem service")
+            return
+        }
+        defer { IOObjectRelease(service) }
+        let status = IOServiceOpen(service, mach_task_self_, UInt32(kIOHIDParamConnectType), &connect)
+        log("IOServiceOpen status=\(status) connect=\(connect)")
+    }
+
+    func setOn(_ on: Bool) {
+        guard connect != 0 else {
+            log("setOn skipped, no connection")
+            return
+        }
+        let status = IOHIDSetModifierLockState(connect, Int32(kIOHIDCapsLockState), on)
+        log("setOn=\(on) status=\(status)")
+    }
+
+    // Blink the LED the given number of times. Each blink turns the LED on for
+    // half the tap interval, then off for the remaining half, so individual
+    // blinks are distinct.
+    func blink(count: Int, tapInterval: TimeInterval = 0.20) {
+        guard available, count > 0 else {
+            log("blink unavailable or count=0")
+            return
+        }
+        log("blink count=\(count) tapInterval=\(tapInterval)")
+        let onDuration: TimeInterval = 0.15
+        for i in 0..<count {
+            let start = TimeInterval(i) * tapInterval
+            DispatchQueue.main.asyncAfter(deadline: .now() + start) {
+                self.setOn(true)
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + start + onDuration) {
+                self.setOn(false)
+            }
+        }
+    }
+
+    private func log(_ message: String) {
+        let full = "Eave: CapsLockLED \(message)"
+        NSLog(full)
+        let line = "\(Self.dateFormatter.string(from: Date())) \(message)\n"
+        if let data = line.data(using: .utf8) {
+            let fileURL = URL(fileURLWithPath: Self.logPath)
+            if FileManager.default.fileExists(atPath: Self.logPath) {
+                if let handle = try? FileHandle(forWritingTo: fileURL) {
+                    handle.seekToEndOfFile()
+                    handle.write(data)
+                    handle.closeFile()
+                }
+            } else {
+                try? data.write(to: fileURL, options: .atomic)
+            }
+        }
+    }
+}
 
 // Main-thread only. Not @MainActor-annotated so it can be reached from the
 // Carbon hotkey callback via DispatchQueue.main without strict-concurrency friction.
@@ -33,11 +131,19 @@ final class AppState: ObservableObject {
     @Published var showHistory = false { didSet { updatePopoverSuspend() } }
     @Published private(set) var toggleShortcut: GlobalShortcut
     @Published private(set) var shortcutRegistrationError: String?
+    @Published private(set) var screenshotShortcut: GlobalShortcut
+    @Published private(set) var screenshotShortcutRegistrationError: String?
+    @Published var feedbackEnabled: Bool {
+        didSet { UserDefaults.standard.set(feedbackEnabled, forKey: "feedbackEnabled") }
+    }
+    @Published var feedbackMode: FeedbackMode {
+        didSet { UserDefaults.standard.set(feedbackMode.rawValue, forKey: "feedbackMode") }
+    }
 
     // Installed by AppDelegate after the Carbon event handler is ready. A nil
     // result means the replacement succeeded; a string keeps the existing
     // shortcut active and explains why the requested one was rejected.
-    private var shortcutRegistrationHandler: ((GlobalShortcut) -> String?)?
+    private var shortcutRegistrationHandler: ((GlobalShortcut.Kind, GlobalShortcut) -> String?)?
 
     // How the notch narrates background activity.
     //   standard — live text, tokens, and buttons around the notch.
@@ -161,9 +267,50 @@ final class AppState: ObservableObject {
     var stealthAlertStartedAt = Date()
     private var stealthAlertTimer: Timer?
 
+    // Silent screenshot turn: the auto-send shortcut fires a turn without any
+    // visible notch background activity, exactly like stealth mode.
+    var silentTurn = false
+    // Screenshot multiple-choice turn: the response is parsed for A/B/C/D or
+    // 1/2/3/4 and the haptic fires that many times instead of once.
+    var multipleChoiceTurn = false
+
     private init() {
         let defaults = UserDefaults.standard
         toggleShortcut = GlobalShortcut(defaults: defaults)
+        // The original default was Cmd+Option+Space, which conflicts with
+        // Finder's "Search with Spotlight" window. Move any saved copy of that
+        // shortcut to the new Ctrl+Option+Space default once.
+        let oldScreenshotDefault = GlobalShortcut(
+            keyCode: UInt32(kVK_Space),
+            modifiers: UInt32(optionKey | cmdKey),
+            keyLabel: "Space"
+        )
+        var loadedScreenshotShortcut = GlobalShortcut(defaults: defaults, kind: .screenshot)
+        if !defaults.bool(forKey: "eave.didMigrateScreenshotShortcutToCtrlOptSpace"),
+           loadedScreenshotShortcut == oldScreenshotDefault {
+            loadedScreenshotShortcut = GlobalShortcut(
+                keyCode: UInt32(kVK_Space),
+                modifiers: UInt32(controlKey | optionKey),
+                keyLabel: "Space"
+            )
+            loadedScreenshotShortcut.persist(to: defaults, kind: .screenshot)
+            defaults.set(true, forKey: "eave.didMigrateScreenshotShortcutToCtrlOptSpace")
+        }
+        screenshotShortcut = loadedScreenshotShortcut
+        // Migrate the old haptic-only setting to the general feedback setting.
+        if let value = defaults.object(forKey: "feedbackEnabled") as? Bool {
+            feedbackEnabled = value
+        } else if let legacy = defaults.object(forKey: "hapticFeedbackEnabled") as? Bool {
+            feedbackEnabled = legacy
+            defaults.set(legacy, forKey: "feedbackEnabled")
+        } else {
+            feedbackEnabled = true
+        }
+        if let raw = defaults.string(forKey: "feedbackMode"), let mode = FeedbackMode(rawValue: raw) {
+            feedbackMode = mode
+        } else {
+            feedbackMode = .haptic
+        }
         if let raw = defaults.string(forKey: "notchStyle"), let style = NotchStyle(rawValue: raw) {
             notchStyle = style
         } else {
@@ -185,37 +332,130 @@ final class AppState: ObservableObject {
         if h > 0 { panelHeightOverride = CGFloat(h) }
     }
 
-    func installShortcutRegistrationHandler(_ handler: @escaping (GlobalShortcut) -> String?) {
+    func installShortcutRegistrationHandler(_ handler: @escaping (GlobalShortcut.Kind, GlobalShortcut) -> String?) {
         shortcutRegistrationHandler = handler
-        if let error = handler(toggleShortcut) {
-            let unavailableShortcut = toggleShortcut
-            if unavailableShortcut != .defaultShortcut,
-               handler(.defaultShortcut) == nil {
-                toggleShortcut = .defaultShortcut
-                toggleShortcut.persist()
-                shortcutRegistrationError = "\(unavailableShortcut.displayName) was unavailable, so the shortcut was reset to \(toggleShortcut.displayName)."
+        let (resolvedToggle, toggleError) = resolveInitialShortcut(.toggle, shortcut: toggleShortcut, handler: handler)
+        if resolvedToggle != toggleShortcut {
+            resolvedToggle.persist(to: .standard, kind: .toggle)
+        }
+        toggleShortcut = resolvedToggle
+        shortcutRegistrationError = toggleError
+        let (resolvedScreenshot, screenshotError) = resolveInitialShortcut(.screenshot, shortcut: screenshotShortcut, handler: handler)
+        if resolvedScreenshot != screenshotShortcut {
+            resolvedScreenshot.persist(to: .standard, kind: .screenshot)
+        }
+        screenshotShortcut = resolvedScreenshot
+        screenshotShortcutRegistrationError = screenshotError
+    }
+
+    private func resolveInitialShortcut(
+        _ kind: GlobalShortcut.Kind,
+        shortcut: GlobalShortcut,
+        handler: (GlobalShortcut.Kind, GlobalShortcut) -> String?
+    ) -> (shortcut: GlobalShortcut, error: String?) {
+        if let error = handler(kind, shortcut) {
+            if shortcut != kind.defaultShortcut,
+               handler(kind, kind.defaultShortcut) == nil {
+                return (kind.defaultShortcut, "\(shortcut.displayName) was unavailable, so the shortcut was reset to \(kind.defaultShortcut.displayName).")
             } else {
-                shortcutRegistrationError = error
+                return (shortcut, error)
+            }
+        }
+        return (shortcut, nil)
+    }
+
+    func setToggleShortcut(_ shortcut: GlobalShortcut) {
+        let (newShortcut, error) = setShortcut(shortcut, kind: .toggle)
+        toggleShortcut = newShortcut
+        shortcutRegistrationError = error
+        if error == nil {
+            newShortcut.persist(to: .standard, kind: .toggle)
+        }
+    }
+
+    func setScreenshotShortcut(_ shortcut: GlobalShortcut) {
+        let (newShortcut, error) = setShortcut(shortcut, kind: .screenshot)
+        screenshotShortcut = newShortcut
+        screenshotShortcutRegistrationError = error
+        if error == nil {
+            newShortcut.persist(to: .standard, kind: .screenshot)
+        }
+    }
+
+    private func setShortcut(
+        _ shortcut: GlobalShortcut,
+        kind: GlobalShortcut.Kind
+    ) -> (shortcut: GlobalShortcut, error: String?) {
+        let current = kind == .toggle ? toggleShortcut : screenshotShortcut
+        guard shortcut != current else { return (current, nil) }
+        guard let handler = shortcutRegistrationHandler else {
+            return (current, "The global shortcut service is not ready.")
+        }
+        if let error = handler(kind, shortcut) {
+            return (current, "\(error) Your previous shortcut is still active.")
+        }
+        return (shortcut, nil)
+    }
+
+    // Feedback signal that an assistant response has finished. The mode
+    // chooses between a trackpad haptic and a Caps Lock LED blink.
+    func performFeedback() {
+        guard feedbackEnabled else { return }
+        if feedbackMode == .capsLock, CapsLockLED.shared.available {
+            CapsLockLED.shared.blink(count: 1, tapInterval: 0.20)
+        } else {
+            NSHapticFeedbackManager.defaultPerformer.perform(.alignment, performanceTime: .now)
+        }
+    }
+
+    // Multiple-choice screenshot turn: parse the assistant's answer for A/B/C/D
+    // or 1/2/3/4 and produce feedback for each choice. A=1 pulse, B=2 pulses,
+    // etc., with a pause between choices so they can be distinguished.
+    func performMultipleChoiceFeedback(for text: String) {
+        guard feedbackEnabled else { return }
+        let answers = Self.multipleChoiceAnswers(from: text)
+        guard !answers.isEmpty else { return }
+        let tapInterval: TimeInterval = 0.35
+        let groupPause: TimeInterval = 1.20
+        let useLED = feedbackMode == .capsLock && CapsLockLED.shared.available
+        var delay: TimeInterval = 0
+        for (index, answer) in answers.enumerated() {
+            for tapIndex in 0..<answer {
+                let pulseStart = delay + TimeInterval(tapIndex) * tapInterval
+                if useLED {
+                    let onDuration: TimeInterval = 0.15
+                    DispatchQueue.main.asyncAfter(deadline: .now() + pulseStart) {
+                        CapsLockLED.shared.setOn(true)
+                    }
+                    DispatchQueue.main.asyncAfter(deadline: .now() + pulseStart + onDuration) {
+                        CapsLockLED.shared.setOn(false)
+                    }
+                } else {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + pulseStart) {
+                        NSHapticFeedbackManager.defaultPerformer.perform(.alignment, performanceTime: .now)
+                    }
+                }
+            }
+            delay += TimeInterval(answer) * tapInterval
+            if index < answers.count - 1 {
+                delay += groupPause
             }
         }
     }
 
-    func setToggleShortcut(_ shortcut: GlobalShortcut) {
-        guard shortcut != toggleShortcut else {
-            shortcutRegistrationError = nil
-            return
+    private static func multipleChoiceAnswers(from text: String) -> [Int] {
+        let map: [String: Int] = [
+            "A": 1, "B": 2, "C": 3, "D": 4,
+            "1": 1, "2": 2, "3": 3, "4": 4,
+        ]
+        let upper = text.uppercased()
+        let pattern = #"(?<!\w)([A-D1-4])(?!\w)"#
+        guard let regex = try? NSRegularExpression(pattern: pattern, options: []) else { return [] }
+        let matches = regex.matches(in: upper, options: [], range: NSRange(upper.startIndex..., in: upper))
+        return matches.compactMap { match in
+            let answer = (upper as NSString).substring(with: match.range(at: 1))
+            return map[answer]
         }
-        guard let handler = shortcutRegistrationHandler else {
-            shortcutRegistrationError = "The global shortcut service is not ready."
-            return
-        }
-        if let error = handler(shortcut) {
-            shortcutRegistrationError = "\(error) Your previous shortcut is still active."
-            return
-        }
-        toggleShortcut = shortcut
-        toggleShortcut.persist()
-        shortcutRegistrationError = nil
     }
 
     // Window margins around the panel content so the drop shadow (if any)
@@ -354,7 +594,8 @@ final class AppState: ObservableObject {
         if expanded { return .idle }
         if session.pendingPermission != nil { return .permission }
         if session.pendingQuestion != nil { return .question }
-        if session.isRunning { return .working }
+        // Silent screenshot turn: hide all background activity in the notch.
+        if session.isRunning { return silentTurn ? .idle : .working }
         if showingCompleted { return .completed }
         return .idle
     }
@@ -465,17 +706,36 @@ final class AppState: ObservableObject {
             showingCompleted = false
             completedTimer?.invalidate()
             completedTimer = nil
-        } else if !expanded, session.messages.last?.role == .assistant {
-            // A real answer landed while collapsed: show the pill, then let it
-            // dismiss itself. Stealth's 2-sweep announcement takes 2s, so the
-            // mode ends exactly when the sweeps do.
-            showingCompleted = true
-            completedStartedAt = Date()
-            completedTimer?.invalidate()
-            completedTimer = Timer.scheduledTimer(withTimeInterval: stealthMode ? 2 : completedDuration, repeats: false) { [weak self] _ in
-                self?.showingCompleted = false
-                self?.syncNotchFrame(animated: true)
+        } else {
+            if let last = session.messages.last, last.role == .assistant {
+                if silentTurn {
+                    // Screenshot turns: classify the response based on content.
+                    multipleChoiceTurn = !Self.multipleChoiceAnswers(from: last.text).isEmpty
+                    if multipleChoiceTurn {
+                        performMultipleChoiceFeedback(for: last.text)
+                    } else {
+                        // Normal response to a screenshot: steady Caps Lock LED for 1 second.
+                        CapsLockLED.shared.setOn(true)
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+                            CapsLockLED.shared.setOn(false)
+                        }
+                    }
+                } else {
+                    performFeedback()
+                }
+                if !expanded, !silentTurn, !multipleChoiceTurn {
+                    showingCompleted = true
+                    completedStartedAt = Date()
+                    completedTimer?.invalidate()
+                    completedTimer = Timer.scheduledTimer(withTimeInterval: stealthMode ? 2 : completedDuration, repeats: false) { [weak self] _ in
+                        self?.showingCompleted = false
+                        self?.syncNotchFrame(animated: true)
+                    }
+                }
             }
+            // A silent / multiple-choice turn ends when the session stops running.
+            silentTurn = false
+            multipleChoiceTurn = false
         }
         syncNotchFrame(animated: true)
         updateClockTimer()

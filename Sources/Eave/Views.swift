@@ -39,7 +39,11 @@ enum ScreenshotTarget: Equatable {
 // Shared by the attachment menu and the app's signal-driven debug harness so
 // the exact production capture path can be exercised without UI automation.
 enum ScreenshotCapture {
-    static func capture(_ target: ScreenshotTarget, state: AppState = .shared) {
+    static func capture(
+        _ target: ScreenshotTarget,
+        state: AppState = .shared,
+        prompt: String? = nil
+    ) {
         let path = AppPaths.screenshotsDirectory
             .appendingPathComponent(
                 "eave-screenshot-\(target.fileLabel)-\(UUID().uuidString).jpg"
@@ -87,6 +91,10 @@ enum ScreenshotCapture {
                 restoreAppChrome()
                 if FileManager.default.fileExists(atPath: path) {
                     state.session.addAttachments([URL(fileURLWithPath: path)])
+                    if let prompt = prompt {
+                        state.silentTurn = true
+                        state.session.send(prompt)
+                    }
                 } else {
                     state.session.messages.append(ChatMessage(
                         role: .error,
@@ -1132,7 +1140,7 @@ struct ChatRootView: View {
             Text("Ask anything.")
                 .font(.system(size: 12.5 * s))
                 .foregroundStyle(.white.opacity(0.55))
-            Text("\(state.toggleShortcut.displayName) toggle · Esc close")
+            Text("\(state.toggleShortcut.displayName) toggle · \(state.screenshotShortcut.displayName) answer multiple choice · Esc close")
                 .font(.system(size: 10 * s))
                 .foregroundStyle(.white.opacity(0.3))
         }
@@ -2127,12 +2135,59 @@ struct SettingsView: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
 
+            HStack(spacing: 12) {
+                Text("Answer multiple choice")
+                Spacer()
+                ShortcutRecorderButton(shortcut: state.screenshotShortcut) {
+                    state.setScreenshotShortcut($0)
+                }
+            }
+            .font(.system(size: 12.5))
+
+            if let error = state.screenshotShortcutRegistrationError {
+                Text(error)
+                    .font(.system(size: 10.5))
+                    .foregroundStyle(.red)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
             HStack {
                 Text("Close panel")
                 Spacer()
                 Text("Esc").foregroundStyle(.secondary)
             }
             .font(.system(size: 12.5))
+
+            Toggle(isOn: $state.feedbackEnabled) {
+                VStack(alignment: .leading, spacing: 1) {
+                    Text("Enable feedback").font(.system(size: 12.5))
+                    Text("Signal when a response completes")
+                        .font(.system(size: 10.5)).foregroundStyle(.secondary)
+                }
+            }
+            .toggleStyle(.switch)
+
+            VStack(alignment: .leading, spacing: 6) {
+                HStack {
+                    Text("Feedback mode").font(.system(size: 12.5))
+                    Spacer()
+                    Button("Test LED") {
+                        CapsLockLED.shared.blink(count: 1)
+                    }
+                    .controlSize(.small)
+                    .disabled(!CapsLockLED.shared.available)
+                }
+                Picker("Feedback mode", selection: $state.feedbackMode) {
+                    Text("Haptic").tag(FeedbackMode.haptic)
+                    Text("Caps Lock LED").tag(FeedbackMode.capsLock)
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                Text("Haptic taps the trackpad; Caps Lock LED blinks the keyboard light.")
+                    .font(.system(size: 10.5))
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
 
             Toggle(isOn: $state.pinned) {
                 VStack(alignment: .leading, spacing: 1) {
@@ -2176,7 +2231,7 @@ struct SettingsView: View {
             Divider()
 
             HStack {
-                Text("Hover the notch or press \(state.toggleShortcut.displayName) to open.")
+                Text("Hover the notch or press \(state.toggleShortcut.displayName) to open; \(state.screenshotShortcut.displayName) to answer multiple choice.")
                     .font(.system(size: 11)).foregroundStyle(.secondary)
                 Spacer()
                 Button("Quit") { NSApp.terminate(nil) }

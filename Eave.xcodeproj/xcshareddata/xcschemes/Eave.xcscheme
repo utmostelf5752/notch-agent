@@ -16,9 +16,9 @@
             <BuildableReference
                BuildableIdentifier = "primary"
                BlueprintIdentifier = "D546FF4594D8C952ACE40952"
-               BuildableName = "NotchAgent.app"
-               BlueprintName = "NotchAgent"
-               ReferencedContainer = "container:NotchAgent.xcodeproj">
+               BuildableName = "Eave.app"
+               BlueprintName = "Eave"
+               ReferencedContainer = "container:Eave.xcodeproj">
             </BuildableReference>
          </BuildActionEntry>
       </BuildActionEntries>
@@ -33,9 +33,9 @@
          <BuildableReference
             BuildableIdentifier = "primary"
             BlueprintIdentifier = "D546FF4594D8C952ACE40952"
-            BuildableName = "NotchAgent.app"
-            BlueprintName = "NotchAgent"
-            ReferencedContainer = "container:NotchAgent.xcodeproj">
+            BuildableName = "Eave.app"
+            BlueprintName = "Eave"
+            ReferencedContainer = "container:Eave.xcodeproj">
          </BuildableReference>
       </MacroExpansion>
       <Testables>
@@ -56,9 +56,9 @@
          <BuildableReference
             BuildableIdentifier = "primary"
             BlueprintIdentifier = "D546FF4594D8C952ACE40952"
-            BuildableName = "NotchAgent.app"
-            BlueprintName = "NotchAgent"
-            ReferencedContainer = "container:NotchAgent.xcodeproj">
+            BuildableName = "Eave.app"
+            BlueprintName = "Eave"
+            ReferencedContainer = "container:Eave.xcodeproj">
          </BuildableReference>
       </BuildableProductRunnable>
       <CommandLineArguments>
@@ -75,9 +75,9 @@
          <BuildableReference
             BuildableIdentifier = "primary"
             BlueprintIdentifier = "D546FF4594D8C952ACE40952"
-            BuildableName = "NotchAgent.app"
-            BlueprintName = "NotchAgent"
-            ReferencedContainer = "container:NotchAgent.xcodeproj">
+            BuildableName = "Eave.app"
+            BlueprintName = "Eave"
+            ReferencedContainer = "container:Eave.xcodeproj">
          </BuildableReference>
       </BuildableProductRunnable>
    </ProfileAction>

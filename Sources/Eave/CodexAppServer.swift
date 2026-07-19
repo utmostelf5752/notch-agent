@@ -88,7 +88,7 @@ final class CodexAppServer {
         stdinHandle = stdin.fileHandleForWriting
 
         request("initialize", [
-            "clientInfo": ["name": "notchagent", "title": "NotchAgent", "version": "0.1.0"],
+            "clientInfo": ["name": "eave", "title": "Eave", "version": "0.1.0"],
             "capabilities": ["experimentalApi": true],
         ]) { [weak self] _, error in
             guard error == nil else { return }
@@ -204,7 +204,7 @@ final class CodexAppServer {
             default:
                 // Unsupported capability (login flows, elicitations, …).
                 write(["jsonrpc": "2.0", "id": id,
-                       "error": ["code": -32601, "message": "unsupported by NotchAgent"]])
+                       "error": ["code": -32601, "message": "unsupported by Eave"]])
             }
             return
         }

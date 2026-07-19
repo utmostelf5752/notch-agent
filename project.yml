@@ -1,4 +1,4 @@
-name: NotchAgent
+name: Eave
 
 options:
   bundleIdPrefix: com.jagruth
@@ -19,26 +19,26 @@ settings:
     ENABLE_DEBUG_DYLIB: NO
 
 targets:
-  NotchAgent:
+  Eave:
     type: application
     platform: macOS
     sources:
-      - path: Sources/NotchAgent
+      - path: Sources/Eave
       - path: Support/AppIcon.icns
         buildPhase: resources
       - path: Support/MenuBarIcon.png
         buildPhase: resources
     settings:
       base:
-        PRODUCT_NAME: NotchAgent
-        PRODUCT_BUNDLE_IDENTIFIER: com.jagruth.notchagent
+        PRODUCT_NAME: Eave
+        PRODUCT_BUNDLE_IDENTIFIER: com.jagruth.eave
         INFOPLIST_FILE: Support/Info.plist
         GENERATE_INFOPLIST_FILE: NO
 
 schemes:
-  NotchAgent:
+  Eave:
     build:
       targets:
-        NotchAgent: all
+        Eave: all
     run:
       config: Debug

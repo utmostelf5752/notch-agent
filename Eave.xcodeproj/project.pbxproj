@@ -10,6 +10,7 @@
 		159C642FC55A8524CEF0EB11 /* main.swift in Sources */ = {isa = PBXBuildFile; fileRef = 765542A7D61B71CBF6778E67 /* main.swift */; };
 		27DB70280A3524052FF0074F /* AppState.swift in Sources */ = {isa = PBXBuildFile; fileRef = D0BE40254A1A395F6F5485D4 /* AppState.swift */; };
 		46EFA8AF05A066514B57ABB6 /* Views.swift in Sources */ = {isa = PBXBuildFile; fileRef = 86F3A031AD17D4739214B7E3 /* Views.swift */; };
+		5A4FB0EE2360DF5AE9D9FDCF /* GlobalShortcut.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8B23E7C63F6EF0B8B42A9FEE /* GlobalShortcut.swift */; };
 		661F8379DCC73EEEA8C7CD20 /* AppIcon.icns in Resources */ = {isa = PBXBuildFile; fileRef = 3D2EDE0BC2E845B1B5D364B9 /* AppIcon.icns */; };
 		730D89E98CC9F9CFC0296E47 /* MarkdownText.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5293CF1F81C9E71083BB15F9 /* MarkdownText.swift */; };
 		92817037049D6AA1AD3339A1 /* CodexAppServer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 421CA4D71258E0C9A15D3F07 /* CodexAppServer.swift */; };
@@ -27,8 +28,9 @@
 		691AEAFF110487FB31ED276B /* AgentSession.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AgentSession.swift; sourceTree = "<group>"; };
 		765542A7D61B71CBF6778E67 /* main.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = main.swift; sourceTree = "<group>"; };
 		86F3A031AD17D4739214B7E3 /* Views.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Views.swift; sourceTree = "<group>"; };
+		8B23E7C63F6EF0B8B42A9FEE /* GlobalShortcut.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GlobalShortcut.swift; sourceTree = "<group>"; };
 		BF6ECA57A284B1CCBBF8871E /* MenuBarIcon.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; path = MenuBarIcon.png; sourceTree = "<group>"; };
-		C38623A84187F761346CE3A8 /* NotchAgent.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = NotchAgent.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		C38623A84187F761346CE3A8 /* Eave.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Eave.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		D0BE40254A1A395F6F5485D4 /* AppState.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppState.swift; sourceTree = "<group>"; };
 		DB4B513DC735A7D70B06C503 /* ChatGPTWeb.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatGPTWeb.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
@@ -55,12 +57,12 @@
 		7CAAD8E4CC4A01E22882428E /* Sources */ = {
 			isa = PBXGroup;
 			children = (
-				99CDAC9DFC0F611F5B075625 /* NotchAgent */,
+				99CDAC9DFC0F611F5B075625 /* Eave */,
 			);
 			path = Sources;
 			sourceTree = "<group>";
 		};
-		99CDAC9DFC0F611F5B075625 /* NotchAgent */ = {
+		99CDAC9DFC0F611F5B075625 /* Eave */ = {
 			isa = PBXGroup;
 			children = (
 				691AEAFF110487FB31ED276B /* AgentSession.swift */,
@@ -68,17 +70,18 @@
 				D0BE40254A1A395F6F5485D4 /* AppState.swift */,
 				DB4B513DC735A7D70B06C503 /* ChatGPTWeb.swift */,
 				421CA4D71258E0C9A15D3F07 /* CodexAppServer.swift */,
+				8B23E7C63F6EF0B8B42A9FEE /* GlobalShortcut.swift */,
 				765542A7D61B71CBF6778E67 /* main.swift */,
 				5293CF1F81C9E71083BB15F9 /* MarkdownText.swift */,
 				86F3A031AD17D4739214B7E3 /* Views.swift */,
 			);
-			path = NotchAgent;
+			path = Eave;
 			sourceTree = "<group>";
 		};
 		CF4AB0B3174418D1F013B699 /* Products */ = {
 			isa = PBXGroup;
 			children = (
-				C38623A84187F761346CE3A8 /* NotchAgent.app */,
+				C38623A84187F761346CE3A8 /* Eave.app */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -86,9 +89,9 @@
 /* End PBXGroup section */
 
 /* Begin PBXNativeTarget section */
-		D546FF4594D8C952ACE40952 /* NotchAgent */ = {
+		D546FF4594D8C952ACE40952 /* Eave */ = {
 			isa = PBXNativeTarget;
-			buildConfigurationList = 1FE6F5391248B6837D284A93 /* Build configuration list for PBXNativeTarget "NotchAgent" */;
+			buildConfigurationList = 1FE6F5391248B6837D284A93 /* Build configuration list for PBXNativeTarget "Eave" */;
 			buildPhases = (
 				B9C6BC9F6488EDEE9474F92A /* Sources */,
 				D14B81C9ECE1ECEA5513A95E /* Resources */,
@@ -97,11 +100,11 @@
 			);
 			dependencies = (
 			);
-			name = NotchAgent;
+			name = Eave;
 			packageProductDependencies = (
 			);
-			productName = NotchAgent;
-			productReference = C38623A84187F761346CE3A8 /* NotchAgent.app */;
+			productName = Eave;
+			productReference = C38623A84187F761346CE3A8 /* Eave.app */;
 			productType = "com.apple.product-type.application";
 		};
 /* End PBXNativeTarget section */
@@ -119,7 +122,7 @@
 					};
 				};
 			};
-			buildConfigurationList = 92D564703B7BECE63B2ABAAE /* Build configuration list for PBXProject "NotchAgent" */;
+			buildConfigurationList = 92D564703B7BECE63B2ABAAE /* Build configuration list for PBXProject "Eave" */;
 			developmentRegion = en;
 			hasScannedForEncodings = 0;
 			knownRegions = (
@@ -133,7 +136,7 @@
 			projectDirPath = "";
 			projectRoot = "";
 			targets = (
-				D546FF4594D8C952ACE40952 /* NotchAgent */,
+				D546FF4594D8C952ACE40952 /* Eave */,
 			);
 		};
 /* End PBXProject section */
@@ -160,6 +163,7 @@
 				27DB70280A3524052FF0074F /* AppState.swift in Sources */,
 				B49AF137BDC467BE37126495 /* ChatGPTWeb.swift in Sources */,
 				92817037049D6AA1AD3339A1 /* CodexAppServer.swift in Sources */,
+				5A4FB0EE2360DF5AE9D9FDCF /* GlobalShortcut.swift in Sources */,
 				730D89E98CC9F9CFC0296E47 /* MarkdownText.swift in Sources */,
 				46EFA8AF05A066514B57ABB6 /* Views.swift in Sources */,
 				159C642FC55A8524CEF0EB11 /* main.swift in Sources */,
@@ -180,8 +184,8 @@
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
-				PRODUCT_BUNDLE_IDENTIFIER = com.jagruth.notchagent;
-				PRODUCT_NAME = NotchAgent;
+				PRODUCT_BUNDLE_IDENTIFIER = com.jagruth.eave;
+				PRODUCT_NAME = Eave;
 				SDKROOT = macosx;
 			};
 			name = Release;
@@ -197,8 +201,8 @@
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
-				PRODUCT_BUNDLE_IDENTIFIER = com.jagruth.notchagent;
-				PRODUCT_NAME = NotchAgent;
+				PRODUCT_BUNDLE_IDENTIFIER = com.jagruth.eave;
+				PRODUCT_NAME = Eave;
 				SDKROOT = macosx;
 			};
 			name = Debug;
@@ -339,7 +343,7 @@
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
-		1FE6F5391248B6837D284A93 /* Build configuration list for PBXNativeTarget "NotchAgent" */ = {
+		1FE6F5391248B6837D284A93 /* Build configuration list for PBXNativeTarget "Eave" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (
 				5A61782BE8F4A33DF8C69215 /* Debug */,
@@ -348,7 +352,7 @@
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Debug;
 		};
-		92D564703B7BECE63B2ABAAE /* Build configuration list for PBXProject "NotchAgent" */ = {
+		92D564703B7BECE63B2ABAAE /* Build configuration list for PBXProject "Eave" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (
 				82B371EFE2F45B0A8B4FD74E /* Debug */,

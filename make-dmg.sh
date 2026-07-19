@@ -1,11 +1,11 @@
 #!/bin/zsh
-# Packages build/NotchAgent.app into a distributable NotchAgent.dmg with a
+# Packages build/Eave.app into a distributable Eave.dmg with a
 # drag-to-Applications layout. Run build.sh first.
 set -e
 cd "$(dirname "$0")"
 
-APP=build/NotchAgent.app
-DMG=build/NotchAgent.dmg
+APP=build/Eave.app
+DMG=build/Eave.dmg
 STAGE=build/dmg-stage
 
 [ -d "$APP" ] || { echo "error: $APP not found, run ./build.sh first" >&2; exit 1; }
@@ -16,7 +16,7 @@ cp -R "$APP" "$STAGE/"
 ln -s /Applications "$STAGE/Applications"
 
 hdiutil create \
-    -volname "NotchAgent" \
+    -volname "Eave" \
     -srcfolder "$STAGE" \
     -ov -format UDZO \
     "$DMG"

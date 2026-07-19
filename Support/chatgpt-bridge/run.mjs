@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// NotchAgent → ChatGPT web bridge.
+// Eave → ChatGPT web bridge.
 // Drives the user's signed-in chatgpt.com tab in their real Chrome via
 // codex-chatgpt-control, with Playwright-over-CDP standing in for the Codex
 // browser bridge the SDK normally expects. Chrome must be running with
@@ -35,7 +35,7 @@ try {
   emit({
     type: "error",
     message:
-      "The NotchAgent Chrome window isn't running. Run Support/chatgpt-bridge/start-chrome-debug.sh (it opens a separate Chrome that can run alongside your normal one), sign in at chatgpt.com there once, then try again.",
+      "The Eave Chrome window isn't running. Run Support/chatgpt-bridge/start-chrome-debug.sh (it opens a separate Chrome that can run alongside your normal one), sign in at chatgpt.com there once, then try again.",
   });
   process.exit(1);
 }

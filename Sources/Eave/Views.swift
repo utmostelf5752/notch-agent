@@ -42,7 +42,7 @@ enum ScreenshotCapture {
     static func capture(_ target: ScreenshotTarget, state: AppState = .shared) {
         let path = AppPaths.screenshotsDirectory
             .appendingPathComponent(
-                "notchagent-screenshot-\(target.fileLabel)-\(UUID().uuidString).jpg"
+                "eave-screenshot-\(target.fileLabel)-\(UUID().uuidString).jpg"
             ).path
         var args = ["-x", "-t", "jpg"]
         var fadedWindows: [(window: NSWindow, alpha: CGFloat)] = []
@@ -90,7 +90,7 @@ enum ScreenshotCapture {
                 } else {
                     state.session.messages.append(ChatMessage(
                         role: .error,
-                        text: "Screenshot failed — grant Screen Recording permission to NotchAgent in System Settings > Privacy."
+                        text: "Screenshot failed — grant Screen Recording permission to Eave in System Settings > Privacy."
                     ))
                 }
             }
@@ -117,8 +117,8 @@ enum ScreenshotCapture {
     }
 
     // Prefer the frontmost application's first normal window. If opening one
-    // of our controls made any NotchAgent instance frontmost, the z-ordered
-    // fallback finds the first normal window behind all NotchAgent processes.
+    // of our controls made Eave frontmost, the z-ordered fallback finds the
+    // first normal window behind both Eave and any still-running legacy build.
     private static func frontmostExternalWindowID() -> CGWindowID? {
         guard let list = CGWindowListCopyWindowInfo(
             [.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID
@@ -126,25 +126,26 @@ enum ScreenshotCapture {
 
         let frontmostPID = NSWorkspace.shared.frontmostApplication?.processIdentifier
 
-        func isNotchAgent(_ pid: pid_t, info: [String: Any]) -> Bool {
+        func isEave(_ pid: pid_t, info: [String: Any]) -> Bool {
             if pid == ProcessInfo.processInfo.processIdentifier { return true }
             let normalize: (String) -> String = {
                 $0.lowercased().filter(\.isLetter)
             }
             let owner = info[kCGWindowOwnerName as String] as? String ?? ""
-            if normalize(owner) == "notchagent" { return true }
+            if ["eave", "notchagent"].contains(normalize(owner)) { return true }
             guard let app = NSRunningApplication(processIdentifier: pid) else { return false }
-            if normalize(app.localizedName ?? "") == "notchagent" { return true }
-            if normalize(app.executableURL?.lastPathComponent ?? "") == "notchagent" { return true }
-            let ownBundleID = Bundle.main.bundleIdentifier ?? "com.jagruth.notchagent"
+            if ["eave", "notchagent"].contains(normalize(app.localizedName ?? "")) { return true }
+            if ["eave", "notchagent"].contains(normalize(app.executableURL?.lastPathComponent ?? "")) { return true }
+            let ownBundleID = Bundle.main.bundleIdentifier ?? "com.jagruth.eave"
             return app.bundleIdentifier == ownBundleID
+                || app.bundleIdentifier == "com.jagruth.eave"
                 || app.bundleIdentifier == "com.jagruth.notchagent"
         }
 
         func firstWindow(ownedBy requiredPID: pid_t?) -> CGWindowID? {
             for info in list {
                 guard let pid = info[kCGWindowOwnerPID as String] as? pid_t,
-                      !isNotchAgent(pid, info: info),
+                      !isEave(pid, info: info),
                       requiredPID == nil || pid == requiredPID,
                       (info[kCGWindowLayer as String] as? Int) == 0,
                       (info[kCGWindowAlpha as String] as? Double ?? 1) > 0,
@@ -1131,7 +1132,7 @@ struct ChatRootView: View {
             Text("Ask anything.")
                 .font(.system(size: 12.5 * s))
                 .foregroundStyle(.white.opacity(0.55))
-            Text("⌥Space toggle · Esc close")
+            Text("\(state.toggleShortcut.displayName) toggle · Esc close")
                 .font(.system(size: 10 * s))
                 .foregroundStyle(.white.opacity(0.3))
         }
@@ -2103,19 +2104,28 @@ struct SettingsView: View {
         VStack(alignment: .leading, spacing: 16) {
             HStack(spacing: 8) {
                 Image(systemName: "sparkle")
-                Text("NotchAgent").font(.system(size: 15, weight: .semibold))
+                Text("Eave").font(.system(size: 15, weight: .semibold))
                 Spacer()
                 Text("v0.1").font(.system(size: 11)).foregroundStyle(.secondary)
             }
 
             Divider()
 
-            HStack {
+            HStack(spacing: 12) {
                 Text("Toggle panel")
                 Spacer()
-                Text("⌥ Space").foregroundStyle(.secondary)
+                ShortcutRecorderButton(shortcut: state.toggleShortcut) {
+                    state.setToggleShortcut($0)
+                }
             }
             .font(.system(size: 12.5))
+
+            if let error = state.shortcutRegistrationError {
+                Text(error)
+                    .font(.system(size: 10.5))
+                    .foregroundStyle(.red)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
 
             HStack {
                 Text("Close panel")
@@ -2143,7 +2153,9 @@ struct SettingsView: View {
                 .pickerStyle(.segmented)
                 .labelsHidden()
                 Text(styleCaption)
-                    .font(.system(size: 10.5)).foregroundStyle(.secondary)
+                    .font(.system(size: 10.5))
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
 
             VStack(alignment: .leading, spacing: 6) {
@@ -2156,13 +2168,15 @@ struct SettingsView: View {
                 .pickerStyle(.segmented)
                 .labelsHidden()
                 Text(materialCaption)
-                    .font(.system(size: 10.5)).foregroundStyle(.secondary)
+                    .font(.system(size: 10.5))
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
 
             Divider()
 
             HStack {
-                Text("Hover the notch or press ⌥Space to open.")
+                Text("Hover the notch or press \(state.toggleShortcut.displayName) to open.")
                     .font(.system(size: 11)).foregroundStyle(.secondary)
                 Spacer()
                 Button("Quit") { NSApp.terminate(nil) }
@@ -2171,6 +2185,54 @@ struct SettingsView: View {
         }
         .padding(20)
         .frame(width: 340)
+    }
+}
+
+private struct ShortcutRecorderButton: View {
+    let shortcut: GlobalShortcut
+    let onChange: (GlobalShortcut) -> Void
+
+    @State private var isRecording = false
+    @State private var keyMonitor: Any?
+
+    var body: some View {
+        Button(isRecording ? "Type shortcut…" : shortcut.displayName) {
+            isRecording ? stopRecording() : startRecording()
+        }
+        .buttonStyle(.bordered)
+        .controlSize(.small)
+        .help(isRecording
+            ? "Press a shortcut, or Escape to cancel"
+            : "Click to record a new global shortcut")
+        .onDisappear { stopRecording() }
+    }
+
+    private func startRecording() {
+        guard keyMonitor == nil else { return }
+        isRecording = true
+        keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
+            if event.keyCode == 53 { // Escape
+                DispatchQueue.main.async { stopRecording() }
+                return nil
+            }
+            guard let shortcut = GlobalShortcut(event: event) else {
+                NSSound.beep()
+                return nil
+            }
+            DispatchQueue.main.async {
+                onChange(shortcut)
+                stopRecording()
+            }
+            return nil
+        }
+    }
+
+    private func stopRecording() {
+        if let keyMonitor {
+            NSEvent.removeMonitor(keyMonitor)
+            self.keyMonitor = nil
+        }
+        isRecording = false
     }
 }
 

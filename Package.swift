@@ -2,12 +2,12 @@
 import PackageDescription
 
 let package = Package(
-    name: "NotchAgent",
+    name: "Eave",
     platforms: [.macOS(.v13)],
     targets: [
         .executableTarget(
-            name: "NotchAgent",
-            path: "Sources/NotchAgent",
+            name: "Eave",
+            path: "Sources/Eave",
             linkerSettings: [
                 // Embed an Info.plist into the bare executable so it has a
                 // main bundle identifier even when run outside a .app bundle

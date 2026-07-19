@@ -516,7 +516,7 @@ final class ChatGPTWeb: NSObject, ObservableObject, WKUIDelegate, WKNavigationDe
             webView.load(URLRequest(url: url))
         }
         let hasScreenshot = files.contains {
-            $0.lastPathComponent.hasPrefix("notchagent-screenshot-")
+            AppPaths.isScreenshotName($0.lastPathComponent)
         }
         let initialStatus = files.isEmpty
             ? "Opening chatgpt.com"
@@ -1338,7 +1338,7 @@ final class ChatGPTWeb: NSObject, ObservableObject, WKUIDelegate, WKNavigationDe
                 backing: .buffered,
                 defer: false
             )
-            window.title = "ChatGPT — NotchAgent"
+            window.title = "ChatGPT — Eave"
             window.isReleasedWhenClosed = false
             window.delegate = self
             window.center()

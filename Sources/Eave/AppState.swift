@@ -31,6 +31,13 @@ final class AppState: ObservableObject {
     // which must not trigger the click-outside auto-collapse.
     @Published var showSettings = false { didSet { updatePopoverSuspend() } }
     @Published var showHistory = false { didSet { updatePopoverSuspend() } }
+    @Published private(set) var toggleShortcut: GlobalShortcut
+    @Published private(set) var shortcutRegistrationError: String?
+
+    // Installed by AppDelegate after the Carbon event handler is ready. A nil
+    // result means the replacement succeeded; a string keeps the existing
+    // shortcut active and explains why the requested one was rejected.
+    private var shortcutRegistrationHandler: ((GlobalShortcut) -> String?)?
 
     // How the notch narrates background activity.
     //   standard — live text, tokens, and buttons around the notch.
@@ -156,6 +163,7 @@ final class AppState: ObservableObject {
 
     private init() {
         let defaults = UserDefaults.standard
+        toggleShortcut = GlobalShortcut(defaults: defaults)
         if let raw = defaults.string(forKey: "notchStyle"), let style = NotchStyle(rawValue: raw) {
             notchStyle = style
         } else {
@@ -175,6 +183,39 @@ final class AppState: ObservableObject {
         if w > 0 { panelWidthOverride = CGFloat(w) }
         let h = defaults.double(forKey: "panelHeight")
         if h > 0 { panelHeightOverride = CGFloat(h) }
+    }
+
+    func installShortcutRegistrationHandler(_ handler: @escaping (GlobalShortcut) -> String?) {
+        shortcutRegistrationHandler = handler
+        if let error = handler(toggleShortcut) {
+            let unavailableShortcut = toggleShortcut
+            if unavailableShortcut != .defaultShortcut,
+               handler(.defaultShortcut) == nil {
+                toggleShortcut = .defaultShortcut
+                toggleShortcut.persist()
+                shortcutRegistrationError = "\(unavailableShortcut.displayName) was unavailable, so the shortcut was reset to \(toggleShortcut.displayName)."
+            } else {
+                shortcutRegistrationError = error
+            }
+        }
+    }
+
+    func setToggleShortcut(_ shortcut: GlobalShortcut) {
+        guard shortcut != toggleShortcut else {
+            shortcutRegistrationError = nil
+            return
+        }
+        guard let handler = shortcutRegistrationHandler else {
+            shortcutRegistrationError = "The global shortcut service is not ready."
+            return
+        }
+        if let error = handler(shortcut) {
+            shortcutRegistrationError = "\(error) Your previous shortcut is still active."
+            return
+        }
+        toggleShortcut = shortcut
+        toggleShortcut.persist()
+        shortcutRegistrationError = nil
     }
 
     // Window margins around the panel content so the drop shadow (if any)
@@ -242,7 +283,7 @@ final class AppState: ObservableObject {
             chatPanel?.setFrame(expandedFrame, display: true)
             applyPanelBlur()
         }
-        NSLog("NotchAgent: repositioned for display \(nextID) frame=\(NSStringFromRect(next.frame))")
+        NSLog("Eave: repositioned for display \(nextID) frame=\(NSStringFromRect(next.frame))")
     }
 
     private var notchSize: NSSize {
@@ -518,7 +559,7 @@ final class AppState: ObservableObject {
         )
     }
 
-    // Strict toggle: Option+Space always opens or closes, regardless of
+    // Strict toggle: the configured shortcut always opens or closes, regardless of
     // keyboard focus or pin state.
     func toggle() {
         expanded ? collapse() : expand(takeKeyboard: true)
@@ -530,7 +571,7 @@ final class AppState: ObservableObject {
     // installOutsideClickMonitors) — moving the mouse away does NOT close it.
     func expand(takeKeyboard: Bool = true) {
         guard let panel = chatPanel else {
-            NSLog("NotchAgent: expand() called but chatPanel is nil")
+            NSLog("Eave: expand() called but chatPanel is nil")
             return
         }
         if !expanded {
@@ -539,7 +580,7 @@ final class AppState: ObservableObject {
             lastExpandAt = Date()
             panel.orderFrontRegardless()
             applyPanelBlur()
-            NSLog("NotchAgent: expand(takeKeyboard=\(takeKeyboard)) frame=\(NSStringFromRect(panel.frame)) visible=\(panel.isVisible)")
+            NSLog("Eave: expand(takeKeyboard=\(takeKeyboard)) frame=\(NSStringFromRect(panel.frame)) visible=\(panel.isVisible)")
         }
         if takeKeyboard {
             panel.makeKeyAndOrderFront(nil)
@@ -550,7 +591,7 @@ final class AppState: ObservableObject {
 
     func collapse() {
         guard expanded else { return }
-        NSLog("NotchAgent: collapse()")
+        NSLog("Eave: collapse()")
         showSettings = false
         showHistory = false
         expanded = false
@@ -573,7 +614,7 @@ final class AppState: ObservableObject {
                 backing: .buffered,
                 defer: false
             )
-            win.title = "NotchAgent Settings"
+            win.title = "Eave Settings"
             win.isReleasedWhenClosed = false
             win.center()
             win.contentView = NSHostingView(rootView: SettingsView(state: self))
@@ -623,10 +664,10 @@ final class AppState: ObservableObject {
 
     func logGeometry() {
         for (i, s) in NSScreen.screens.enumerated() {
-            NSLog("NotchAgent: screen[\(i)] frame=\(NSStringFromRect(s.frame)) safeTop=\(s.safeAreaInsets.top) isMain=\(s == NSScreen.main)")
+            NSLog("Eave: screen[\(i)] frame=\(NSStringFromRect(s.frame)) safeTop=\(s.safeAreaInsets.top) isMain=\(s == NSScreen.main)")
         }
-        NSLog("NotchAgent: hasNotch=\(hasNotch) collapsedFrame=\(NSStringFromRect(collapsedFrame)) expandedFrame=\(NSStringFromRect(expandedFrame))")
-        NSLog("NotchAgent: targetWindow visible=\(targetWindow?.isVisible ?? false) frame=\(NSStringFromRect(targetWindow?.frame ?? .zero))")
+        NSLog("Eave: hasNotch=\(hasNotch) collapsedFrame=\(NSStringFromRect(collapsedFrame)) expandedFrame=\(NSStringFromRect(expandedFrame))")
+        NSLog("Eave: targetWindow visible=\(targetWindow?.isVisible ?? false) frame=\(NSStringFromRect(targetWindow?.frame ?? .zero))")
     }
 
     // SwiftUI's onHover relies on a tracking area that is unreliable on a
@@ -675,7 +716,7 @@ final class AppState: ObservableObject {
                 guard let self else { return }
                 if self.notchHovering && !self.expanded
                     && (self.notchMode == .idle || self.notchMode == .working || self.stealthMode) {
-                    NSLog("NotchAgent: hover-expanding")
+                    NSLog("Eave: hover-expanding")
                     self.expand(takeKeyboard: false)
                 }
             }

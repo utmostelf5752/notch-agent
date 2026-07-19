@@ -1,19 +1,19 @@
-# NotchAgent
+# Eave
 
-Prototype of a coding agent living in the macOS notch (NotchNook-style). Hover
-the notch or press Option+Space and a Liquid Glass chat panel bounces out of
-the camera housing; messages go to the `claude` or `codex` CLI running
-headlessly, or to your signed-in chatgpt.com session via browser automation.
+**Your coding agents, right above your work.** Eave keeps Claude, Codex,
+Cursor, and ChatGPT in a Liquid Glass panel tucked into the macOS notch. Hover
+the notch or press the global shortcut (Option+Space by default) to start a
+conversation without switching apps.
 
 ## Download
 
-[**Download NotchAgent.dmg**](https://github.com/utmostelf5752/notch-agent/releases/latest/download/NotchAgent.dmg)
+[**Download Eave.dmg**](https://github.com/utmostelf5752/notch-agent/releases/latest/download/Eave.dmg)
 — always the newest build from `main`, published automatically by CI.
 
 The app is ad-hoc signed (no Apple Developer ID), so the first launch is
 blocked by Gatekeeper. After dragging it to Applications, right-click the app
 and choose **Open**, then confirm — or run `xattr -dr com.apple.quarantine
-/Applications/NotchAgent.app`.
+/Applications/Eave.app`.
 
 UI: solid black, rounded bottom corners, no borders or shadows (ChatGPT-popup
 feel). Top strip flanking the notch cutout holds settings (left) and
@@ -47,8 +47,8 @@ Chrome). Kept for reference; the app no longer calls it.
 
 ## Run
 
-For Xcode, open `NotchAgent.xcodeproj` (not `Package.swift`) and run the shared
-`NotchAgent` scheme. It builds a native `NotchAgent.app` with the same bundle
+For Xcode, open `Eave.xcodeproj` (not `Package.swift`) and run the shared
+`Eave` scheme. It builds a native `Eave.app` with the same bundle
 identifier, Info.plist, icon, menu-bar asset, and sources as the shell build.
 Opening `Package.swift` makes Xcode generate a SwiftPM executable scheme, which
 does not launch the app through the same bundle path.
@@ -59,17 +59,17 @@ the project structure, regenerate it with `xcodegen generate`.
 The standalone build remains available without Xcode:
 
 ```sh
-./build.sh                     # swiftc build into build/NotchAgent.app
-open build/NotchAgent.app      # launches with no dock icon
+./build.sh                     # swiftc build into build/Eave.app
+open build/Eave.app            # launches with no dock icon
 ```
 
 Local Xcode and shell builds use the Apple Development certificate for team
 `WJZ957T3P9`, giving the app a stable signing requirement so macOS privacy
 permissions survive rebuilds. `build.sh` falls back to ad-hoc signing on CI or
 machines without that certificate; override its certificate selection with
-`NOTCHAGENT_SIGN_IDENTITY` when needed.
+`EAVE_SIGN_IDENTITY` when needed.
 
-Quit with Cmd+Q while the panel is open, or `pkill NotchAgent`.
+Quit with Cmd+Q while the panel is open, or `pkill Eave`.
 
 ### Console noise when running from Xcode
 
@@ -92,14 +92,14 @@ Two kinds of launch-time log spam were diagnosed (2026-07-14):
 
 - Hover the notch (0.15s dwell): panel opens WITHOUT taking your keyboard.
   It stays open when the mouse leaves — closing is explicit.
-- Click the notch, or Option+Space anywhere: open with keyboard focus
-- Esc, Cmd+W, Option+Space, or click anywhere outside (global mouse monitor):
+- Click the notch, or use the configured shortcut anywhere: open with keyboard focus
+- Esc, Cmd+W, the configured shortcut, or click anywhere outside (global mouse monitor):
   close. The pin button (top right) disables outside-click closing so the
   panel stays up while you work in other apps.
 - Return: send. Option+Return: newline. Cmd+A/C/V/X/Z work via a
   programmatic Edit main menu (accessory apps have no menu bar, but key
   equivalents still route through NSApp.mainMenu).
-- Top strip: settings gear (left) — auto-edit, hotkey, quit; pin + new-chat
+- Top strip: settings gear (left) — shortcut, panel behavior, and quit; pin + new-chat
   pencil (right).
 - Composer pills: provider (Claude/Codex/ChatGPT) and working folder (hidden
   for ChatGPT, which never touches files). Each provider keeps its own
@@ -107,7 +107,7 @@ Two kinds of launch-time log spam were diagnosed (2026-07-14):
 - Menu bar terminal-bucket icon: an open notch tray with `>_`; it takes on the
   system accent color while a turn is in flight.
 - Debug: `kill -USR1 <pid>` toggles; `kill -USR2 <pid>` runs commands from
-  /tmp/notchagent-cmd (provider:X / send:text / msgs / dump) — how the
+  /tmp/eave-cmd (provider:X / send:text / msgs / dump) — how the
   ChatGPT DOM automation gets debugged headlessly.
 
 ## Architecture
@@ -136,8 +136,8 @@ emitting JSONL on stdout, threaded by a session id:
   This JSONL interface is exactly what the Codex TypeScript SDK wraps, so
   shelling out loses nothing.
 
-The global hotkey uses Carbon `RegisterEventHotKey`, which needs no
-accessibility permission.
+The configurable global hotkey uses Carbon `RegisterEventHotKey`, which needs
+no accessibility permission.
 
 Notch geometry comes from `NSScreen.safeAreaInsets` +
 `auxiliaryTopLeft/RightArea`; on displays without a notch a small black tab is
@@ -165,7 +165,7 @@ lives in AppDelegate and tints the `>_` bucket while the session is running.
 
 ## Chats, streaming, steps, attachments
 
-- History is persistent: chats save to ~/Library/Application Support/NotchAgent/chats.json
+- History is persistent: chats save to ~/Library/Application Support/Eave/chats.json
   (archived on new-chat, restore, and quit; cap 20). The clock button opens the
   list; restoring rehydrates the transcript, provider, and session ids so the
   conversation continues — ChatGPT threads resume via their /c/<id> URL when
@@ -187,7 +187,7 @@ lives in AppDelegate and tints the `>_` bucket while the session is running.
   are captured as JPEG, and other image formats are copied to JPEG without
   changing the original; oversized images are compressed below 4.5 MB. Sent
   attachments remain clickable in the transcript; screenshots are stored in
-  `~/Library/Application Support/NotchAgent/Screenshots/` and can also be
+  `~/Library/Application Support/Eave/Screenshots/` and can also be
   revealed in Finder from the attachment's context menu.
 
 ## Known limitations / next steps

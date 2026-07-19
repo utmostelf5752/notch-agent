@@ -84,7 +84,7 @@ writePNG(renderAppIcon(size: 180), to: docs.appendingPathComponent("apple-touch-
 // Build a complete .icns so Finder, Spotlight, and the app bundle all use the
 // selected artwork at the correct native resolutions.
 let iconsetURL = fileManager.temporaryDirectory
-    .appendingPathComponent("NotchAgent-\(UUID().uuidString).iconset", isDirectory: true)
+    .appendingPathComponent("Eave-\(UUID().uuidString).iconset", isDirectory: true)
 try fileManager.createDirectory(at: iconsetURL, withIntermediateDirectories: true)
 defer { try? fileManager.removeItem(at: iconsetURL) }
 

@@ -2,7 +2,7 @@ name: Build and publish DMG
 
 # Every push to main rebuilds the app and republishes it to the "latest"
 # release, so the download URL below always serves the newest build:
-#   https://github.com/utmostelf5752/notch-agent/releases/latest/download/NotchAgent.dmg
+#   https://github.com/utmostelf5752/notch-agent/releases/latest/download/Eave.dmg
 on:
   push:
     branches: [main]
@@ -34,8 +34,8 @@ jobs:
           # Rolling "latest" release: delete the old one (and its tag) so the
           # tag moves to this commit, then recreate with the fresh DMG.
           gh release delete latest --yes --cleanup-tag || true
-          gh release create latest build/NotchAgent.dmg \
+          gh release create latest build/Eave.dmg \
             --title "Latest build" \
             --target "$GITHUB_SHA" \
             --latest \
-            --notes "Automated build from ${GITHUB_SHA:0:7}. Download NotchAgent.dmg below."
+            --notes "Automated build from ${GITHUB_SHA:0:7}. Download Eave.dmg below."

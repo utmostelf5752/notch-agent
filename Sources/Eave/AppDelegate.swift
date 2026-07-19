@@ -20,8 +20,11 @@ final class FirstMouseHostingView<Content: View>: NSHostingView<Content> {
 
 final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private var hotKeyRef: EventHotKeyRef?
+    private var hotKeyHandlerRef: EventHandlerRef?
+    private var nextHotKeyID: UInt32 = 1
     private var statusItem: NSStatusItem?
     private var runningObserver: AnyCancellable?
+    private var shortcutObserver: AnyCancellable?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         // Our windows must never participate in window tabbing; also silences
@@ -32,7 +35,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         setUpChatPanel(state: state)
         setUpStatusItem(state: state)
         setUpMainMenu()
-        installHotKey()
+        installHotKey(state: state)
         installKeyMonitor()
         installSignalTriggers()
         state.startNotchWatch()
@@ -49,7 +52,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
         let appItem = NSMenuItem()
         let appMenu = NSMenu()
-        appMenu.addItem(NSMenuItem(title: "Quit NotchAgent", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
+        appMenu.addItem(NSMenuItem(title: "Quit Eave", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
         appItem.submenu = appMenu
         main.addItem(appItem)
 
@@ -69,11 +72,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     // Debug hooks: `kill -USR1 <pid>` toggles the panel. `kill -USR2 <pid>`
-    // executes commands from /tmp/notchagent-cmd (one per line):
+    // executes commands from /tmp/eave-cmd (one per line):
     //   provider:<claude|codex|cursor|chatgpt>   switch provider
     //   send:<text>                       send a message
-    //   msgs                              write transcript to /tmp/notchagent-msgs.txt
-    //   dump                              write ChatGPT web view state to /tmp/notchagent-dom.txt
+    //   msgs                              write transcript to /tmp/eave-msgs.txt
+    //   dump                              write ChatGPT web view state to /tmp/eave-dom.txt
     // With no command file, USR2 just logs geometry.
     private var signalSources: [DispatchSourceSignal] = []
     private func installSignalTriggers() {
@@ -90,7 +93,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     private static func handleDebugCommands() {
-        let path = "/tmp/notchagent-cmd"
+        let paths = ["/tmp/eave-cmd", "/tmp/notchagent-cmd"]
+        guard let path = paths.first(where: FileManager.default.fileExists(atPath:)) else {
+            AppState.shared.logGeometry()
+            return
+        }
         guard let raw = try? String(contentsOfFile: path, encoding: .utf8) else {
             AppState.shared.logGeometry()
             return
@@ -108,9 +115,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 let out = session.messages
                     .map { "[\($0.role)] \($0.text)" }
                     .joined(separator: "\n---\n")
-                try? out.write(toFile: "/tmp/notchagent-msgs.txt", atomically: true, encoding: .utf8)
+                try? out.write(toFile: "/tmp/eave-msgs.txt", atomically: true, encoding: .utf8)
             } else if cmd == "dump" {
-                ChatGPTWeb.shared.dumpState(to: "/tmp/notchagent-dom.txt")
+                ChatGPTWeb.shared.dumpState(to: "/tmp/eave-dom.txt")
             } else if cmd == "screenshot:full" {
                 ScreenshotCapture.capture(.fullScreen)
             } else if cmd == "screenshot:window" {
@@ -128,7 +135,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 expandedFrame=\(NSStringFromRect(s.expandedFrame))
                 windowFrame=\(NSStringFromRect(s.chatPanel?.frame ?? .zero))
                 """
-                try? out.write(toFile: "/tmp/notchagent-geom.txt", atomically: true, encoding: .utf8)
+                try? out.write(toFile: "/tmp/eave-geom.txt", atomically: true, encoding: .utf8)
             } else if cmd.hasPrefix("mode:") {
                 let value = String(cmd.dropFirst(5))
                 if value == "default" {
@@ -185,7 +192,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 if session.pendingPermission == nil && session.pendingQuestion == nil {
                     out += "pending: none\n"
                 }
-                try? out.write(toFile: "/tmp/notchagent-state.txt", atomically: true, encoding: .utf8)
+                try? out.write(toFile: "/tmp/eave-state.txt", atomically: true, encoding: .utf8)
             }
         }
     }
@@ -201,11 +208,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         let settings = NSMenuItem(title: "Settings…", action: #selector(openSettings), keyEquivalent: ",")
         settings.target = self
         menu.addItem(settings)
-        let hint = NSMenuItem(title: "Hover the notch or press ⌥Space", action: nil, keyEquivalent: "")
+        let hint = NSMenuItem(title: "Hover the notch or press \(state.toggleShortcut.displayName)", action: nil, keyEquivalent: "")
         hint.isEnabled = false
         menu.addItem(hint)
         menu.addItem(.separator())
-        let quit = NSMenuItem(title: "Quit NotchAgent", action: #selector(quitApp), keyEquivalent: "q")
+        let quit = NSMenuItem(title: "Quit Eave", action: #selector(quitApp), keyEquivalent: "q")
         quit.target = self
         menu.addItem(quit)
         item.menu = menu
@@ -216,6 +223,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             .sink { [weak self] running in
                 Self.configureStatusButton(self?.statusItem?.button, running: running)
             }
+        shortcutObserver = state.$toggleShortcut
+            .receive(on: DispatchQueue.main)
+            .sink { shortcut in
+                hint.title = "Hover the notch or press \(shortcut.displayName)"
+            }
     }
 
     private static func configureStatusButton(_ button: NSStatusBarButton?, running: Bool) {
@@ -225,10 +237,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             ?? NSImage(systemSymbolName: "terminal", accessibilityDescription: nil)
         image?.size = NSSize(width: 18, height: 18)
         image?.isTemplate = true
-        image?.accessibilityDescription = running ? "NotchAgent (working)" : "NotchAgent"
+        image?.accessibilityDescription = running ? "Eave (working)" : "Eave"
         button.image = image
         button.contentTintColor = running ? .controlAccentColor : nil
-        button.toolTip = running ? "NotchAgent is working" : "NotchAgent"
+        button.toolTip = running ? "Eave is working" : "Eave"
     }
 
     // Full-screen screenshots fade the status button without removing its
@@ -350,7 +362,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     // Carbon hotkey: works globally without accessibility permission.
-    private func installHotKey() {
+    private func installHotKey(state: AppState) {
         var eventType = EventTypeSpec(
             eventClass: OSType(kEventClassKeyboard),
             eventKind: UInt32(kEventHotKeyPressed)
@@ -358,16 +370,37 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         InstallEventHandler(GetApplicationEventTarget(), { _, _, _ in
             DispatchQueue.main.async { AppState.shared.toggle() }
             return noErr
-        }, 1, &eventType, nil, nil)
+        }, 1, &eventType, nil, &hotKeyHandlerRef)
 
-        let hotKeyID = EventHotKeyID(signature: OSType(0x4E474E54), id: 1) // 'NGNT'
-        RegisterEventHotKey(
-            UInt32(kVK_Space),
-            UInt32(optionKey),
+        state.installShortcutRegistrationHandler { [unowned self] shortcut in
+            replaceHotKey(with: shortcut)
+        }
+    }
+
+    /// Registers the new shortcut before releasing the old one, so a conflict
+    /// can never leave the user without their previously working shortcut.
+    private func replaceHotKey(with shortcut: GlobalShortcut) -> String? {
+        let hotKeyID = EventHotKeyID(signature: OSType(0x45415645), id: nextHotKeyID) // 'EAVE'
+        var replacement: EventHotKeyRef?
+        let status = RegisterEventHotKey(
+            shortcut.keyCode,
+            shortcut.modifiers,
             hotKeyID,
             GetApplicationEventTarget(),
             0,
-            &hotKeyRef
+            &replacement
         )
+        guard status == noErr, let replacement else {
+            NSLog("Eave: failed to register shortcut \(shortcut.displayName), status=\(status)")
+            if status == eventHotKeyExistsErr {
+                return "\(shortcut.displayName) is already used by macOS or another app."
+            }
+            return "\(shortcut.displayName) could not be registered (error \(status))."
+        }
+        if let hotKeyRef { UnregisterEventHotKey(hotKeyRef) }
+        hotKeyRef = replacement
+        nextHotKeyID &+= 1
+        NSLog("Eave: registered shortcut \(shortcut.displayName)")
+        return nil
     }
 }

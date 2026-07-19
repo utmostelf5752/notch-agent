@@ -3,10 +3,15 @@ import Foundation
 import UniformTypeIdentifiers
 
 enum AppPaths {
+    private static let applicationSupportRoot = FileManager.default.urls(
+        for: .applicationSupportDirectory, in: .userDomainMask
+    )[0]
+    private static let legacySupportDirectory = applicationSupportRoot
+        .appendingPathComponent("NotchAgent", isDirectory: true)
+
     static let supportDirectory: URL = {
-        let directory = FileManager.default.urls(
-            for: .applicationSupportDirectory, in: .userDomainMask
-        )[0].appendingPathComponent("NotchAgent", isDirectory: true)
+        let directory = applicationSupportRoot.appendingPathComponent("Eave", isDirectory: true)
+        migrateLegacySupportDirectory(to: directory)
         try? FileManager.default.createDirectory(
             at: directory, withIntermediateDirectories: true
         )
@@ -37,6 +42,22 @@ enum AppPaths {
         return candidates.first { FileManager.default.fileExists(atPath: $0.path) }
     }
 
+    static func isScreenshotName(_ name: String) -> Bool {
+        name.hasPrefix("eave-screenshot-") || name.hasPrefix("notchagent-screenshot-")
+    }
+
+    static func relocatedManagedURL(for url: URL) -> URL {
+        let legacyPath = legacySupportDirectory.standardizedFileURL.path
+        let sourcePath = url.standardizedFileURL.path
+        guard sourcePath == legacyPath || sourcePath.hasPrefix(legacyPath + "/") else {
+            return url
+        }
+        let relativePath = String(sourcePath.dropFirst(legacyPath.count))
+            .trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        let relocated = supportDirectory.appendingPathComponent(relativePath)
+        return FileManager.default.fileExists(atPath: relocated.path) ? relocated : url
+    }
+
     static func migrateLegacyScreenshots() {
         let manager = FileManager.default
         let temporaryDirectory = URL(fileURLWithPath: "/tmp", isDirectory: true)
@@ -46,10 +67,49 @@ enum AppPaths {
             options: [.skipsHiddenFiles]
         ) else { return }
 
-        for source in files where source.lastPathComponent.hasPrefix("notchagent-screenshot-") {
+        for source in files where isScreenshotName(source.lastPathComponent) {
             let destination = screenshotsDirectory.appendingPathComponent(source.lastPathComponent)
             guard !manager.fileExists(atPath: destination.path) else { continue }
             try? manager.moveItem(at: source, to: destination)
+        }
+    }
+
+    private static func migrateLegacySupportDirectory(to destination: URL) {
+        let manager = FileManager.default
+        guard manager.fileExists(atPath: legacySupportDirectory.path) else { return }
+
+        if !manager.fileExists(atPath: destination.path) {
+            do {
+                try manager.moveItem(at: legacySupportDirectory, to: destination)
+                return
+            } catch {
+                NSLog("Eave: could not move legacy data directory: \(error.localizedDescription)")
+            }
+        }
+
+        try? manager.createDirectory(at: destination, withIntermediateDirectories: true)
+        mergeMissingItems(from: legacySupportDirectory, into: destination, manager: manager)
+    }
+
+    private static func mergeMissingItems(
+        from source: URL,
+        into destination: URL,
+        manager: FileManager
+    ) {
+        guard let items = try? manager.contentsOfDirectory(
+            at: source,
+            includingPropertiesForKeys: [.isDirectoryKey],
+            options: [.skipsHiddenFiles]
+        ) else { return }
+
+        for item in items {
+            let target = destination.appendingPathComponent(item.lastPathComponent)
+            let isDirectory = (try? item.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true
+            if isDirectory, manager.fileExists(atPath: target.path) {
+                mergeMissingItems(from: item, into: target, manager: manager)
+            } else if !manager.fileExists(atPath: target.path) {
+                try? manager.moveItem(at: item, to: target)
+            }
         }
     }
 }
@@ -73,7 +133,7 @@ enum ImageAttachmentNormalizer {
 
         guard let image = NSImage(contentsOf: source) else {
             throw NSError(
-                domain: "NotchAgent.ImageAttachment",
+                domain: "Eave.ImageAttachment",
                 code: 1,
                 userInfo: [NSLocalizedDescriptionKey: "the image could not be decoded"]
             )
@@ -83,13 +143,13 @@ enum ImageAttachmentNormalizer {
         let pixelHeight = image.representations.map(\.pixelsHigh).max() ?? Int(image.size.height)
         guard pixelWidth > 0, pixelHeight > 0 else {
             throw NSError(
-                domain: "NotchAgent.ImageAttachment",
+                domain: "Eave.ImageAttachment",
                 code: 2,
                 userInfo: [NSLocalizedDescriptionKey: "the image has no readable pixels"]
             )
         }
 
-        let screenshot = source.lastPathComponent.hasPrefix("notchagent-screenshot-")
+        let screenshot = AppPaths.isScreenshotName(source.lastPathComponent)
         let directory = screenshot ? AppPaths.screenshotsDirectory : AppPaths.attachmentsDirectory
         let baseName = source.deletingPathExtension().lastPathComponent
         let managedSource = source.deletingLastPathComponent().standardizedFileURL == directory.standardizedFileURL
@@ -105,7 +165,7 @@ enum ImageAttachmentNormalizer {
             let height = max(1, Int((CGFloat(pixelHeight) * scale).rounded()))
             guard let bitmap = renderedBitmap(image, width: width, height: height) else {
                 throw NSError(
-                    domain: "NotchAgent.ImageAttachment",
+                    domain: "Eave.ImageAttachment",
                     code: 3,
                     userInfo: [NSLocalizedDescriptionKey: "the JPEG renderer could not be created"]
                 )
@@ -181,7 +241,9 @@ struct ChatMessage: Identifiable, Equatable, Codable {
 
     var attachmentURLs: [URL] {
         if let attachmentPaths, !attachmentPaths.isEmpty {
-            return attachmentPaths.map(URL.init(fileURLWithPath:))
+            return attachmentPaths.map {
+                AppPaths.relocatedManagedURL(for: URL(fileURLWithPath: $0))
+            }
         }
 
         // Older user messages retained only "Attached: <filename>". Recover
@@ -195,7 +257,7 @@ struct ChatMessage: Identifiable, Equatable, Codable {
             .split(separator: ",")
             .compactMap { raw in
                 let name = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-                guard name.hasPrefix("notchagent-screenshot-") else { return nil }
+                guard AppPaths.isScreenshotName(name) else { return nil }
                 return AppPaths.existingScreenshot(named: name)
             }
     }
@@ -749,7 +811,7 @@ final class AgentSession: ObservableObject {
     @Published var attachments: [URL] = []
     @Published var pastChats: [ChatArchive] = []
     private static let maxPastChats = 10
-    private static let cursorContextDefaultsKey = "NotchAgent.cursorContextChoice"
+    private static let cursorContextDefaultsKey = "Eave.cursorContextChoice"
     // The history entry the live session was restored from, if any. Keeps a
     // reopened chat listed (and in place) in history; archiving updates that
     // entry instead of inserting a duplicate.

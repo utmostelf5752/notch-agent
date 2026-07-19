@@ -6,7 +6,7 @@
 set -e
 cd "$(dirname "$0")"
 
-APP=build/NotchAgent.app
+APP=build/Eave.app
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp Support/AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"
@@ -17,26 +17,27 @@ cp Support/Info.plist "$APP/Contents/Info.plist"
 # builds the native app target. Keeping one plist makes shell and Xcode runs
 # use the same bundle identity and metadata.
 sed -i '' \
-    -e 's/$(EXECUTABLE_NAME)/NotchAgent/g' \
-    -e 's/$(PRODUCT_BUNDLE_IDENTIFIER)/com.jagruth.notchagent/g' \
+    -e 's/$(EXECUTABLE_NAME)/Eave/g' \
+    -e 's/$(PRODUCT_BUNDLE_IDENTIFIER)/com.jagruth.eave/g' \
     "$APP/Contents/Info.plist"
 
-swiftc -O -o "$APP/Contents/MacOS/NotchAgent" \
+swiftc -O -o "$APP/Contents/MacOS/Eave" \
     -Xlinker -sectcreate -Xlinker __TEXT -Xlinker __info_plist \
     -Xlinker Support/EmbeddedInfo.plist \
-    Sources/NotchAgent/main.swift \
-    Sources/NotchAgent/AppDelegate.swift \
-    Sources/NotchAgent/AppState.swift \
-    Sources/NotchAgent/AgentSession.swift \
-    Sources/NotchAgent/CodexAppServer.swift \
-    Sources/NotchAgent/ChatGPTWeb.swift \
-    Sources/NotchAgent/MarkdownText.swift \
-    Sources/NotchAgent/Views.swift
+    Sources/Eave/main.swift \
+    Sources/Eave/GlobalShortcut.swift \
+    Sources/Eave/AppDelegate.swift \
+    Sources/Eave/AppState.swift \
+    Sources/Eave/AgentSession.swift \
+    Sources/Eave/CodexAppServer.swift \
+    Sources/Eave/ChatGPTWeb.swift \
+    Sources/Eave/MarkdownText.swift \
+    Sources/Eave/Views.swift
 
 # A stable Apple Development identity keeps macOS privacy permissions attached
 # across rebuilds. CI and machines without this team's certificate retain the
 # previous ad-hoc fallback so release packaging still works there.
-SIGNING_IDENTITY="${NOTCHAGENT_SIGN_IDENTITY:-}"
+SIGNING_IDENTITY="${EAVE_SIGN_IDENTITY:-${NOTCHAGENT_SIGN_IDENTITY:-}}"
 if [ -z "$SIGNING_IDENTITY" ]; then
     SIGNING_IDENTITY=$(security find-identity -v -p codesigning 2>/dev/null \
         | awk '/"Apple Development:/ { print $2; exit }')
@@ -47,6 +48,6 @@ if [ -z "$SIGNING_IDENTITY" ]; then
 else
     echo "Signing with the installed Apple Development certificate"
 fi
-codesign --force --sign "$SIGNING_IDENTITY" --identifier com.jagruth.notchagent "$APP"
+codesign --force --sign "$SIGNING_IDENTITY" --identifier com.jagruth.eave "$APP"
 echo "Built $APP"
 echo "Run with: open $APP"

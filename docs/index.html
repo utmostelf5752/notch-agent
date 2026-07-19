@@ -894,6 +894,45 @@ h1 {
   overflow-x: auto;
 }
 .install-steps pre code { font-family: var(--mono); font-size: 11.5px; color: var(--ink); }
+/* Substeps for the Gatekeeper walkthrough — numbered separately from the
+   three top-level install steps so 01/02/03 keep their meaning. */
+.gate-steps {
+  margin: 12px 0 0;
+  padding: 0;
+  list-style: none;
+  counter-reset: gate;
+  display: grid;
+  gap: 9px;
+}
+.gate-steps li {
+  counter-increment: gate;
+  position: relative;
+  padding-left: 26px;
+  font-size: 13.5px;
+  color: var(--ink-dim);
+  line-height: 1.6;
+}
+.gate-steps li::before {
+  content: counter(gate);
+  position: absolute;
+  left: 0;
+  top: 0.1em;
+  width: 17px;
+  height: 17px;
+  border: 1px solid var(--line);
+  border-radius: 50%;
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--ink-faint);
+  display: grid;
+  place-items: center;
+}
+.gate-note {
+  margin-top: 12px;
+  font-size: 12.5px;
+  color: var(--ink-faint);
+  line-height: 1.6;
+}
 
 /* ---------- footer ---------- */
 footer {
@@ -1119,7 +1158,14 @@ footer .fbrand img {
     </article>
     <article class="note">
       <span class="install-n">02</span>
-      <p><strong>First launch:</strong> the app is ad-hoc signed, so Gatekeeper blocks a plain double-click. Right-click &rarr; <strong>Open</strong> &rarr; confirm, or clear the quarantine flag:</p>
+      <p><strong>First launch:</strong> Eave isn't signed with a paid Apple developer certificate yet, so macOS blocks it the first time. This is expected — you open it once through Settings, and every launch after that is a normal double-click.</p>
+      <ol class="gate-steps">
+        <li>Open Eave from Applications. macOS says it can't verify the developer. Click <strong>Done</strong> — not Move to Trash.</li>
+        <li>Go to <strong>Apple menu &#63743; &rarr; System Settings &rarr; Privacy &amp; Security</strong> and scroll down to <strong>Security</strong>.</li>
+        <li>Next to &ldquo;Eave was blocked&rdquo;, click <strong>Open Anyway</strong>. This button only shows for about an hour after step 1, so if it's missing, try opening Eave again.</li>
+        <li>Enter your login password, click <strong>OK</strong>, then confirm <strong>Open Anyway</strong>.</li>
+      </ol>
+      <p class="gate-note">Prefer the terminal? This does the same thing in one line:</p>
       <pre><code>xattr -dr com.apple.quarantine /Applications/Eave.app</code></pre>
     </article>
     <article class="note">

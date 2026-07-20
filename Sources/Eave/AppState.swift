@@ -239,8 +239,13 @@ final class AppState: ObservableObject {
     // avoids-capture tag directly. May be ignored by ScreenCaptureKit on macOS 15+.
     @Published var coreGraphicsHardeningEnabled: Bool {
         didSet {
+            guard oldValue != coreGraphicsHardeningEnabled else { return }
             UserDefaults.standard.set(coreGraphicsHardeningEnabled, forKey: "coreGraphicsHardeningEnabled")
-            applyCoreGraphicsHardening()
+            if coreGraphicsHardeningEnabled {
+                applyCoreGraphicsHardening()
+            } else {
+                clearCoreGraphicsHardening()
+            }
         }
     }
 
@@ -283,6 +288,24 @@ final class AppState: ObservableObject {
         } else {
             CGSClearWindowTags(cid, wid, &tags, MemoryLayout<UInt32>.size * 2)
         }
+    }
+
+    // Called when the user turns aggressive CG hardening off. Reverses the
+    // private SkyLight changes so the windows fall back to the public sharingType.
+    private func clearCoreGraphicsHardening() {
+        for window in NSApp.windows {
+            clearCoreGraphicsHardening(to: window)
+        }
+    }
+
+    private func clearCoreGraphicsHardening(to window: NSWindow) {
+        guard window.windowNumber > 0 else { return }
+        let cid = CGSDefaultConnectionForThread()
+        let wid = UInt32(window.windowNumber)
+        let sharingState: Int32 = screenShareProtectionEnabled ? 0 : 1
+        CGSSetWindowSharingState(cid, wid, sharingState)
+        var tags: [UInt32] = [kCGSAvoidsCaptureTagBit, 0]
+        CGSClearWindowTags(cid, wid, &tags, MemoryLayout<UInt32>.size * 2)
     }
 
     // Keep Eave out of the Window menu and the Cmd+` window cycle. The app is
@@ -335,7 +358,7 @@ final class AppState: ObservableObject {
             guard let bundleID = app.bundleIdentifier else { return false }
             return Self.screenShareAppBundleIDs.contains(bundleID) && !app.isTerminated
         }
-        let watcherDetected = CGSIsScreenWatcherPresent()
+        let watcherDetected = coreGraphicsHardeningEnabled ? CGSIsScreenWatcherPresent() : false
         if heuristicDetected || watcherDetected {
             DispatchQueue.main.async { [weak self] in self?.enterSharingStealth() }
         }

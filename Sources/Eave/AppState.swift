@@ -147,8 +147,8 @@ final class AppState: ObservableObject {
 
     // How the notch narrates background activity.
     //   standard — live text, tokens, and buttons around the notch.
-    //   compact  — every state is the same hairline sliver under the notch,
-    //              colored by what's happening; done sweeps 3 times and stops.
+    //   compact  — hairline sliver while working/alerting; Done expands into
+    //              wings with elapsed time and a draining bottom bar.
     //   stealth  — silent while working; a permission/question announces
     //              itself with a brief 2-sweep dark sliver and then hides;
     //              the panel becomes a near-black overlay at the notch's
@@ -185,11 +185,30 @@ final class AppState: ObservableObject {
         }
     }
 
+    // Use the macOS window sharingType API so Eave's windows are excluded from
+    // screen recordings and video calls when the user enables this.
+    @Published var screenShareProtectionEnabled: Bool {
+        didSet {
+            UserDefaults.standard.set(screenShareProtectionEnabled, forKey: "screenShareProtectionEnabled")
+            applyScreenShareProtection()
+        }
+    }
+
     func applyPanelBlur() {
         guard let panel = chatPanel, panel.windowNumber > 0 else { return }
         let radius: Int32 = panelStyle == .clear ? 3 : 0
         CGSSetWindowBackgroundBlurRadius(
             CGSDefaultConnectionForThread(), UInt32(panel.windowNumber), radius)
+    }
+
+    func applyScreenShareProtection() {
+        for window in NSApp.windows {
+            applyScreenShareProtection(to: window)
+        }
+    }
+
+    private func applyScreenShareProtection(to window: NSWindow) {
+        window.sharingType = screenShareProtectionEnabled ? .none : .readOnly
     }
 
     // The eye button toggles stealth without forgetting whether the user was
@@ -257,7 +276,7 @@ final class AppState: ObservableObject {
     // dismisses itself. completedStartedAt anchors the draining progress bar.
     @Published var showingCompleted = false
     var completedStartedAt = Date()
-    let completedDuration: TimeInterval = 3
+    let completedDuration: TimeInterval = 5
     private var completedTimer: Timer?
 
     // Stealth announces a pending permission/question with a sliver that
@@ -330,6 +349,16 @@ final class AppState: ObservableObject {
         if w > 0 { panelWidthOverride = CGFloat(w) }
         let h = defaults.double(forKey: "panelHeight")
         if h > 0 { panelHeightOverride = CGFloat(h) }
+        screenShareProtectionEnabled = defaults.bool(forKey: "screenShareProtectionEnabled")
+        let observer = NotificationCenter.default.addObserver(
+            forName: Notification.Name("NSWindowDidBecomeVisibleNotification"),
+            object: nil,
+            queue: .main
+        ) { [weak self] notification in
+            guard let self, let window = notification.object as? NSWindow else { return }
+            self.applyScreenShareProtection(to: window)
+        }
+        cancellables.insert(AnyCancellable { NotificationCenter.default.removeObserver(observer) })
     }
 
     func installShortcutRegistrationHandler(_ handler: @escaping (GlobalShortcut.Kind, GlobalShortcut) -> String?) {
@@ -562,7 +591,23 @@ final class AppState: ObservableObject {
                       width: base.width, height: base.height + activationTopOvershoot)
     }
     var activationFrame: NSRect {
-        activationFrame(for: targetWindow?.frame ?? collapsedFrame)
+        let window = targetWindow?.frame ?? collapsedFrame
+        // Permission and question hang a button band below the camera row.
+        // Hovering there must not expand the panel out from under a click aimed
+        // at Deny / Allow / Answer, so in those states hover activation shrinks
+        // to the notch strip itself and the band stays purely clickable.
+        switch notchMode {
+        case .permission, .question:
+            let width = notchWidth + activationInset * 2
+            return NSRect(
+                x: window.midX - width / 2,
+                y: window.maxY - notchHeight,
+                width: width,
+                height: notchHeight + activationTopOvershoot
+            )
+        default:
+            return activationFrame(for: window)
+        }
     }
 
     // The open panel's top-edge close target: the camera-cutout-width gap along
@@ -628,10 +673,17 @@ final class AppState: ObservableObject {
                 return NSSize(width: base.width, height: base.height + 3)
             }
         }
-        // Compact: every background state is a sliver, so the notch only ever
-        // grows the 3pt the hairline needs.
-        if notchStyle == .compact, notchMode != .idle {
-            return NSSize(width: base.width, height: base.height + 3)
+        // Compact: hairline for working/alerts; Done grows into wings like
+        // standard so "Done", elapsed time, and the drain sliver can fit.
+        if notchStyle == .compact {
+            switch notchMode {
+            case .idle:
+                return base
+            case .completed:
+                return NSSize(width: min(base.width + 200, maxPanelWidth), height: base.height + 6)
+            default:
+                return NSSize(width: base.width, height: base.height + 3)
+            }
         }
         switch notchMode {
         case .idle:
@@ -644,7 +696,7 @@ final class AppState: ObservableObject {
         case .question:
             return NSSize(width: min(base.width + 190, maxPanelWidth), height: base.height + 56)
         case .completed:
-            return NSSize(width: min(base.width + 200, maxPanelWidth), height: base.height + 4)
+            return NSSize(width: min(base.width + 200, maxPanelWidth), height: base.height + 6)
         }
     }
 
@@ -887,6 +939,7 @@ final class AppState: ObservableObject {
                 self.expand(takeKeyboard: true)
             }
             settingsWindow = win
+            applyScreenShareProtection()
         }
         // The panel sits at .statusBar level, above the settings window, so
         // collapse it while Settings is up and restore it on close.
@@ -967,15 +1020,13 @@ final class AppState: ObservableObject {
             guard inside != self.notchHovering else { return }
             self.notchHovering = inside
             guard inside else { return }
-            // Short dwell so flybys toward the menu bar don't open it. Idle and
-            // working states hover-expand; permission / question states keep
-            // hover disabled so it cannot steal a click aimed at the notch's
-            // own buttons. Stealth has no notch buttons, so it hover-expands in
-            // every state.
+            // Short dwell so flybys toward the menu bar don't open it. Every
+            // state hover-expands; permission and question protect their own
+            // buttons by narrowing activationFrame to the notch strip rather
+            // than by opting out of hover.
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [weak self] in
                 guard let self else { return }
-                if self.notchHovering && !self.expanded
-                    && (self.notchMode == .idle || self.notchMode == .working || self.stealthMode) {
+                if self.notchHovering && !self.expanded {
                     NSLog("Eave: hover-expanding")
                     self.expand(takeKeyboard: false)
                 }

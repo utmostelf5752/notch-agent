@@ -291,7 +291,11 @@ struct NotchTargetView: View {
     private var radius: CGFloat {
         // Stealth mimics the bare hardware notch, so it keeps the stock 8.
         if state.notchStyle == .stealth { return 8 }
-        if state.notchStyle == .compact { return 10 }
+        // Compact stays tight for hairlines, but the Done pill needs the wider
+        // wing radius so text and the drain sliver fit cleanly.
+        if state.notchStyle == .compact {
+            return state.notchMode == .completed ? 14 : 10
+        }
         switch state.notchMode {
         case .idle: return 10
         case .working, .completed: return 14
@@ -324,15 +328,15 @@ struct NotchTargetView: View {
 
     // MARK: Compact — every background state is the same sweeping hairline
     // under the notch; only the color says what's happening. White = working,
-    // amber = permission, blue = question; green sweeps 3 times on done and
-    // the notch snaps back (the completed timer expires with the third sweep).
+    // amber = permission, blue = question. Completion breaks out of the
+    // hairline into the same Done / time / drain-sliver pill as standard.
     @ViewBuilder private var compactContent: some View {
         switch state.notchMode {
         case .idle: idleContent
         case .working: compactSliver(.white)
         case .permission: compactSliver(amber)
         case .question: compactSliver(questionBlue)
-        case .completed: compactSliver(green, sweeps: 3, anchor: state.completedStartedAt)
+        case .completed: completedContent
         }
     }
 
@@ -392,9 +396,8 @@ struct NotchTargetView: View {
                     .onTapGesture { state.expand(takeKeyboard: true) }
             }
         case .completed:
-            compactSliver(
-                Color(white: 0.25), sweeps: 2,
-                anchor: state.completedStartedAt, hidesWhenDone: true)
+            drainingSliver(
+                Color(white: 0.25), anchor: state.completedStartedAt, duration: 2)
         }
     }
 
@@ -450,21 +453,16 @@ struct NotchTargetView: View {
         .onTapGesture { state.expand(takeKeyboard: true) }
     }
 
-    // MARK: Completed — a brief "Done" pill with a draining bar that dismisses
-    // itself. Same wing layout as working; a green check replaces the activity.
+    // MARK: Completed — Done on the left; tokens + turn duration on the right;
+    // a single green sliver along the bottom drains until auto-dismiss.
     private var completedContent: some View {
-        ZStack(alignment: .bottom) {
+        VStack(spacing: 0) {
             HStack(spacing: 0) {
-                HStack(spacing: 6) {
-                    Image(systemName: "checkmark.circle.fill")
-                        .font(.system(size: 12))
-                        .foregroundStyle(green)
-                    Text("Done")
-                        .font(.system(size: 11.5, weight: .semibold))
-                        .foregroundStyle(green)
-                }
-                .padding(.leading, 15)
-                .frame(maxWidth: .infinity, alignment: .leading)
+                Text("Done")
+                    .font(.system(size: 11.5, weight: .semibold))
+                    .foregroundStyle(green)
+                    .padding(.leading, 15)
+                    .frame(maxWidth: .infinity, alignment: .leading)
 
                 Color.clear.frame(width: state.notchWidth)
 
@@ -481,28 +479,58 @@ struct NotchTargetView: View {
                 .padding(.trailing, 15)
                 .frame(maxWidth: .infinity, alignment: .trailing)
             }
+            .frame(maxHeight: .infinity)
+
             drainBar
-                .padding(.horizontal, 15)
+                .padding(.horizontal, 14)
                 .padding(.bottom, 3)
         }
         .contentShape(Rectangle())
         .onTapGesture { state.expand(takeKeyboard: true) }
     }
 
-    // Thin bar that empties over the pill's lifetime, mirroring the countdown to
-    // auto-dismiss. TimelineView drives it without @State.
+    // One continuous green fill that shrinks left→right. Cubic ease-out so it
+    // dumps most of its length early and creeps toward empty at the end.
     private var drainBar: some View {
         TimelineView(.animation) { ctx in
-            let elapsed = ctx.date.timeIntervalSince(state.completedStartedAt)
-            let p = max(0, min(1, 1 - elapsed / state.completedDuration))
-            GeometryReader { geo in
-                ZStack(alignment: .leading) {
-                    Capsule().fill(Color.white.opacity(0.12))
-                    Capsule().fill(green).frame(width: geo.size.width * p)
+            let t = max(0, min(1, ctx.date.timeIntervalSince(state.completedStartedAt) / state.completedDuration))
+            // remaining = (1-t)^3 — fast start, slow finish
+            let remaining = pow(1 - t, 3)
+            Capsule()
+                .fill(Color.white.opacity(0.14))
+                .frame(height: 2)
+                .overlay(alignment: .leading) {
+                    Capsule()
+                        .fill(green)
+                        .scaleEffect(x: remaining, y: 1, anchor: .leading)
                 }
-            }
-            .frame(height: 2)
+                .clipShape(Capsule())
         }
+        .frame(height: 2)
+    }
+
+    // Stealth completion / alert announcement: just the depleting hairline,
+    // no wing labels (stealth never grows sideways).
+    private func drainingSliver(
+        _ color: Color, anchor: Date, duration: TimeInterval
+    ) -> some View {
+        TimelineView(.animation) { ctx in
+            let elapsed = ctx.date.timeIntervalSince(anchor)
+            let remaining = max(0, min(1, 1 - elapsed / duration))
+            Capsule()
+                .fill(color.opacity(0.22))
+                .frame(height: 2)
+                .overlay(alignment: .leading) {
+                    Capsule()
+                        .fill(color.opacity(0.9))
+                        .scaleEffect(x: remaining, y: 1, anchor: .leading)
+                }
+                .clipShape(Capsule())
+                .padding(.horizontal, 22)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
+        .contentShape(Rectangle())
+        .onTapGesture { state.expand(takeKeyboard: true) }
     }
 
     // MARK: Alert band — permission or question, below the camera row.
@@ -2228,10 +2256,19 @@ struct SettingsView: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
 
+            Toggle(isOn: $state.screenShareProtectionEnabled) {
+                VStack(alignment: .leading, spacing: 1) {
+                    Text("Hide from screen shares").font(.system(size: 12.5))
+                    Text("Exclude Eave from screen recordings and video calls")
+                        .font(.system(size: 10.5)).foregroundStyle(.secondary)
+                }
+            }
+            .toggleStyle(.switch)
+
             Divider()
 
             HStack {
-                Text("Hover the notch or press \(state.toggleShortcut.displayName) to open; \(state.screenshotShortcut.displayName) to answer multiple choice.")
+                Text("Press \(state.toggleShortcut.displayName) or hover notch")
                     .font(.system(size: 11)).foregroundStyle(.secondary)
                 Spacer()
                 Button("Quit") { NSApp.terminate(nil) }

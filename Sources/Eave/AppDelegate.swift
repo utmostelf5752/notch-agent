@@ -37,6 +37,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         let state = AppState.shared
         setUpTargetWindow(state: state)
         setUpChatPanel(state: state)
+        state.applyScreenShareProtection()
         setUpStatusItem(state: state)
         setUpMainMenu()
         installHotKey(state: state)
@@ -212,7 +213,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         let settings = NSMenuItem(title: "Settings…", action: #selector(openSettings), keyEquivalent: ",")
         settings.target = self
         menu.addItem(settings)
-        let hint = NSMenuItem(title: Self.menuHint(toggle: state.toggleShortcut, screenshot: state.screenshotShortcut), action: nil, keyEquivalent: "")
+        let hint = NSMenuItem(title: Self.menuHint(toggle: state.toggleShortcut), action: nil, keyEquivalent: "")
         hint.isEnabled = false
         menu.addItem(hint)
         menu.addItem(.separator())
@@ -230,10 +231,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 let silent = state.silentTurn
                 Self.configureStatusButton(self?.statusItem?.button, running: running && !silent)
             }
-        shortcutObserver = Publishers.CombineLatest(state.$toggleShortcut, state.$screenshotShortcut)
+        shortcutObserver = state.$toggleShortcut
             .receive(on: DispatchQueue.main)
-            .sink { toggle, screenshot in
-                hint.title = Self.menuHint(toggle: toggle, screenshot: screenshot)
+            .sink { toggle in
+                hint.title = Self.menuHint(toggle: toggle)
             }
     }
 
@@ -250,8 +251,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         button.toolTip = running ? "Eave is working" : "Eave"
     }
 
-    private static func menuHint(toggle: GlobalShortcut, screenshot: GlobalShortcut) -> String {
-        "Hover the notch or press \(toggle.displayName) to open; \(screenshot.displayName) to answer multiple choice."
+    private static func menuHint(toggle: GlobalShortcut) -> String {
+        "Press \(toggle.displayName) or hover notch"
     }
 
     // Full-screen screenshots fade the status button without removing its

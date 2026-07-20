@@ -1033,6 +1033,9 @@ final class AgentSession: ObservableObject {
     private var codexThreadID: String?
     private var chatgptThreadID: String?
     private var cursorSessionID: String?
+    // A question answer waiting for the asking turn to exit; see
+    // deliverCursorFollowUp.
+    private var pendingCursorFollowUp: String?
     private var process: Process?
     private var claudeStdin: FileHandle?
     private let codexServer = CodexAppServer()
@@ -1054,7 +1057,10 @@ final class AgentSession: ObservableObject {
         return (out?.isEmpty == false) ? out : nil
     }
 
-    func send(_ text: String) {
+    // echo=false sends text the transcript already shows in another form (a
+    // question answer, which answerQuestion has already appended as the user's
+    // bubble) so it isn't printed twice.
+    func send(_ text: String, echo: Bool = true) {
         guard !isRunning else { return }
         usageLimit = nil
         turnStartedAt = Date()
@@ -1062,7 +1068,9 @@ final class AgentSession: ObservableObject {
         let files = attachments
         attachments = []
 
-        messages.append(ChatMessage(role: .user, text: text, attachments: files))
+        if echo {
+            messages.append(ChatMessage(role: .user, text: text, attachments: files))
+        }
 
         // A reopened chat sits in place in history until actually continued;
         // the first new message bumps it to the top.
@@ -1585,6 +1593,7 @@ final class AgentSession: ObservableObject {
                         ? "agent exited with status \(proc.terminationStatus)"
                         : msg, provider: .cursor)
                 }
+                self.flushCursorFollowUp()
             }
         }
 
@@ -1622,9 +1631,24 @@ final class AgentSession: ObservableObject {
                 // Skip the final duplicate flush at end of turn.
                 return
             }
+        case "interaction_query":
+            // The model asked a multiple-choice question. Headless `agent -p`
+            // has no channel to answer one, so the CLI instantly self-rejects
+            // it ("Questions skipped by the user") and the turn continues. We
+            // still surface it in the notch and deliver the pick as the next
+            // message on the resumed session.
+            guard event["subtype"] as? String == "request",
+                  event["query_type"] as? String == "askQuestionInteractionQuery",
+                  let query = event["query"] as? [String: Any],
+                  let ask = query["askQuestionInteractionQuery"] as? [String: Any],
+                  let args = ask["args"] as? [String: Any] else { return }
+            presentCursorQuestions(args)
         case "tool_call":
             guard event["subtype"] as? String == "started",
                   let toolCall = event["tool_call"] as? [String: Any] else { return }
+            // The question itself is the UI; a "using askQuestion" activity
+            // line under it is noise.
+            if toolCall["askQuestionToolCall"] != nil { return }
             let display = Self.cursorToolDisplay(toolCall)
             appendTool(display.text, icon: display.icon)
         case "result":
@@ -1637,6 +1661,54 @@ final class AgentSession: ObservableObject {
         default:
             break
         }
+    }
+
+    // Cursor's askQuestion args: { title, questions: [{ prompt, allowMultiple,
+    // options: [{ id, label }] }] }. Options carry no description text.
+    private func presentCursorQuestions(_ args: [String: Any]) {
+        let title = (args["title"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? "Question"
+        let questions = (args["questions"] as? [[String: Any]] ?? []).compactMap { q -> AgentQuestion? in
+            let prompt = q["prompt"] as? String ?? ""
+            guard !prompt.isEmpty else { return nil }
+            return AgentQuestion(
+                header: title,
+                question: prompt,
+                options: (q["options"] as? [[String: Any]] ?? []).map {
+                    AgentQuestionOption(
+                        label: $0["label"] as? String ?? $0["id"] as? String ?? "",
+                        description: ""
+                    )
+                },
+                multiSelect: q["allowMultiple"] as? Bool ?? false
+            )
+        }
+        guard !questions.isEmpty else { return }
+        pendingQuestion = QuestionRequest(questions: questions) { [weak self] answers in
+            guard let self else { return }
+            let body = questions.compactMap { q -> String? in
+                guard let answer = answers[q.question] else { return nil }
+                return "\(q.question) \(answer)"
+            }.joined(separator: "\n")
+            guard !body.isEmpty else { return }
+            self.deliverCursorFollowUp("Answering your question:\n\(body)")
+        }
+    }
+
+    // The turn that asked is usually still running (the CLI never blocked on
+    // the question), and send() refuses to overlap turns, so hold the answer
+    // until the process exits.
+    private func deliverCursorFollowUp(_ text: String) {
+        guard isRunning else {
+            send(text, echo: false)
+            return
+        }
+        pendingCursorFollowUp = text
+    }
+
+    private func flushCursorFollowUp() {
+        guard let text = pendingCursorFollowUp else { return }
+        pendingCursorFollowUp = nil
+        send(text, echo: false)
     }
 
     private static func cursorToolDisplay(_ toolCall: [String: Any]) -> (icon: String, text: String) {
@@ -1819,6 +1891,7 @@ final class AgentSession: ObservableObject {
             request.respond(.deny)
         }
         pendingQuestion = nil
+        pendingCursorFollowUp = nil
         switch provider {
         case .claude, .cursor:
             process?.terminate()

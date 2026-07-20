@@ -2265,6 +2265,15 @@ struct SettingsView: View {
             }
             .toggleStyle(.switch)
 
+            Toggle(isOn: $state.autoHideOnScreenShare) {
+                VStack(alignment: .leading, spacing: 1) {
+                    Text("Auto-hide while sharing").font(.system(size: 12.5))
+                    Text("Collapse and enter stealth when a meeting app is running")
+                        .font(.system(size: 10.5)).foregroundStyle(.secondary)
+                }
+            }
+            .toggleStyle(.switch)
+
             Divider()
 
             HStack {

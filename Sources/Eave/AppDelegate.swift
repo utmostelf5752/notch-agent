@@ -37,6 +37,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         let state = AppState.shared
         setUpTargetWindow(state: state)
         setUpChatPanel(state: state)
+        state.applyWindowDiscretion()
         state.applyScreenShareProtection()
         setUpStatusItem(state: state)
         setUpMainMenu()
@@ -286,7 +287,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             defer: false
         )
         window.level = .statusBar
-        window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary]
+        window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary, .transient]
+        window.isExcludedFromWindowsMenu = true
         window.backgroundColor = .clear
         window.isOpaque = false
         window.hasShadow = false
@@ -305,7 +307,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             defer: false
         )
         panel.level = .statusBar
-        panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary]
+        panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary, .transient]
+        panel.isExcludedFromWindowsMenu = true
         panel.backgroundColor = .clear
         panel.isOpaque = false
         panel.hasShadow = false

@@ -194,6 +194,20 @@ final class AppState: ObservableObject {
         }
     }
 
+    // When enabled, detect common meeting/screen-sharing apps and automatically
+    // collapse the panel, close settings, and enter stealth. This is a heuristic
+    // because macOS has no public API for "screen sharing is active".
+    @Published var autoHideOnScreenShare: Bool {
+        didSet {
+            UserDefaults.standard.set(autoHideOnScreenShare, forKey: "autoHideOnScreenShare")
+            if autoHideOnScreenShare {
+                startScreenShareWatch()
+            } else {
+                stopScreenShareWatch()
+            }
+        }
+    }
+
     func applyPanelBlur() {
         guard let panel = chatPanel, panel.windowNumber > 0 else { return }
         let radius: Int32 = panelStyle == .clear ? 3 : 0
@@ -209,6 +223,70 @@ final class AppState: ObservableObject {
 
     private func applyScreenShareProtection(to window: NSWindow) {
         window.sharingType = screenShareProtectionEnabled ? .none : .readOnly
+    }
+
+    // Keep Eave out of the Window menu and the Cmd+` window cycle. The app is
+    // already an LSUIElement accessory, so it does not appear in Cmd+Tab.
+    func applyWindowDiscretion() {
+        for window in NSApp.windows {
+            applyWindowDiscretion(to: window)
+        }
+    }
+
+    private func applyWindowDiscretion(to window: NSWindow) {
+        window.isExcludedFromWindowsMenu = true
+        var behavior = window.collectionBehavior
+        behavior.insert(.transient)
+        window.collectionBehavior = behavior
+    }
+
+    // MARK: - Screen-share auto-hide
+
+    private var screenShareWatchTimer: Timer?
+    private static let screenShareAppBundleIDs: Set<String> = [
+        "us.zoom.xos",
+        "com.microsoft.teams",
+        "com.microsoft.teams2",
+        "com.tinyspeck.slackmacgap",
+        "com.cisco.webexmeetingsapp",
+        "com.apple.FaceTime",
+        "com.hnc.Discord",
+        "com.obsproject.obs-studio",
+        "com.apple.QuickTimePlayerX",
+    ]
+
+    private func startScreenShareWatch() {
+        screenShareWatchTimer?.invalidate()
+        screenShareWatchTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
+            self?.checkScreenShare()
+        }
+        checkScreenShare()
+    }
+
+    private func stopScreenShareWatch() {
+        screenShareWatchTimer?.invalidate()
+        screenShareWatchTimer = nil
+    }
+
+    private func checkScreenShare() {
+        guard autoHideOnScreenShare else { return }
+        let running = NSWorkspace.shared.runningApplications
+        let detected = running.contains { app in
+            guard let bundleID = app.bundleIdentifier else { return false }
+            return Self.screenShareAppBundleIDs.contains(bundleID) && !app.isTerminated
+        }
+        if detected {
+            DispatchQueue.main.async { [weak self] in self?.enterSharingStealth() }
+        }
+    }
+
+    private func enterSharingStealth() {
+        guard autoHideOnScreenShare else { return }
+        if let settingsWindow, settingsWindow.isVisible {
+            settingsWindow.close()
+        }
+        if expanded { collapse() }
+        if !stealthMode { toggleStealth() }
     }
 
     // The eye button toggles stealth without forgetting whether the user was
@@ -350,12 +428,14 @@ final class AppState: ObservableObject {
         let h = defaults.double(forKey: "panelHeight")
         if h > 0 { panelHeightOverride = CGFloat(h) }
         screenShareProtectionEnabled = defaults.bool(forKey: "screenShareProtectionEnabled")
+        autoHideOnScreenShare = defaults.bool(forKey: "autoHideOnScreenShare")
         let observer = NotificationCenter.default.addObserver(
             forName: Notification.Name("NSWindowDidBecomeVisibleNotification"),
             object: nil,
             queue: .main
         ) { [weak self] notification in
             guard let self, let window = notification.object as? NSWindow else { return }
+            self.applyWindowDiscretion(to: window)
             self.applyScreenShareProtection(to: window)
         }
         cancellables.insert(AnyCancellable { NotificationCenter.default.removeObserver(observer) })
@@ -928,6 +1008,8 @@ final class AppState: ObservableObject {
             )
             win.title = "Eave Settings"
             win.isReleasedWhenClosed = false
+            win.collectionBehavior = [.transient]
+            win.isExcludedFromWindowsMenu = true
             win.center()
             win.contentView = NSHostingView(rootView: SettingsView(state: self))
             // Reopen the notch panel when Settings closes, if it was open.
@@ -939,7 +1021,8 @@ final class AppState: ObservableObject {
                 self.expand(takeKeyboard: true)
             }
             settingsWindow = win
-            applyScreenShareProtection()
+            applyWindowDiscretion(to: win)
+            applyScreenShareProtection(to: win)
         }
         // The panel sits at .statusBar level, above the settings window, so
         // collapse it while Settings is up and restore it on close.

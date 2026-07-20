@@ -2274,6 +2274,15 @@ struct SettingsView: View {
             }
             .toggleStyle(.switch)
 
+            Toggle(isOn: $state.coreGraphicsHardeningEnabled) {
+                VStack(alignment: .leading, spacing: 1) {
+                    Text("Aggressive CG hardening").font(.system(size: 12.5))
+                    Text("Use private SkyLight APIs to hide windows from capture")
+                        .font(.system(size: 10.5)).foregroundStyle(.secondary)
+                }
+            }
+            .toggleStyle(.switch)
+
             Divider()
 
             HStack {

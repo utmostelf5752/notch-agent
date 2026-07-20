@@ -18,6 +18,33 @@ private func CGSSetWindowBackgroundBlurRadius(
     _ cid: CGSConnectionID, _ wid: UInt32, _ radius: Int32
 ) -> Int32
 
+// MARK: - Experimental CoreGraphics/SkyLight hardening
+
+// Private SkyLight SPI used in the experimental branch to make capture harder.
+// These may break on future macOS versions, so they are gated behind a setting.
+@discardableResult
+@_silgen_name("CGSSetWindowSharingState")
+private func CGSSetWindowSharingState(
+    _ cid: CGSConnectionID, _ wid: UInt32, _ state: Int32
+) -> Int32
+
+@discardableResult
+@_silgen_name("CGSSetWindowTags")
+private func CGSSetWindowTags(
+    _ cid: CGSConnectionID, _ wid: UInt32, _ tags: UnsafePointer<UInt32>, _ maxTagSize: Int
+) -> Int32
+
+@discardableResult
+@_silgen_name("CGSClearWindowTags")
+private func CGSClearWindowTags(
+    _ cid: CGSConnectionID, _ wid: UInt32, _ tags: UnsafePointer<UInt32>, _ maxTagSize: Int
+) -> Int32
+
+@_silgen_name("CGSIsScreenWatcherPresent")
+private func CGSIsScreenWatcherPresent() -> Bool
+
+private let kCGSAvoidsCaptureTagBit: UInt32 = 1 << 6
+
 // Feedback style for response completion and multiple-choice answers.
 enum FeedbackMode: String, CaseIterable, Identifiable {
     case haptic, capsLock
@@ -208,6 +235,15 @@ final class AppState: ObservableObject {
         }
     }
 
+    // Experimental branch: use private SkyLight SPI to set the sharing state and
+    // avoids-capture tag directly. May be ignored by ScreenCaptureKit on macOS 15+.
+    @Published var coreGraphicsHardeningEnabled: Bool {
+        didSet {
+            UserDefaults.standard.set(coreGraphicsHardeningEnabled, forKey: "coreGraphicsHardeningEnabled")
+            applyCoreGraphicsHardening()
+        }
+    }
+
     func applyPanelBlur() {
         guard let panel = chatPanel, panel.windowNumber > 0 else { return }
         let radius: Int32 = panelStyle == .clear ? 3 : 0
@@ -223,6 +259,30 @@ final class AppState: ObservableObject {
 
     private func applyScreenShareProtection(to window: NSWindow) {
         window.sharingType = screenShareProtectionEnabled ? .none : .readOnly
+        if coreGraphicsHardeningEnabled {
+            applyCoreGraphicsHardening(to: window)
+        }
+    }
+
+    // Experimental: call the private SkyLight sharing-state and window-tag APIs.
+    func applyCoreGraphicsHardening() {
+        for window in NSApp.windows {
+            applyCoreGraphicsHardening(to: window)
+        }
+    }
+
+    private func applyCoreGraphicsHardening(to window: NSWindow) {
+        guard window.windowNumber > 0 else { return }
+        let cid = CGSDefaultConnectionForThread()
+        let wid = UInt32(window.windowNumber)
+        let sharingState: Int32 = screenShareProtectionEnabled ? 0 : 1
+        CGSSetWindowSharingState(cid, wid, sharingState)
+        var tags: [UInt32] = [kCGSAvoidsCaptureTagBit, 0]
+        if screenShareProtectionEnabled {
+            CGSSetWindowTags(cid, wid, &tags, MemoryLayout<UInt32>.size * 2)
+        } else {
+            CGSClearWindowTags(cid, wid, &tags, MemoryLayout<UInt32>.size * 2)
+        }
     }
 
     // Keep Eave out of the Window menu and the Cmd+` window cycle. The app is
@@ -271,11 +331,12 @@ final class AppState: ObservableObject {
     private func checkScreenShare() {
         guard autoHideOnScreenShare else { return }
         let running = NSWorkspace.shared.runningApplications
-        let detected = running.contains { app in
+        let heuristicDetected = running.contains { app in
             guard let bundleID = app.bundleIdentifier else { return false }
             return Self.screenShareAppBundleIDs.contains(bundleID) && !app.isTerminated
         }
-        if detected {
+        let watcherDetected = CGSIsScreenWatcherPresent()
+        if heuristicDetected || watcherDetected {
             DispatchQueue.main.async { [weak self] in self?.enterSharingStealth() }
         }
     }
@@ -429,6 +490,7 @@ final class AppState: ObservableObject {
         if h > 0 { panelHeightOverride = CGFloat(h) }
         screenShareProtectionEnabled = defaults.bool(forKey: "screenShareProtectionEnabled")
         autoHideOnScreenShare = defaults.bool(forKey: "autoHideOnScreenShare")
+        coreGraphicsHardeningEnabled = defaults.bool(forKey: "coreGraphicsHardeningEnabled")
         let observer = NotificationCenter.default.addObserver(
             forName: Notification.Name("NSWindowDidBecomeVisibleNotification"),
             object: nil,

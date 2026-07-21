@@ -15,7 +15,7 @@ final class CodexAppServer {
         case itemCompleted(JSON)                 // the "item" payload
         case approvalRequest(kind: ApprovalKind, payload: JSON, respond: (String) -> Void)
         case turnStarted(String)                 // turn id
-        case turnCompleted(failureMessage: String?)
+        case turnCompleted(turnID: String?, failureMessage: String?)
         case serverError(String)
     }
 
@@ -222,7 +222,7 @@ final class CodexAppServer {
         case "turn/completed":
             let turn = params["turn"] as? JSON
             let failure = (turn?["error"] as? JSON)?["message"] as? String
-            onEvent?(.turnCompleted(failureMessage: failure))
+            onEvent?(.turnCompleted(turnID: turn?["id"] as? String, failureMessage: failure))
         case "error":
             if let message = (params["error"] as? JSON)?["message"] as? String {
                 onEvent?(.serverError(message))

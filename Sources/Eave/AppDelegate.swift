@@ -83,6 +83,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     //   send:<text>                       send a message
     //   msgs                              write transcript to /tmp/eave-msgs.txt
     //   dump                              write ChatGPT web view state to /tmp/eave-dom.txt
+    //   newchat                           archive current chat and start fresh
+    //   chats                             write history list to /tmp/eave-chats.txt
+    //   restore:<index>                   reopen a past chat from the history list
+    //   cfg                               write current provider settings to /tmp/eave-settings.txt
+    //   model:<id|default>                set the current provider's model
     // With no command file, USR2 just logs geometry.
     private var signalSources: [DispatchSourceSignal] = []
     private func installSignalTriggers() {
@@ -124,6 +129,34 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 try? out.write(toFile: "/tmp/eave-msgs.txt", atomically: true, encoding: .utf8)
             } else if cmd == "dump" {
                 ChatGPTWeb.shared.dumpState(to: "/tmp/eave-dom.txt")
+            } else if cmd == "newchat" {
+                session.reset()
+            } else if cmd == "cfg" {
+                let p = session.provider
+                let out = """
+                provider=\(p.rawValue)
+                model=\(session.modelChoice[p] ?? "-")
+                mode=\(session.modeChoice[p] ?? "-")
+                effort=\(session.effortChoice[p] ?? "-")
+                fast=\(session.fastModeChoice[p].map(String.init) ?? "-")
+                cwd=\(session.workingDirectory.path)
+                """
+                try? out.write(toFile: "/tmp/eave-settings.txt", atomically: true, encoding: .utf8)
+            } else if cmd == "chats" {
+                let out = session.pastChats.enumerated().map { idx, chat in
+                    "\(idx): [\(chat.provider.rawValue)] \(chat.title)"
+                        + " claude=\(chat.claudeSessionID ?? "-")"
+                        + " codex=\(chat.codexThreadID ?? "-")"
+                        + " chatgpt=\(chat.chatgptThreadID ?? "-")"
+                        + " cursor=\(chat.cursorSessionID ?? "-")"
+                        + " cwd=\(chat.workingDirectory ?? "-")"
+                }.joined(separator: "\n")
+                try? out.write(toFile: "/tmp/eave-chats.txt", atomically: true, encoding: .utf8)
+            } else if cmd.hasPrefix("restore:"),
+                      let idx = Int(cmd.dropFirst(8)),
+                      session.pastChats.indices.contains(idx) {
+                AppState.shared.expand(takeKeyboard: false)
+                session.restore(session.pastChats[idx])
             } else if cmd == "screenshot:full" {
                 ScreenshotCapture.capture(.fullScreen)
             } else if cmd == "screenshot:window" {
@@ -142,6 +175,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 windowFrame=\(NSStringFromRect(s.chatPanel?.frame ?? .zero))
                 """
                 try? out.write(toFile: "/tmp/eave-geom.txt", atomically: true, encoding: .utf8)
+            } else if cmd.hasPrefix("model:") {
+                let value = String(cmd.dropFirst(6))
+                if value == "default" {
+                    session.modelChoice.removeValue(forKey: session.provider)
+                } else {
+                    session.modelChoice[session.provider] = value
+                }
             } else if cmd.hasPrefix("mode:") {
                 let value = String(cmd.dropFirst(5))
                 if value == "default" {

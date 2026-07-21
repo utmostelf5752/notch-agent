@@ -230,13 +230,24 @@ struct ChatMessage: Identifiable, Equatable, Codable {
     // Optional keeps decoding compatible with chats saved before attachments
     // were persisted as clickable paths.
     var attachmentPaths: [String]?
+    // Full tool invocation (name plus raw arguments) behind a one-line step
+    // row, shown when the step is clicked. Optional for the same decoding
+    // reason as attachmentPaths.
+    var detail: String?
 
-    init(role: Role, text: String, icon: String? = nil, attachments: [URL] = []) {
+    init(
+        role: Role,
+        text: String,
+        icon: String? = nil,
+        attachments: [URL] = [],
+        detail: String? = nil
+    ) {
         self.id = UUID()
         self.role = role
         self.text = text
         self.icon = icon
         self.attachmentPaths = attachments.isEmpty ? nil : attachments.map(\.path)
+        self.detail = detail
     }
 
     var attachmentURLs: [URL] {
@@ -282,7 +293,27 @@ struct ChatArchive: Identifiable, Codable {
     let codexThreadID: String?
     let chatgptThreadID: String?
     let cursorSessionID: String?
+    // The folder the chat ran in. Claude stores sessions per project
+    // directory, so resuming from any other cwd cannot find the session;
+    // Codex and Cursor resume but with the wrong file context. Optional so
+    // archives written before this field decode. (nil on those.)
+    var workingDirectory: String?
+    // The provider settings the chat ran with, applied back on restore. The
+    // whole struct is optional so pre-existing archives decode; nil means
+    // "unknown, leave the current settings alone", while a present struct
+    // with a nil field means "the chat used the provider default".
+    var settings: ChatSettings?
     let date: Date
+}
+
+// Snapshot of the per-provider choices in effect for a chat's provider.
+// Fields are nil when the corresponding choice was the provider default
+// (missing key in the session dictionaries).
+struct ChatSettings: Codable, Equatable {
+    var model: String?
+    var mode: String?
+    var effort: String?
+    var fastMode: Bool?
 }
 
 
@@ -816,6 +847,10 @@ final class AgentSession: ObservableObject {
     // reopened chat listed (and in place) in history; archiving updates that
     // entry instead of inserting a duplicate.
     private var currentArchiveID: UUID?
+    // Settings the current conversation last ran with (set on send, carried
+    // over on restore). Archived instead of the live picker values so that
+    // changing the picker without sending never rewrites a chat's history.
+    private var lastRunSettings: ChatSettings?
 
     private static let chatsURL = AppPaths.supportDirectory.appendingPathComponent("chats.json")
 
@@ -1036,10 +1071,22 @@ final class AgentSession: ObservableObject {
     // A question answer waiting for the asking turn to exit; see
     // deliverCursorFollowUp.
     private var pendingCursorFollowUp: String?
+    // Tools the user chose "always" for, reset each Cursor turn.
+    private var cursorSessionApprovals: Set<String> = []
     private var process: Process?
+    // Bumped whenever the transcript is replaced (reset/restore). Output from
+    // a process killed by that replacement can still be in flight on the main
+    // queue; events carrying an older epoch must not touch the new transcript.
+    private var transcriptEpoch = 0
+    // Set when cancel() terminates a CLI process so its nonzero exit status
+    // isn't reported as a provider failure.
+    private var expectingProcessExit = false
     private var claudeStdin: FileHandle?
     private let codexServer = CodexAppServer()
     private var codexActiveTurnID: String?
+    // Turns the user stopped. Their turn/completed notifications arrive later
+    // and must not tear down whatever turn is running by then.
+    private var codexInterruptedTurnIDs: Set<String> = []
     private lazy var claudePath: String? = Self.findExecutable("claude")
     private lazy var codexPath: String? = Self.findExecutable("codex")
     private lazy var cursorPath: String? = Self.findExecutable("agent")
@@ -1071,6 +1118,16 @@ final class AgentSession: ObservableObject {
         if echo {
             messages.append(ChatMessage(role: .user, text: text, attachments: files))
         }
+
+        // Snapshot now, not at archive time: the archive must record what the
+        // conversation actually ran with, and the picker can change between
+        // the last turn and archiving (or the chat may just be viewed).
+        lastRunSettings = ChatSettings(
+            model: modelChoice[provider],
+            mode: modeChoice[provider],
+            effort: effortChoice[provider],
+            fastMode: fastModeChoice[provider]
+        )
 
         // A reopened chat sits in place in history until actually continued;
         // the first new message bumps it to the top.
@@ -1176,6 +1233,8 @@ final class AgentSession: ObservableObject {
         p.standardOutput = out
         p.standardError = err
 
+        expectingProcessExit = false
+        let epoch = transcriptEpoch
         var buffer = Data()
         out.fileHandleForReading.readabilityHandler = { [weak self] handle in
             let data = handle.availableData
@@ -1187,7 +1246,10 @@ final class AgentSession: ObservableObject {
                 guard !line.isEmpty,
                       let obj = try? JSONSerialization.jsonObject(with: line) as? [String: Any]
                 else { continue }
-                DispatchQueue.main.async { self?.handleClaudeEvent(obj) }
+                DispatchQueue.main.async {
+                    guard let self, self.transcriptEpoch == epoch else { return }
+                    self.handleClaudeEvent(obj)
+                }
             }
         }
 
@@ -1212,7 +1274,9 @@ final class AgentSession: ObservableObject {
                 self.claudeStdin = nil
                 self.pendingPermission = nil
                 self.pendingQuestion = nil
-                if proc.terminationStatus != 0 {
+                let cancelled = self.expectingProcessExit
+                self.expectingProcessExit = false
+                if proc.terminationStatus != 0, !cancelled, self.transcriptEpoch == epoch {
                     let msg = String(data: errData, encoding: .utf8)?
                         .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
                     self.presentProviderFailure(msg.isEmpty
@@ -1316,7 +1380,11 @@ final class AgentSession: ObservableObject {
                 return
             }
         }
-        codexServer.onEvent = { [weak self] event in self?.handleCodexServerEvent(event) }
+        let epoch = transcriptEpoch
+        codexServer.onEvent = { [weak self] event in
+            guard let self, self.transcriptEpoch == epoch else { return }
+            self.handleCodexServerEvent(event)
+        }
 
         let mode = Self.codexModeConfig(modeChoice[.codex])
         var threadParams: [String: Any] = [
@@ -1541,7 +1609,14 @@ final class AgentSession: ObservableObject {
         case "force-nosandbox":
             args += ["--force", "--sandbox", "disabled"]
         default:
-            break // propose-only: no --force
+            // Propose Only. Headless Cursor cannot ask us for permission, so
+            // without the hook gate installed it rejects every call that needs
+            // one. With the gate, --force hands the decision to our prompt
+            // instead of to the CLI's non-existent one.
+            if CursorApprovals.isInstalled {
+                args.append("--force")
+                beginCursorApprovals()
+            }
         }
         args.append(text)
 
@@ -1556,6 +1631,8 @@ final class AgentSession: ObservableObject {
         p.standardOutput = out
         p.standardError = err
 
+        expectingProcessExit = false
+        let epoch = transcriptEpoch
         var buffer = Data()
         out.fileHandleForReading.readabilityHandler = { [weak self] handle in
             let data = handle.availableData
@@ -1567,7 +1644,10 @@ final class AgentSession: ObservableObject {
                 guard !line.isEmpty,
                       let obj = try? JSONSerialization.jsonObject(with: line) as? [String: Any]
                 else { continue }
-                DispatchQueue.main.async { self?.handleCursorEvent(obj) }
+                DispatchQueue.main.async {
+                    guard let self, self.transcriptEpoch == epoch else { return }
+                    self.handleCursorEvent(obj)
+                }
             }
         }
 
@@ -1586,7 +1666,10 @@ final class AgentSession: ObservableObject {
                 guard let self else { return }
                 self.isRunning = false
                 self.process = nil
-                if proc.terminationStatus != 0 {
+                CursorApprovals.endSession()
+                let cancelled = self.expectingProcessExit
+                self.expectingProcessExit = false
+                if proc.terminationStatus != 0, !cancelled, self.transcriptEpoch == epoch {
                     let msg = String(data: errData, encoding: .utf8)?
                         .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
                     self.presentProviderFailure(msg.isEmpty
@@ -1650,7 +1733,11 @@ final class AgentSession: ObservableObject {
             // line under it is noise.
             if toolCall["askQuestionToolCall"] != nil { return }
             let display = Self.cursorToolDisplay(toolCall)
-            appendTool(display.text, icon: display.icon)
+            appendTool(
+                display.text,
+                icon: display.icon,
+                detail: Self.toolDetail(name: display.text, arguments: toolCall)
+            )
         case "result":
             if let id = event["session_id"] as? String { cursorSessionID = id }
             if event["is_error"] as? Bool == true,
@@ -1788,7 +1875,11 @@ final class AgentSession: ObservableObject {
             handleCodexItem(item)
         case .turnStarted(let turnID):
             codexActiveTurnID = turnID
-        case .turnCompleted(let failureMessage):
+        case .turnCompleted(let turnID, let failureMessage):
+            // A stopped turn's completion can land after the next turn has
+            // started; it must not tear down the newer turn's state.
+            if let turnID, codexInterruptedTurnIDs.remove(turnID) != nil { return }
+            if let turnID, let active = codexActiveTurnID, turnID != active { return }
             isRunning = false
             codexActiveTurnID = nil
             pendingPermission = nil
@@ -1801,6 +1892,7 @@ final class AgentSession: ObservableObject {
     }
 
     private func handleCodexItem(_ item: [String: Any]) {
+        let detail = { (name: String) in Self.toolDetail(name: name, arguments: item) }
         switch item["type"] as? String {
         case "agentMessage":
             if let t = item["text"] as? String,
@@ -1809,26 +1901,65 @@ final class AgentSession: ObservableObject {
             }
         case "commandExecution":
             let cmd = item["command"] as? String ?? "a command"
-            appendTool("Running \(String(cmd.prefix(60)))", icon: "terminal")
+            appendTool("Running \(String(cmd.prefix(60)))", icon: "terminal", detail: detail("Shell"))
         case "fileChange":
             let paths = ((item["changes"] as? [[String: Any]]) ?? [])
                 .compactMap { $0["path"] as? String }
                 .map { ($0 as NSString).lastPathComponent }
                 .joined(separator: ", ")
-            appendTool("Editing \(paths.isEmpty ? "files" : paths)", icon: "pencil")
+            appendTool("Editing \(paths.isEmpty ? "files" : paths)", icon: "pencil", detail: detail("Edit"))
         case "webSearch":
-            appendTool("Searching \(String((item["query"] as? String ?? "the web").prefix(50)))", icon: "globe")
+            appendTool(
+                "Searching \(String((item["query"] as? String ?? "the web").prefix(50)))",
+                icon: "globe",
+                detail: detail("WebSearch")
+            )
         case "mcpToolCall":
             let tool = item["tool"] as? String ?? "a tool"
             let lower = tool.lowercased()
             if lower.contains("screenshot") || lower.contains("image")
                 || lower.contains("computer") || lower.contains("zoom") {
-                appendTool("Reading screenshot", icon: "camera.viewfinder")
+                appendTool("Reading screenshot", icon: "camera.viewfinder", detail: detail(tool))
             } else {
-                appendTool("Using \(tool)", icon: "wrench.fill")
+                appendTool("Using \(tool)", icon: "wrench.fill", detail: detail(tool))
             }
         default:
             break // userMessage echo, reasoning, plan, todoList
+        }
+    }
+
+    // Cursor approvals arrive from the hook script, not from the CLI stream,
+    // so they are wired up per turn and torn down when the process exits.
+    private func beginCursorApprovals() {
+        cursorSessionApprovals.removeAll()
+        CursorApprovals.beginSession { [weak self] request in
+            DispatchQueue.main.async { self?.presentCursorApproval(request) }
+        }
+    }
+
+    private func presentCursorApproval(_ request: CursorApprovals.Request) {
+        if cursorSessionApprovals.contains(request.toolName) {
+            CursorApprovals.respond(request.id, allow: true)
+            return
+        }
+        // One prompt at a time: the hook blocks the CLI, so a second request
+        // cannot arrive until this one is answered.
+        pendingPermission = PermissionRequest(
+            title: "Cursor wants to run \(request.toolName)",
+            detail: request.detailText,
+            canAlways: true
+        ) { [weak self] decision in
+            switch decision {
+            case .allow:
+                CursorApprovals.respond(request.id, allow: true)
+            case .always:
+                self?.cursorSessionApprovals.insert(request.toolName)
+                CursorApprovals.respond(request.id, allow: true)
+            case .deny:
+                CursorApprovals.respond(
+                    request.id, allow: false, message: "The user declined this call."
+                )
+            }
         }
     }
 
@@ -1894,11 +2025,14 @@ final class AgentSession: ObservableObject {
         pendingCursorFollowUp = nil
         switch provider {
         case .claude, .cursor:
+            if process != nil { expectingProcessExit = true }
             process?.terminate()
         case .codex:
             if let codexThreadID, let codexActiveTurnID {
+                codexInterruptedTurnIDs.insert(codexActiveTurnID)
                 codexServer.interruptTurn(threadID: codexThreadID, turnID: codexActiveTurnID)
             }
+            codexActiveTurnID = nil
             isRunning = false
         case .chatgpt:
             ChatGPTWeb.shared.cancel()
@@ -1909,7 +2043,9 @@ final class AgentSession: ObservableObject {
     func reset() {
         cancel()
         archiveCurrentIfNeeded()
+        transcriptEpoch += 1
         currentArchiveID = nil
+        lastRunSettings = nil
         messages.removeAll()
         attachments.removeAll()
         usageLimit = nil
@@ -1922,6 +2058,7 @@ final class AgentSession: ObservableObject {
     func restore(_ chat: ChatArchive) {
         cancel()
         archiveCurrentIfNeeded()
+        transcriptEpoch += 1
         currentArchiveID = chat.id
         messages = chat.messages
         provider = chat.provider
@@ -1930,6 +2067,32 @@ final class AgentSession: ObservableObject {
         codexThreadID = chat.codexThreadID
         chatgptThreadID = chat.chatgptThreadID
         cursorSessionID = chat.cursorSessionID
+        lastRunSettings = chat.settings
+        if let settings = chat.settings {
+            // Restore only the chat's own provider slot; the other providers'
+            // choices are unrelated to this chat.
+            apply(settings.model, into: &modelChoice)
+            apply(settings.mode, into: &modeChoice)
+            apply(settings.effort, into: &effortChoice)
+            apply(settings.fastMode, into: &fastModeChoice)
+        }
+        if let path = chat.workingDirectory {
+            var isDirectory: ObjCBool = false
+            if FileManager.default.fileExists(atPath: path, isDirectory: &isDirectory),
+               isDirectory.boolValue {
+                workingDirectory = URL(fileURLWithPath: path, isDirectory: true)
+            }
+        }
+    }
+
+    // nil = the archived chat used the provider default, so clear the key
+    // (missing key means "no flag" throughout these dictionaries).
+    private func apply<V>(_ value: V?, into choice: inout [AgentProvider: V]) {
+        if let value {
+            choice[provider] = value
+        } else {
+            choice.removeValue(forKey: provider)
+        }
     }
 
     func deleteChat(_ id: UUID) {
@@ -1951,13 +2114,16 @@ final class AgentSession: ObservableObject {
             codexThreadID: codexThreadID,
             chatgptThreadID: chatgptThreadID,
             cursorSessionID: cursorSessionID,
+            workingDirectory: workingDirectory.path,
+            settings: lastRunSettings,
             date: Date()
         )
         if let idx = pastChats.firstIndex(where: { $0.id == archive.id }) {
             // The reopened chat is already listed: refresh it in place rather
             // than reinsert, so merely viewing it doesn't reshuffle history.
             // (send() already bumped it to the top if it was continued.)
-            if pastChats[idx].messages == archive.messages { return }
+            if pastChats[idx].messages == archive.messages,
+               pastChats[idx].settings == archive.settings { return }
             pastChats[idx] = archive
         } else {
             pastChats.insert(archive, at: 0)
@@ -2044,8 +2210,13 @@ final class AgentSession: ObservableObject {
             }
             for block in content where block["type"] as? String == "tool_use" {
                 let name = block["name"] as? String ?? "tool"
-                let display = Self.claudeToolDisplay(name: name, input: block["input"] as? [String: Any])
-                appendTool(display.text, icon: display.icon)
+                let input = block["input"] as? [String: Any]
+                let display = Self.claudeToolDisplay(name: name, input: input)
+                appendTool(
+                    display.text,
+                    icon: display.icon,
+                    detail: Self.toolDetail(name: name, arguments: input)
+                )
             }
         case "control_request":
             guard let requestID = event["request_id"] as? String,
@@ -2224,8 +2395,32 @@ final class AgentSession: ObservableObject {
         }
     }
 
-    private func appendTool(_ text: String, icon: String = "wrench.fill") {
-        messages.append(ChatMessage(role: .tool, text: text, icon: icon))
+    private func appendTool(_ text: String, icon: String = "wrench.fill", detail: String? = nil) {
+        messages.append(ChatMessage(role: .tool, text: text, icon: icon, detail: detail))
+    }
+
+    // The exact call behind a step row: readable header plus the raw
+    // arguments, so "Running whoami" can be opened to show the real command.
+    static func toolDetail(name: String, arguments: Any?) -> String {
+        var out = name
+        if let command = (arguments as? [String: Any])?["command"] {
+            let text = (command as? String) ?? String(describing: command)
+            out += "\n\n$ \(text)"
+        }
+        if let arguments, let json = prettyJSON(arguments) {
+            out += "\n\n\(json)"
+        }
+        return out
+    }
+
+    private static func prettyJSON(_ object: Any) -> String? {
+        guard JSONSerialization.isValidJSONObject(object),
+              let data = try? JSONSerialization.data(
+                withJSONObject: object,
+                options: [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
+              )
+        else { return nil }
+        return String(data: data, encoding: .utf8)
     }
 
     // Browser phases are one live activity row, not a separate step for each

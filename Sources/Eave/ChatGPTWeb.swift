@@ -523,7 +523,7 @@ final class ChatGPTWeb: NSObject, ObservableObject, WKUIDelegate, WKNavigationDe
             : (hasScreenshot ? "Reading screenshot" : "Reading attachment")
         onEvent(.status(initialStatus))
 
-        waitForComposer(gen: gen, deadline: Date().addingTimeInterval(300), loginShown: false, onEvent: onEvent) { [weak self] in
+        waitForComposer(gen: gen, thread: thread, deadline: Date().addingTimeInterval(300), loginShown: false, onEvent: onEvent) { [weak self] in
             guard let self, !self.cancelled, gen == self.generation else { return }
             let uploadAndSend = {
                 self.hideLoginWindow()
@@ -824,7 +824,14 @@ final class ChatGPTWeb: NSObject, ObservableObject, WKUIDelegate, WKNavigationDe
 
     // MARK: - Steps
 
-    private func waitForComposer(gen: Int, deadline: Date, loginShown: Bool, onEvent: @escaping (Event) -> Void, then: @escaping () -> Void) {
+    // Readiness requires BOTH a composer and being on the target document:
+    // the thread's /c/ URL when continuing a chat, a non-conversation URL for
+    // a new chat. send() may have just kicked off a navigation, and until it
+    // commits, scripts run against the OLD page — its composer must not
+    // satisfy this wait, or the prompt gets inserted into a document that is
+    // about to be torn down (and the send then submits whatever draft the new
+    // page restores, e.g. text left behind by an earlier failed send).
+    private func waitForComposer(gen: Int, thread: String?, deadline: Date, loginShown: Bool, offTargetPolls: Int = 0, onEvent: @escaping (Event) -> Void, then: @escaping () -> Void) {
         guard !cancelled, gen == generation else { return }
         guard Date() < deadline else {
             // Final probe so timeouts distinguish sign-in stalls from DOM drift.
@@ -843,11 +850,19 @@ final class ChatGPTWeb: NSObject, ObservableObject, WKUIDelegate, WKNavigationDe
             }
             return
         }
+        let threadJSON = thread.flatMap(Self.jsonString) ?? "null"
         run("""
         (() => {
           \(Self.domHelpersJS)
-          const ready = !!__composer();
-          return JSON.stringify({ ready, probe: __probeUI() });
+          const thread = \(threadJSON);
+          const onTarget = thread
+            ? location.pathname.indexOf(thread) !== -1
+            : location.pathname.indexOf("/c/") !== 0;
+          const hasComposer = !!__composer();
+          // A continued thread has history by definition; requiring it keeps
+          // the reply baselines from being recorded before hydration.
+          const historyReady = !thread || __userQuery().nodes.length > 0;
+          return JSON.stringify({ ready: onTarget && hasComposer && historyReady, hasComposer, probe: __probeUI() });
         })()
         """) { [weak self] result in
             guard let self, !self.cancelled, gen == self.generation else { return }
@@ -856,25 +871,41 @@ final class ChatGPTWeb: NSObject, ObservableObject, WKUIDelegate, WKNavigationDe
                 then()
                 return
             }
+            let hasComposer = (obj["hasComposer"] as? Bool) == true
+            let settled = self.webView.estimatedProgress > 0.9
+            // A composer on a settled page that still isn't ready means
+            // chatgpt.com redirected away from the requested thread (deleted
+            // thread, different account) or never rendered it. Give it ~15s,
+            // then fail instead of silently sending into the wrong chat.
+            var offTarget = offTargetPolls
+            if hasComposer, settled {
+                offTarget += 1
+                if offTarget >= 25 {
+                    onEvent(.error("Couldn't open the saved conversation on chatgpt.com."))
+                    onEvent(.done)
+                    return
+                }
+            }
             // Do not fail-fast on probe.likelyChanged here — the shell can
             // mount <main> before the composer hydrates. Probe is decisive
             // only on timeout / post-action failures.
             var shown = loginShown
             // Page loaded but no composer: assume sign-in (or interstitial)
             // is needed and show the window so the user can deal with it.
-            if !shown, self.webView.estimatedProgress > 0.9 {
+            if !shown, settled, !hasComposer {
                 self.presentLoginWindow()
                 onEvent(.status("Waiting for sign-in — check the ChatGPT window"))
                 shown = true
             }
             let shownFinal = shown
+            let offTargetFinal = offTarget
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
-                self.waitForComposer(gen: gen, deadline: deadline, loginShown: shownFinal, onEvent: onEvent, then: then)
+                self.waitForComposer(gen: gen, thread: thread, deadline: deadline, loginShown: shownFinal, offTargetPolls: offTargetFinal, onEvent: onEvent, then: then)
             }
         }
     }
 
-    private func baselineAndSend(prompt: String, gen: Int, onEvent: @escaping (Event) -> Void) {
+    private func baselineAndSend(prompt: String, gen: Int, insertAttempt: Int = 0, onEvent: @escaping (Event) -> Void) {
         guard let promptJSON = Self.jsonString(prompt) else {
             onEvent(.error("Could not encode prompt."))
             onEvent(.done)
@@ -974,7 +1005,7 @@ final class ChatGPTWeb: NSObject, ObservableObject, WKUIDelegate, WKNavigationDe
             let uBase = obj["uBase"] as? Int ?? 0
             // Give the composer a beat to enable its send button.
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.45) {
-                self.submit(prompt: prompt, gen: gen, aBase: aBase, aLast: aLast, uBase: uBase, onEvent: onEvent)
+                self.submit(prompt: prompt, gen: gen, aBase: aBase, aLast: aLast, uBase: uBase, insertAttempt: insertAttempt, onEvent: onEvent)
             }
         }
     }
@@ -983,15 +1014,27 @@ final class ChatGPTWeb: NSObject, ObservableObject, WKUIDelegate, WKNavigationDe
     // A disabled button usually means an attachment is still uploading —
     // the composer preview appears before the server upload finishes, so
     // keep retrying for up to ~30s before falling back.
-    private func submit(prompt: String, gen: Int, aBase: Int, aLast: String, uBase: Int, attempt: Int = 0, onEvent: @escaping (Event) -> Void) {
+    // Never submit blind: the composer must contain the prompt we inserted.
+    // A navigation that landed between insert and submit replaces the
+    // document, and the fresh page can restore an unrelated saved draft —
+    // clicking send then posts that draft as the user's message. On mismatch,
+    // re-insert into the current document instead.
+    private func submit(prompt: String, gen: Int, aBase: Int, aLast: String, uBase: Int, attempt: Int = 0, insertAttempt: Int = 0, onEvent: @escaping (Event) -> Void) {
+        let promptJSON = Self.jsonString(prompt) ?? "\"\""
         let js = """
         (() => {
           \(Self.domHelpersJS)
+          const el = __composer();
+          if (!el) return "no-composer";
+          const collapse = value => String(value || "")
+            .split(String.fromCharCode(160)).join(" ")
+            .replace(/\\s+/g, " ").trim();
+          const want = collapse(\(promptJSON));
+          const have = collapse("value" in el ? el.value : (el.innerText || el.textContent));
+          if (want && !have.includes(want)) return "stale-composer";
           const btn = __sendButton();
           if (btn && !btn.disabled) { btn.click(); return "clicked"; }
           if (btn && btn.disabled) return "disabled";
-          const el = __composer();
-          if (!el) return "no-composer";
           for (const type of ["keydown", "keypress", "keyup"]) {
             el.dispatchEvent(new KeyboardEvent(type, { key: "Enter", code: "Enter", keyCode: 13, which: 13, bubbles: true, cancelable: true }));
           }
@@ -1000,9 +1043,21 @@ final class ChatGPTWeb: NSObject, ObservableObject, WKUIDelegate, WKNavigationDe
         """
         run(js) { [weak self] result in
             guard let self, !self.cancelled, gen == self.generation else { return }
-            if (result as? String) == "disabled" && attempt < 40 {
+            let status = result as? String
+            if status == "stale-composer" || status == "no-composer" {
+                if insertAttempt < 2 {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.75) {
+                        self.baselineAndSend(prompt: prompt, gen: gen, insertAttempt: insertAttempt + 1, onEvent: onEvent)
+                    }
+                } else {
+                    onEvent(.error("The message box kept losing the typed text."))
+                    onEvent(.done)
+                }
+                return
+            }
+            if status == "disabled" && attempt < 40 {
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.75) {
-                    self.submit(prompt: prompt, gen: gen, aBase: aBase, aLast: aLast, uBase: uBase, attempt: attempt + 1, onEvent: onEvent)
+                    self.submit(prompt: prompt, gen: gen, aBase: aBase, aLast: aLast, uBase: uBase, attempt: attempt + 1, insertAttempt: insertAttempt, onEvent: onEvent)
                 }
                 return
             }

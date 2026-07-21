@@ -249,6 +249,29 @@ final class AppState: ObservableObject {
         }
     }
 
+    // Registers a hook in ~/.cursor/hooks.json so Cursor's Propose Only mode
+    // can ask before running anything. Reflects the file, not a preference:
+    // the install is what makes it work, so the file is the source of truth.
+    @Published var cursorApprovalsEnabled: Bool = CursorApprovals.isInstalled {
+        didSet {
+            guard oldValue != cursorApprovalsEnabled else { return }
+            do {
+                if cursorApprovalsEnabled {
+                    try CursorApprovals.install()
+                } else {
+                    try CursorApprovals.uninstall()
+                }
+            } catch {
+                cursorApprovalsFailure = error.localizedDescription
+                cursorApprovalsEnabled = CursorApprovals.isInstalled
+                return
+            }
+            cursorApprovalsFailure = nil
+        }
+    }
+
+    @Published var cursorApprovalsFailure: String?
+
     func applyPanelBlur() {
         guard let panel = chatPanel, panel.windowNumber > 0 else { return }
         let radius: Int32 = panelStyle == .clear ? 3 : 0
@@ -457,6 +480,10 @@ final class AppState: ObservableObject {
 
     private init() {
         let defaults = UserDefaults.standard
+        // A crash leaves the approval marker behind, which would make the hook
+        // block every Cursor call until it times out. Nothing is in flight at
+        // launch, so clear it.
+        CursorApprovals.endSession()
         toggleShortcut = GlobalShortcut(defaults: defaults)
         // The original default was Cmd+Option+Space, which conflicts with
         // Finder's "Search with Spotlight" window. Move any saved copy of that
@@ -1083,11 +1110,16 @@ final class AppState: ObservableObject {
     // Opens (or focuses) the Settings window. Lazily built and reused. The app
     // is an accessory, so activate it too or the window opens unfocused behind
     // whatever the user was in.
-    func openSettings() {
+    enum SettingsTab: Hashable { case general, appearance, privacy, agents }
+
+    @Published var settingsTab: SettingsTab = .general
+
+    func openSettings(tab: SettingsTab? = nil) {
+        if let tab { settingsTab = tab }
         if settingsWindow == nil {
             let win = NSWindow(
                 contentRect: NSRect(x: 0, y: 0, width: 340, height: 260),
-                styleMask: [.titled, .closable],
+                styleMask: [.titled, .closable, .resizable],
                 backing: .buffered,
                 defer: false
             )
@@ -1095,8 +1127,16 @@ final class AppState: ObservableObject {
             win.isReleasedWhenClosed = false
             win.collectionBehavior = [.transient]
             win.isExcludedFromWindowsMenu = true
+            let host = NSHostingView(rootView: SettingsView(state: self))
+            // AppKit does not resize the window to fit SwiftUI content, so a
+            // fixed height silently clipped the lower half of the settings.
+            // Size to what the content wants, capped to the screen.
+            host.layoutSubtreeIfNeeded()
+            let screenHeight = NSScreen.main?.visibleFrame.height ?? 900
+            let height = min(max(host.fittingSize.height, 260), screenHeight - 120)
+            win.setContentSize(NSSize(width: 340, height: height))
+            win.contentView = host
             win.center()
-            win.contentView = NSHostingView(rootView: SettingsView(state: self))
             // Reopen the notch panel when Settings closes, if it was open.
             NotificationCenter.default.addObserver(
                 forName: NSWindow.willCloseNotification, object: win, queue: .main

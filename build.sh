@@ -29,6 +29,7 @@ swiftc -O -o "$APP/Contents/MacOS/Eave" \
     Sources/Eave/AppDelegate.swift \
     Sources/Eave/AppState.swift \
     Sources/Eave/AgentSession.swift \
+    Sources/Eave/CursorApprovals.swift \
     Sources/Eave/CodexAppServer.swift \
     Sources/Eave/ChatGPTWeb.swift \
     Sources/Eave/MarkdownText.swift \

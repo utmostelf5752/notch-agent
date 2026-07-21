@@ -15,7 +15,7 @@
             buildForAnalyzing = "YES">
             <BuildableReference
                BuildableIdentifier = "primary"
-               BlueprintIdentifier = "D546FF4594D8C952ACE40952"
+               BlueprintIdentifier = "7E68A15F6DB1C7F7C94E58E7"
                BuildableName = "Eave.app"
                BlueprintName = "Eave"
                ReferencedContainer = "container:Eave.xcodeproj">
@@ -32,7 +32,7 @@
       <MacroExpansion>
          <BuildableReference
             BuildableIdentifier = "primary"
-            BlueprintIdentifier = "D546FF4594D8C952ACE40952"
+            BlueprintIdentifier = "7E68A15F6DB1C7F7C94E58E7"
             BuildableName = "Eave.app"
             BlueprintName = "Eave"
             ReferencedContainer = "container:Eave.xcodeproj">
@@ -55,7 +55,7 @@
          runnableDebuggingMode = "0">
          <BuildableReference
             BuildableIdentifier = "primary"
-            BlueprintIdentifier = "D546FF4594D8C952ACE40952"
+            BlueprintIdentifier = "7E68A15F6DB1C7F7C94E58E7"
             BuildableName = "Eave.app"
             BlueprintName = "Eave"
             ReferencedContainer = "container:Eave.xcodeproj">
@@ -74,7 +74,7 @@
          runnableDebuggingMode = "0">
          <BuildableReference
             BuildableIdentifier = "primary"
-            BlueprintIdentifier = "D546FF4594D8C952ACE40952"
+            BlueprintIdentifier = "7E68A15F6DB1C7F7C94E58E7"
             BuildableName = "Eave.app"
             BlueprintName = "Eave"
             ReferencedContainer = "container:Eave.xcodeproj">

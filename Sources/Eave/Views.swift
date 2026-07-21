@@ -644,6 +644,7 @@ struct ChatRootView: View {
     @ObservedObject var session: AgentSession
     @ObservedObject private var chatgptWeb = ChatGPTWeb.shared
     @FocusState private var inputFocused: Bool
+    @State private var inspectedStep: ChatMessage?
 
     private let cornerRadius: CGFloat = 24
     private let accent = Color(red: 10/255, green: 132/255, blue: 1)
@@ -1069,7 +1070,7 @@ struct ChatRootView: View {
                     ForEach(displayItems) { item in
                         switch item {
                         case .message(let message):
-                            MessageBubble(message: message, scale: s)
+                            MessageBubble(message: message, scale: s, onInspect: { inspectedStep = $0 })
                                 .id(item.id)
                         case .steps(let run):
                             StepsGroup(
@@ -1082,7 +1083,8 @@ struct ChatRootView: View {
                                     } else {
                                         state.expandedGroups.insert(item.id)
                                     }
-                                }
+                                },
+                                onInspect: { inspectedStep = $0 }
                             )
                             .id(item.id)
                         }
@@ -1141,6 +1143,11 @@ struct ChatRootView: View {
                     emptyState
                 }
             }
+            .overlay {
+                if let step = inspectedStep {
+                    stepInspector(step)
+                }
+            }
             // Stealth: clicking the history pulls the composer up; clicking
             // again puts it away so a short panel shows only the chat text.
             .contentShape(Rectangle())
@@ -1159,6 +1166,70 @@ struct ChatRootView: View {
         return "Waiting for response"
     }
 
+    // Clicking a step raises this card over the transcript with the exact
+    // call. Scoped to the message area (not a separate window) so it inherits
+    // the panel's stealth and screen-share protection.
+    private func stepInspector(_ step: ChatMessage) -> some View {
+        ZStack {
+            // Tapping the dimmed backdrop dismisses; taps inside the card do not.
+            Color.black.opacity(0.35)
+                .contentShape(Rectangle())
+                .onTapGesture { inspectedStep = nil }
+            stepInspectorCard(step)
+        }
+        .transition(.opacity)
+    }
+
+    private func stepInspectorCard(_ step: ChatMessage) -> some View {
+        VStack(alignment: .leading, spacing: 8 * s) {
+            HStack(spacing: 6 * s) {
+                Image(systemName: step.icon ?? "wrench.fill")
+                    .font(.system(size: 10 * s))
+                Text(step.text)
+                    .font(.system(size: 11.5 * s, weight: .medium))
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                Spacer(minLength: 8 * s)
+                Button {
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString(step.detail ?? step.text, forType: .string)
+                } label: {
+                    Image(systemName: "doc.on.doc")
+                        .font(.system(size: 10 * s))
+                }
+                .buttonStyle(.plain)
+                .help("Copy")
+                Button { inspectedStep = nil } label: {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 10 * s, weight: .semibold))
+                }
+                .buttonStyle(.plain)
+                .help("Close")
+            }
+            .foregroundStyle(.white.opacity(0.7))
+
+            ScrollView(showsIndicators: false) {
+                Text(step.detail ?? step.text)
+                    .font(.system(size: 11 * s, design: .monospaced))
+                    .foregroundStyle(.white.opacity(0.85))
+                    .textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+        }
+        .padding(12 * s)
+        .frame(maxWidth: 460 * s, maxHeight: 300 * s)
+        .background(
+            RoundedRectangle(cornerRadius: 14 * s)
+                .fill(Color.black.opacity(0.88))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 14 * s)
+                        .strokeBorder(.white.opacity(0.12))
+                )
+        )
+        .shadow(color: .black.opacity(0.5), radius: 18, y: 6)
+        .padding(16 * s)
+    }
+
     private var emptyState: some View {
         VStack(spacing: 6) {
             Image(systemName: "sparkle")
@@ -1168,9 +1239,6 @@ struct ChatRootView: View {
             Text("Ask anything.")
                 .font(.system(size: 12.5 * s))
                 .foregroundStyle(.white.opacity(0.55))
-            Text("\(state.toggleShortcut.displayName) toggle · \(state.screenshotShortcut.displayName) answer multiple choice · Esc close")
-                .font(.system(size: 10 * s))
-                .foregroundStyle(.white.opacity(0.3))
         }
     }
 
@@ -1770,6 +1838,13 @@ struct ChatRootView: View {
                     ForEach(session.provider.permissionModes) { mode in
                         menuItem(mode.label, checked: session.modeChoice[session.provider] == mode.value) {
                             session.modeChoice[session.provider] = mode.value
+                            // Cursor's Propose Only does nothing but refuse
+                            // until the approval hook is installed, so send the
+                            // user straight to the switch that fixes it.
+                            if session.provider == .cursor, mode.value == nil,
+                               !CursorApprovals.isInstalled {
+                                state.openSettings(tab: .agents)
+                            }
                         }
                     }
                 }
@@ -1988,6 +2063,7 @@ struct StepsGroup: View {
     var scale: CGFloat = 1
     let expanded: Bool
     let toggle: () -> Void
+    var onInspect: ((ChatMessage) -> Void)? = nil
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -2005,7 +2081,7 @@ struct StepsGroup: View {
             if expanded {
                 VStack(alignment: .leading, spacing: 6) {
                     ForEach(steps) { step in
-                        MessageBubble(message: step, scale: scale)
+                        MessageBubble(message: step, scale: scale, onInspect: onInspect)
                     }
                 }
                 .padding(.leading, 14 * scale)
@@ -2017,7 +2093,9 @@ struct StepsGroup: View {
 struct MessageBubble: View {
     let message: ChatMessage
     var scale: CGFloat = 1
+    var onInspect: ((ChatMessage) -> Void)? = nil
 
+    @ViewBuilder
     var body: some View {
         switch message.role {
         case .user:
@@ -2042,7 +2120,7 @@ struct MessageBubble: View {
             MarkdownView(text: message.text, scale: scale)
                 .frame(maxWidth: .infinity, alignment: .leading)
         case .tool:
-            HStack(spacing: 5) {
+            let row = HStack(spacing: 5) {
                 Image(systemName: message.icon ?? "wrench.fill")
                     .font(.system(size: 9 * scale))
                     .frame(width: 12 * scale)
@@ -2052,6 +2130,15 @@ struct MessageBubble: View {
                     .truncationMode(.middle)
             }
             .foregroundStyle(.white.opacity(0.45))
+            if let detail = message.detail, let onInspect {
+                Button { onInspect(message) } label: {
+                    row.contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .help(String(detail.prefix(400)))
+            } else {
+                row
+            }
         case .error:
             Text(message.text)
                 .font(.system(size: 12 * scale, design: .monospaced))
@@ -2136,17 +2223,56 @@ struct SettingsView: View {
         }
     }
 
+    // One column of a dozen controls read as a wall with no hierarchy. Tabs
+    // put the things people change often (shortcuts, appearance) up front and
+    // keep the security switches together. Each tab scrolls so adding a
+    // setting can never push the footer out of reach.
     var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            HStack(spacing: 8) {
-                Image(systemName: "sparkle")
-                Text("Eave").font(.system(size: 15, weight: .semibold))
-                Spacer()
-                Text("v0.1").font(.system(size: 11)).foregroundStyle(.secondary)
+        VStack(spacing: 0) {
+            TabView(selection: $state.settingsTab) {
+                tab { general }
+                    .tabItem { Label("General", systemImage: "gearshape") }
+                    .tag(AppState.SettingsTab.general)
+                tab { appearance }
+                    .tabItem { Label("Appearance", systemImage: "circle.lefthalf.filled") }
+                    .tag(AppState.SettingsTab.appearance)
+                tab { privacy }
+                    .tabItem { Label("Privacy", systemImage: "eye.slash") }
+                    .tag(AppState.SettingsTab.privacy)
+                tab { agents }
+                    .tabItem { Label("Agents", systemImage: "sparkle") }
+                    .tag(AppState.SettingsTab.agents)
             }
+            .padding(.horizontal, 10)
+            .padding(.top, 10)
 
             Divider()
 
+            HStack {
+                Text("Eave 0.1 · Press \(state.toggleShortcut.displayName) or hover notch")
+                    .font(.system(size: 11)).foregroundStyle(.secondary)
+                Spacer()
+                Button("Quit") { NSApp.terminate(nil) }
+                    .controlSize(.small)
+            }
+            .padding(.horizontal, 20)
+            .padding(.vertical, 12)
+        }
+        .frame(width: 380, height: 430)
+    }
+
+    private func tab<Content: View>(@ViewBuilder _ content: () -> Content) -> some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 16) {
+                content()
+            }
+            .padding(20)
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    private var general: some View {
+        Group {
             HStack(spacing: 12) {
                 Text("Toggle panel")
                 Spacer()
@@ -2225,7 +2351,11 @@ struct SettingsView: View {
                 }
             }
             .toggleStyle(.switch)
+        }
+    }
 
+    private var appearance: some View {
+        Group {
             VStack(alignment: .leading, spacing: 6) {
                 Text("Notch activity").font(.system(size: 12.5))
                 Picker("Notch activity", selection: $state.notchStyle) {
@@ -2256,6 +2386,11 @@ struct SettingsView: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
 
+        }
+    }
+
+    private var privacy: some View {
+        Group {
             Toggle(isOn: $state.screenShareProtectionEnabled) {
                 VStack(alignment: .leading, spacing: 1) {
                     Text("Hide from screen shares").font(.system(size: 12.5))
@@ -2282,19 +2417,23 @@ struct SettingsView: View {
                 }
             }
             .toggleStyle(.switch)
-
-            Divider()
-
-            HStack {
-                Text("Press \(state.toggleShortcut.displayName) or hover notch")
-                    .font(.system(size: 11)).foregroundStyle(.secondary)
-                Spacer()
-                Button("Quit") { NSApp.terminate(nil) }
-                    .controlSize(.small)
-            }
         }
-        .padding(20)
-        .frame(width: 340)
+    }
+
+    private var agents: some View {
+        Group {
+            Toggle(isOn: $state.cursorApprovalsEnabled) {
+                VStack(alignment: .leading, spacing: 1) {
+                    Text("Ask before Cursor runs commands").font(.system(size: 12.5))
+                    Text(state.cursorApprovalsFailure
+                        ?? "Cursor's Propose Only mode cannot prompt on its own. This installs a hook in ~/.cursor/hooks.json so approvals appear in the notch. Off means Propose Only refuses every command.")
+                        .font(.system(size: 10.5))
+                        .foregroundStyle(state.cursorApprovalsFailure == nil ? .secondary : Color.red)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            .toggleStyle(.switch)
+        }
     }
 }
 

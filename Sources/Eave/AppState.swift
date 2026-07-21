@@ -1116,7 +1116,7 @@ final class AppState: ObservableObject {
     // Opens (or focuses) the Settings window. Lazily built and reused. The app
     // is an accessory, so activate it too or the window opens unfocused behind
     // whatever the user was in.
-    enum SettingsTab: Hashable { case general, appearance, privacy, agents }
+    enum SettingsTab: Hashable { case general, appearance, privacy, agents, about }
 
     @Published var settingsTab: SettingsTab = .general
 

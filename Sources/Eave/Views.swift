@@ -2208,6 +2208,7 @@ struct MessageAttachmentButton: View {
 // entry points can present it and it survives the panel collapsing.
 struct SettingsView: View {
     @ObservedObject var state: AppState
+    @ObservedObject private var updater = Updater.shared
 
     private var styleCaption: String {
         switch state.notchStyle {
@@ -2244,6 +2245,9 @@ struct SettingsView: View {
                 tab { agents }
                     .tabItem { Label("Agents", systemImage: "sparkle") }
                     .tag(AppState.SettingsTab.agents)
+                tab { about }
+                    .tabItem { Label("About", systemImage: "info.circle") }
+                    .tag(AppState.SettingsTab.about)
             }
             .padding(.horizontal, 10)
             .padding(.top, 10)
@@ -2251,7 +2255,7 @@ struct SettingsView: View {
             Divider()
 
             HStack {
-                Text("Eave 0.1 · Press \(state.toggleShortcut.displayName) or hover notch")
+                Text("Eave \(Updater.shared.currentVersion) · Press \(state.toggleShortcut.displayName) or hover notch")
                     .font(.system(size: 11)).foregroundStyle(.secondary)
                 Spacer()
                 Button("Quit") { NSApp.terminate(nil) }
@@ -2436,6 +2440,59 @@ struct SettingsView: View {
             }
             .toggleStyle(.switch)
         }
+    }
+
+    private var updateStatusLine: (text: String, color: Color)? {
+        switch updater.status {
+        case .idle: return nil
+        case .checking: return ("Checking for updates…", .secondary)
+        case .upToDate: return ("You're up to date.", .secondary)
+        case .available(let version): return ("Version \(version) is available.", .primary)
+        case .error(let message): return ("Update check failed — \(message)", .red)
+        }
+    }
+
+    private var about: some View {
+        VStack(spacing: 6) {
+            Image(nsImage: NSApp.applicationIconImage ?? NSImage())
+                .resizable()
+                .frame(width: 72, height: 72)
+                .padding(.top, 6)
+            Text("Eave")
+                .font(.system(size: 17, weight: .semibold))
+            Text("Version \(updater.currentVersion)"
+                + (updater.buildNumber.map { " (\($0))" } ?? ""))
+                .font(.system(size: 11.5))
+                .foregroundStyle(.secondary)
+                .textSelection(.enabled)
+            Text("Claude, Codex, Cursor, and ChatGPT in your notch")
+                .font(.system(size: 11))
+                .foregroundStyle(.secondary)
+                .padding(.top, 2)
+
+            HStack(spacing: 8) {
+                Button("Check for Updates") { updater.check() }
+                    .disabled(updater.status == .checking)
+                Button("Update Now") { updater.updateNow() }
+                    .keyboardShortcut(.defaultAction)
+            }
+            .controlSize(.regular)
+            .padding(.top, 10)
+
+            if let line = updateStatusLine {
+                Text(line.text)
+                    .font(.system(size: 11))
+                    .foregroundStyle(line.color)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .multilineTextAlignment(.center)
+            }
+
+            Link("github.com/utmostelf5752/notch-agent",
+                 destination: URL(string: "https://github.com/utmostelf5752/notch-agent")!)
+                .font(.system(size: 10.5))
+                .padding(.top, 6)
+        }
+        .frame(maxWidth: .infinity)
     }
 }
 

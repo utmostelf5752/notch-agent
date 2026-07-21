@@ -2236,9 +2236,6 @@ struct SettingsView: View {
                 tab { general }
                     .tabItem { Label("General", systemImage: "gearshape") }
                     .tag(AppState.SettingsTab.general)
-                tab { appearance }
-                    .tabItem { Label("Appearance", systemImage: "circle.lefthalf.filled") }
-                    .tag(AppState.SettingsTab.appearance)
                 tab { privacy }
                     .tabItem { Label("Privacy", systemImage: "eye.slash") }
                     .tag(AppState.SettingsTab.privacy)
@@ -2255,7 +2252,7 @@ struct SettingsView: View {
             Divider()
 
             HStack {
-                Text("Eave \(Updater.shared.currentVersion) · Press \(state.toggleShortcut.displayName) or hover notch")
+                Text("Eave \(Updater.shared.currentVersion)")
                     .font(.system(size: 11)).foregroundStyle(.secondary)
                 Spacer()
                 Button("Quit") { NSApp.terminate(nil) }
@@ -2277,8 +2274,23 @@ struct SettingsView: View {
         }
     }
 
+    private func sectionHeader(_ title: String) -> some View {
+        Text(title.uppercased())
+            .font(.system(size: 10.5, weight: .semibold))
+            .foregroundStyle(.secondary)
+            .kerning(0.5)
+    }
+
     private var general: some View {
         Group {
+            sectionHeader("Appearance")
+
+            appearance
+
+            Divider().padding(.vertical, 4)
+
+            sectionHeader("General")
+
             HStack(spacing: 12) {
                 Text("Toggle panel")
                 Spacer()
@@ -2471,10 +2483,17 @@ struct SettingsView: View {
                 .padding(.top, 2)
 
             HStack(spacing: 8) {
-                Button("Check for Updates") { updater.check() }
-                    .disabled(updater.status == .checking)
-                Button("Update Now") { updater.updateNow() }
-                    .keyboardShortcut(.defaultAction)
+                if case .available = updater.status {
+                    // Only offer to install once a probe has actually found an
+                    // update — otherwise "Update Now" is a lie that just runs a
+                    // check and reports "up to date".
+                    Button("Update Now") { updater.updateNow() }
+                        .keyboardShortcut(.defaultAction)
+                } else {
+                    Button("Check for Updates") { updater.check() }
+                        .disabled(updater.status == .checking)
+                        .keyboardShortcut(.defaultAction)
+                }
             }
             .controlSize(.regular)
             .padding(.top, 10)

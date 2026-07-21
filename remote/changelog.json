@@ -1,0 +1,17 @@
+{
+  "entries": [
+    {
+      "version": "0.1.38",
+      "date": "2026-07-21",
+      "notes": [
+        "Settings now opens reliably instead of occasionally shifting focus without appearing.",
+        "New \"What's New\" section in Settings > About shows release notes when you check for updates.",
+        "Checking for updates from the menu bar opens the About tab instead of a separate popup.",
+        "Selected controls in Settings use your macOS accent color.",
+        "Shortcut rows show a pencil to signal they can be rebound.",
+        "Haptic feedback now double-taps the trackpad when a response finishes.",
+        "Tidied Settings: removed the theme descriptions, the Keep panel pinned option, and the About tagline and link."
+      ]
+    }
+  ]
+}

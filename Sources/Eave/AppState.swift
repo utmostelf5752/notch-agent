@@ -347,6 +347,12 @@ final class AppState: ObservableObject {
 
     private func applyWindowDiscretion(to window: NSWindow) {
         window.isExcludedFromWindowsMenu = true
+        // The Settings window must never be .transient: a transient window
+        // auto-hides whenever this accessory app is inactive, which is exactly
+        // the "focus shifts but Settings never appears" bug. A become-visible
+        // observer runs this on every window, so guard here too — not just at
+        // creation — or it gets re-added each time Settings is shown.
+        guard window !== settingsWindow else { return }
         var behavior = window.collectionBehavior
         behavior.insert(.transient)
         window.collectionBehavior = behavior
@@ -629,9 +635,16 @@ final class AppState: ObservableObject {
     func performFeedback() {
         guard feedbackEnabled else { return }
         if feedbackMode == .capsLock, CapsLockLED.shared.available {
+            // Caps Lock blinks once.
             CapsLockLED.shared.blink(count: 1, tapInterval: 0.20)
         } else {
-            NSHapticFeedbackManager.defaultPerformer.perform(.alignment, performanceTime: .now)
+            // Haptic taps the trackpad twice — a single .alignment tap is too
+            // faint to notice, so a double tap reads clearly as "done."
+            let performer = NSHapticFeedbackManager.defaultPerformer
+            performer.perform(.alignment, performanceTime: .now)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.14) {
+                performer.perform(.alignment, performanceTime: .now)
+            }
         }
     }
 
@@ -1131,7 +1144,11 @@ final class AppState: ObservableObject {
             )
             win.title = "Eave Settings"
             win.isReleasedWhenClosed = false
-            win.collectionBehavior = [.transient]
+            // Deliberately NOT .transient: a transient window auto-hides
+            // whenever the accessory app is inactive, which produced the
+            // "focus shifts but no Settings window appears" bug. Follow the
+            // active Space and float over fullscreen apps instead.
+            win.collectionBehavior = [.moveToActiveSpace, .fullScreenAuxiliary]
             win.isExcludedFromWindowsMenu = true
             let host = NSHostingView(rootView: SettingsView(state: self))
             // AppKit does not resize the window to fit SwiftUI content, so a
@@ -1152,15 +1169,26 @@ final class AppState: ObservableObject {
                 self.expand(takeKeyboard: true)
             }
             settingsWindow = win
-            applyWindowDiscretion(to: win)
+            // applyWindowDiscretion is skipped on purpose — it re-inserts the
+            // .transient behavior we just avoided. The window is already kept
+            // out of the Windows menu above.
             applyScreenShareProtection(to: win)
         }
         // The panel sits at .statusBar level, above the settings window, so
         // collapse it while Settings is up and restore it on close.
         reopenPanelAfterSettings = expanded
         if expanded { collapse() }
-        NSApp.activate(ignoringOtherApps: true)
-        settingsWindow?.makeKeyAndOrderFront(nil)
+        // Recover a window stranded off-screen by a since-disconnected display
+        // (it would order front where nothing is visible), then force it
+        // forward — an accessory app can't rely on activate() alone to raise
+        // and key the window.
+        if let win = settingsWindow {
+            let onScreen = NSScreen.screens.contains { $0.frame.intersects(win.frame) }
+            if !onScreen { win.center() }
+            NSApp.activate(ignoringOtherApps: true)
+            win.makeKeyAndOrderFront(nil)
+            win.orderFrontRegardless()
+        }
     }
 
     // Clicking anywhere that is not one of our windows collapses the panel

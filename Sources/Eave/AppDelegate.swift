@@ -51,6 +51,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         state.logGeometry()
         _ = Updater.shared
         ChatGPTSelectors.startRefreshing()
+        Changelog.startRefreshing()
         Telemetry.start(settingsSnapshot: {
             [
                 "notch_style": AppState.shared.notchStyle.rawValue,
@@ -210,6 +211,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 session.answerQuestion(String(cmd.dropFirst(7)))
             } else if cmd == "settings" {
                 AppState.shared.openSettings()
+            } else if cmd == "about" {
+                AppState.shared.openSettings(tab: .about)
             } else if cmd == "update" {
                 Updater.shared.checkForUpdates()
             } else if cmd == "collapse" {
@@ -334,7 +337,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     @objc private func checkForUpdates() {
-        Updater.shared.checkForUpdates()
+        // Route to the About tab and run the same probe the tab's button does,
+        // rather than popping Sparkle's own window over the user's work.
+        AppState.shared.openSettings(tab: .about)
+        Updater.shared.check()
+        Changelog.refresh()
     }
 
     @objc private func quitApp() {

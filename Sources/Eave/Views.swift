@@ -2209,22 +2209,9 @@ struct MessageAttachmentButton: View {
 struct SettingsView: View {
     @ObservedObject var state: AppState
     @ObservedObject private var updater = Updater.shared
+    @ObservedObject private var changelogStore = Changelog.Store.shared
 
-    private var styleCaption: String {
-        switch state.notchStyle {
-        case .standard: return "Live activity text and buttons around the notch"
-        case .compact: return "A hairline sliver under the notch — color shows what's happening"
-        case .stealth: return "Silent while working; dim notch-width panel — Clear material makes it glass"
-        }
-    }
-
-    private var materialCaption: String {
-        switch state.panelStyle {
-        case .black: return "Solid black — the panel hides what's behind it"
-        case .smoke: return "Dark frosted glass — smoked blur of what's behind"
-        case .clear: return "Clear pane — the panel shows what's behind it"
-        }
-    }
+    private let accent = Color(nsColor: .controlAccentColor)
 
     // One column of a dozen controls read as a wall with no hierarchy. Tabs
     // put the things people change often (shortcuts, appearance) up front and
@@ -2349,26 +2336,15 @@ struct SettingsView: View {
                     .controlSize(.small)
                     .disabled(!CapsLockLED.shared.available)
                 }
-                Picker("Feedback mode", selection: $state.feedbackMode) {
-                    Text("Haptic").tag(FeedbackMode.haptic)
-                    Text("Caps Lock LED").tag(FeedbackMode.capsLock)
-                }
-                .pickerStyle(.segmented)
-                .labelsHidden()
+                SegmentedSelector(selection: $state.feedbackMode, options: [
+                    ("Haptic", .haptic),
+                    ("Caps Lock LED", .capsLock),
+                ])
                 Text("Haptic taps the trackpad; Caps Lock LED blinks the keyboard light.")
                     .font(.system(size: 10.5))
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
-
-            Toggle(isOn: $state.pinned) {
-                VStack(alignment: .leading, spacing: 1) {
-                    Text("Keep panel pinned").font(.system(size: 12.5))
-                    Text("Stay open while using other apps")
-                        .font(.system(size: 10.5)).foregroundStyle(.secondary)
-                }
-            }
-            .toggleStyle(.switch)
         }
     }
 
@@ -2376,34 +2352,21 @@ struct SettingsView: View {
         Group {
             VStack(alignment: .leading, spacing: 6) {
                 Text("Notch activity").font(.system(size: 12.5))
-                Picker("Notch activity", selection: $state.notchStyle) {
-                    Text("Standard").tag(AppState.NotchStyle.standard)
-                    Text("Compact").tag(AppState.NotchStyle.compact)
-                    Text("Stealth").tag(AppState.NotchStyle.stealth)
-                }
-                .pickerStyle(.segmented)
-                .labelsHidden()
-                Text(styleCaption)
-                    .font(.system(size: 10.5))
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
+                SegmentedSelector(selection: $state.notchStyle, options: [
+                    ("Standard", .standard),
+                    ("Compact", .compact),
+                    ("Stealth", .stealth),
+                ])
             }
 
             VStack(alignment: .leading, spacing: 6) {
                 Text("Panel material").font(.system(size: 12.5))
-                Picker("Panel material", selection: $state.panelStyle) {
-                    Text("Black").tag(AppState.PanelStyle.black)
-                    Text("Smoke").tag(AppState.PanelStyle.smoke)
-                    Text("Clear").tag(AppState.PanelStyle.clear)
-                }
-                .pickerStyle(.segmented)
-                .labelsHidden()
-                Text(materialCaption)
-                    .font(.system(size: 10.5))
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
+                SegmentedSelector(selection: $state.panelStyle, options: [
+                    ("Black", .black),
+                    ("Smoke", .smoke),
+                    ("Clear", .clear),
+                ])
             }
-
         }
     }
 
@@ -2477,10 +2440,6 @@ struct SettingsView: View {
                 .font(.system(size: 11.5))
                 .foregroundStyle(.secondary)
                 .textSelection(.enabled)
-            Text("Claude, Codex, Cursor, and ChatGPT in your notch")
-                .font(.system(size: 11))
-                .foregroundStyle(.secondary)
-                .padding(.top, 2)
 
             HStack(spacing: 8) {
                 if case .available = updater.status {
@@ -2490,7 +2449,12 @@ struct SettingsView: View {
                     Button("Update Now") { updater.updateNow() }
                         .keyboardShortcut(.defaultAction)
                 } else {
-                    Button("Check for Updates") { updater.check() }
+                    Button("Check for Updates") {
+                        updater.check()
+                        // Pull the newest notes so the update's changelog is
+                        // present by the time the probe reports it.
+                        Changelog.refresh()
+                    }
                         .disabled(updater.status == .checking)
                         .keyboardShortcut(.defaultAction)
                 }
@@ -2506,12 +2470,96 @@ struct SettingsView: View {
                     .multilineTextAlignment(.center)
             }
 
-            Link("github.com/utmostelf5752/notch-agent",
-                 destination: URL(string: "https://github.com/utmostelf5752/notch-agent")!)
-                .font(.system(size: 10.5))
-                .padding(.top, 6)
+            changelogSection
         }
         .frame(maxWidth: .infinity)
+        // Opening About refreshes the feed so the list is current the moment
+        // the user looks — including right after they hit Check for Updates.
+        .onAppear { Changelog.refresh() }
+    }
+
+    // A running "What's New" list under the update controls. The version the
+    // updater is offering (if any) gets an accent badge so the notes for the
+    // pending update stand out.
+    private var changelogSection: some View {
+        let availableVersion: String? = {
+            if case .available(let version) = updater.status { return version }
+            return nil
+        }()
+        return VStack(alignment: .leading, spacing: 14) {
+            Divider().padding(.top, 6)
+            sectionHeader("What's New")
+            ForEach(changelogStore.changelog.entries) { entry in
+                VStack(alignment: .leading, spacing: 5) {
+                    HStack(spacing: 6) {
+                        Text(entry.version)
+                            .font(.system(size: 12.5, weight: .semibold))
+                        if entry.version == availableVersion {
+                            Text("UPDATE")
+                                .font(.system(size: 8.5, weight: .bold))
+                                .foregroundStyle(.white)
+                                .padding(.horizontal, 5)
+                                .padding(.vertical, 1.5)
+                                .background(Capsule().fill(accent))
+                        }
+                        if let date = entry.date {
+                            Text(date)
+                                .font(.system(size: 10))
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                    ForEach(Array(entry.notes.enumerated()), id: \.offset) { _, note in
+                        HStack(alignment: .top, spacing: 6) {
+                            Text("•").foregroundStyle(.secondary)
+                            Text(note)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                        .font(.system(size: 11))
+                        .foregroundStyle(.primary.opacity(0.85))
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+        }
+        .padding(.top, 8)
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
+// Accent-filled segmented control. SwiftUI's stock .segmented picker paints
+// its selection a low-contrast grey in dark mode, so the current choice is
+// hard to read; this fills the selected segment with the app accent instead.
+private struct SegmentedSelector<T: Hashable>: View {
+    @Binding var selection: T
+    let options: [(label: String, value: T)]
+
+    // The user's macOS accent color (System Settings > Appearance), so the
+    // selected segment matches the rest of their system chrome rather than a
+    // hardcoded blue.
+    private let accent = Color(nsColor: .controlAccentColor)
+
+    var body: some View {
+        HStack(spacing: 3) {
+            ForEach(options.indices, id: \.self) { index in
+                let option = options[index]
+                let selected = selection == option.value
+                Button {
+                    selection = option.value
+                } label: {
+                    Text(option.label)
+                        .font(.system(size: 12, weight: selected ? .semibold : .regular))
+                        .foregroundStyle(selected ? Color.white : Color.primary.opacity(0.85))
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 5)
+                        .background(RoundedRectangle(cornerRadius: 6)
+                            .fill(selected ? accent : Color.clear))
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(3)
+        .background(RoundedRectangle(cornerRadius: 8).fill(Color.primary.opacity(0.08)))
     }
 }
 
@@ -2523,8 +2571,16 @@ private struct ShortcutRecorderButton: View {
     @State private var keyMonitor: Any?
 
     var body: some View {
-        Button(isRecording ? "Type shortcut…" : shortcut.displayName) {
+        Button {
             isRecording ? stopRecording() : startRecording()
+        } label: {
+            HStack(spacing: 4) {
+                Text(isRecording ? "Type shortcut…" : shortcut.displayName)
+                // A pencil cues that the shortcut is editable — click to rebind.
+                if !isRecording {
+                    Image(systemName: "pencil").font(.system(size: 9))
+                }
+            }
         }
         .buttonStyle(.bordered)
         .controlSize(.small)

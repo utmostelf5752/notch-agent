@@ -10,10 +10,60 @@ conversation without switching apps.
 [**Download Eave.dmg**](https://github.com/utmostelf5752/notch-agent/releases/latest/download/Eave.dmg)
 — always the newest build from `main`, published automatically by CI.
 
-The app is ad-hoc signed (no Apple Developer ID), so the first launch is
+The app is not notarized (no Apple Developer ID), so the first launch is
 blocked by Gatekeeper. After dragging it to Applications, right-click the app
 and choose **Open**, then confirm — or run `xattr -dr com.apple.quarantine
-/Applications/Eave.app`.
+/Applications/Eave.app`. That first install is the only manual one: the app
+updates itself afterwards.
+
+## Auto-updates (Sparkle)
+
+The app checks the rolling GitHub release for updates via
+[Sparkle 2](https://sparkle-project.org): scheduled checks download new builds
+in the background and prompt once to relaunch; "Check for Updates…" in the
+menu-bar menu checks immediately. The feed is
+`releases/latest/download/appcast.xml`, generated and EdDSA-signed by CI, and
+the app verifies every download against the `SUPublicEDKey` baked into its
+Info.plist — a tampered or truncated archive is rejected and retried on the
+next check. Sparkle-installed updates carry no quarantine, so Gatekeeper does
+not re-block after updates.
+
+Pieces:
+
+- `Support/fetch-sparkle.sh` — fetches the pinned Sparkle framework + tools
+  into gitignored `Support/Sparkle/` (SHA-256 verified). Run by `build.sh` and
+  the Xcode "Fetch Sparkle" phase; `Package.swift` carries the matching SPM
+  dependency only so editor indexing resolves `import Sparkle`.
+- `Sources/Eave/Updater.swift` — the `SPUStandardUpdaterController` wrapper.
+  Debug: `echo update > /tmp/eave-cmd && kill -USR2 <pid>` triggers a check.
+- Versions are real now: `build.sh` derives `CFBundleVersion` from
+  `git rev-list --count HEAD` (monotonic, what Sparkle compares) and
+  `CFBundleShortVersionString` as `0.1.<count>`. Xcode dev builds keep the
+  static `project.yml` versions; only CI builds feed the appcast.
+- CI (`.github/workflows/release.yml`) publishes `Eave.dmg` (humans),
+  `Eave.zip` (Sparkle), and `appcast.xml` to the rolling release.
+
+One-time repo secrets (Settings → Secrets and variables → Actions):
+
+- `SPARKLE_ED_PRIVATE_KEY` — export from the Keychain of the machine that ran
+  `generate_keys`: `Support/Sparkle/bin/generate_keys -x /tmp/eave-ed25519 &&
+  pbcopy < /tmp/eave-ed25519; rm /tmp/eave-ed25519`. BACK THIS KEY UP: losing
+  it means shipped apps reject all future updates and users must reinstall
+  manually. Without this secret, CI still publishes the DMG but skips the
+  appcast (with a warning), so installed apps never see the update.
+- `APPLE_DEV_CERT_P12` / `APPLE_DEV_CERT_PASSWORD` — the Apple Development
+  certificate (team WJZ957T3P9) exported from Keychain Access as a
+  password-protected .p12, then base64-encoded (`base64 -i cert.p12 | pbcopy`).
+  Gives CI builds the same stable signing identity as local builds, so macOS
+  privacy grants (Screen Recording) survive updates. Without it, CI falls back
+  to ad-hoc signing and every update resets those grants. Existing ad-hoc
+  installs re-prompt once when they cross to a cert-signed build.
+
+Local end-to-end test (verified 2026-07-21): zip a higher-versioned build,
+`generate_appcast --download-url-prefix http://localhost:8123/ <dir>`, serve
+it, launch with `--args -SUFeedURL http://localhost:8123/appcast.xml`, trigger
+the `update` debug command, quit — the bundle is replaced in place. A
+corrupted zip is refused (EdDSA mismatch, nothing staged).
 
 UI: solid black, rounded bottom corners, no borders or shadows (ChatGPT-popup
 feel). Top strip flanking the notch cutout holds settings (left) and

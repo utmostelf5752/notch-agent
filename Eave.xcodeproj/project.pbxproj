@@ -8,21 +8,39 @@
 
 /* Begin PBXBuildFile section */
 		0E6C084757573D220E20310B /* AgentSession.swift in Sources */ = {isa = PBXBuildFile; fileRef = E6D1A318B18CE03E3C75E349 /* AgentSession.swift */; };
+		31210C8816D35460F7484282 /* Sparkle.framework in Embed Frameworks */ = {isa = PBXBuildFile; fileRef = DCB456E8D5F7420580212FD4 /* Sparkle.framework */; settings = {ATTRIBUTES = (CodeSignOnCopy, RemoveHeadersOnCopy, ); }; };
 		43A345061120DED3E9DB641B /* MarkdownText.swift in Sources */ = {isa = PBXBuildFile; fileRef = D219A8A6C0732C766F944131 /* MarkdownText.swift */; };
 		5A83A89C194B4CBDD5EBB53A /* CursorApprovals.swift in Sources */ = {isa = PBXBuildFile; fileRef = 910472E102846F4FE8E8A4FD /* CursorApprovals.swift */; };
 		787859ECC511A895ED7CB92A /* AppState.swift in Sources */ = {isa = PBXBuildFile; fileRef = D72061058B7078617AE21053 /* AppState.swift */; };
 		7CA362EE858E60E2E040FAB5 /* AppDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2CD822116E0AD0EFF607E7C4 /* AppDelegate.swift */; };
 		99867582CC31A6C63ABFD281 /* main.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6AC734838EE8D16A49FBDDBE /* main.swift */; };
 		A042FB50B4812481DBA704FC /* CodexAppServer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6CF6E3B6CC26C000AE79DC23 /* CodexAppServer.swift */; };
+		AB1D3A44BD909788A394F49C /* Updater.swift in Sources */ = {isa = PBXBuildFile; fileRef = 12B1EE0C17574F8DA01DBAB9 /* Updater.swift */; };
 		B41F6FCF1D66A1D3A8B38EB2 /* ChatGPTWeb.swift in Sources */ = {isa = PBXBuildFile; fileRef = E08907AF743818A504A6CD06 /* ChatGPTWeb.swift */; };
 		BBAECC11F8B4D4751A06A5CD /* MenuBarIcon.png in Resources */ = {isa = PBXBuildFile; fileRef = 7F866FBEBF260B373196E3E3 /* MenuBarIcon.png */; };
+		BDDCA3CC914C5682E5F7C858 /* Sparkle.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = DCB456E8D5F7420580212FD4 /* Sparkle.framework */; };
 		BE963E904EDFCCAEF21CD68D /* AppIcon.icns in Resources */ = {isa = PBXBuildFile; fileRef = 7B27793ADEC604B26E17C12E /* AppIcon.icns */; };
 		BEBB206B526CEE4A4543A67B /* Views.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8859037E38BFBBB86E59104C /* Views.swift */; };
 		F9B3EA7C97AB5F501C50A03F /* GlobalShortcut.swift in Sources */ = {isa = PBXBuildFile; fileRef = BCCEF1502A7E59CA3F04CB76 /* GlobalShortcut.swift */; };
 /* End PBXBuildFile section */
 
+/* Begin PBXCopyFilesBuildPhase section */
+		0754885179EBC65A4EAA4DA0 /* Embed Frameworks */ = {
+			isa = PBXCopyFilesBuildPhase;
+			buildActionMask = 2147483647;
+			dstPath = "";
+			dstSubfolderSpec = 10;
+			files = (
+				31210C8816D35460F7484282 /* Sparkle.framework in Embed Frameworks */,
+			);
+			name = "Embed Frameworks";
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXCopyFilesBuildPhase section */
+
 /* Begin PBXFileReference section */
 		0073A05462A6CB164AC768F5 /* Eave.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Eave.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		12B1EE0C17574F8DA01DBAB9 /* Updater.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Updater.swift; sourceTree = "<group>"; };
 		2CD822116E0AD0EFF607E7C4 /* AppDelegate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppDelegate.swift; sourceTree = "<group>"; };
 		6AC734838EE8D16A49FBDDBE /* main.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = main.swift; sourceTree = "<group>"; };
 		6CF6E3B6CC26C000AE79DC23 /* CodexAppServer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CodexAppServer.swift; sourceTree = "<group>"; };
@@ -33,9 +51,21 @@
 		BCCEF1502A7E59CA3F04CB76 /* GlobalShortcut.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GlobalShortcut.swift; sourceTree = "<group>"; };
 		D219A8A6C0732C766F944131 /* MarkdownText.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MarkdownText.swift; sourceTree = "<group>"; };
 		D72061058B7078617AE21053 /* AppState.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppState.swift; sourceTree = "<group>"; };
+		DCB456E8D5F7420580212FD4 /* Sparkle.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Sparkle.framework; path = Support/Sparkle/Sparkle.framework; sourceTree = "<group>"; };
 		E08907AF743818A504A6CD06 /* ChatGPTWeb.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatGPTWeb.swift; sourceTree = "<group>"; };
 		E6D1A318B18CE03E3C75E349 /* AgentSession.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AgentSession.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		BC6E71B5C15B0C90E86317C6 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				BDDCA3CC914C5682E5F7C858 /* Sparkle.framework in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
 		0308A31EB218FE624F6E178F /* Eave */ = {
@@ -50,6 +80,7 @@
 				BCCEF1502A7E59CA3F04CB76 /* GlobalShortcut.swift */,
 				6AC734838EE8D16A49FBDDBE /* main.swift */,
 				D219A8A6C0732C766F944131 /* MarkdownText.swift */,
+				12B1EE0C17574F8DA01DBAB9 /* Updater.swift */,
 				8859037E38BFBBB86E59104C /* Views.swift */,
 			);
 			path = Eave;
@@ -60,8 +91,17 @@
 			children = (
 				F20106BA0B5801BFF10C1423 /* Sources */,
 				AB04644409B9CE5B6F6D7C2C /* Support */,
+				9C2D4570230B8BD369C809DB /* Frameworks */,
 				CA119142FD06BFAF21361C94 /* Products */,
 			);
+			sourceTree = "<group>";
+		};
+		9C2D4570230B8BD369C809DB /* Frameworks */ = {
+			isa = PBXGroup;
+			children = (
+				DCB456E8D5F7420580212FD4 /* Sparkle.framework */,
+			);
+			name = Frameworks;
 			sourceTree = "<group>";
 		};
 		AB04644409B9CE5B6F6D7C2C /* Support */ = {
@@ -96,8 +136,11 @@
 			isa = PBXNativeTarget;
 			buildConfigurationList = F16C3A1D123FAAFC4630FC76 /* Build configuration list for PBXNativeTarget "Eave" */;
 			buildPhases = (
+				CCE21DAB8026D361575B119C /* Fetch Sparkle */,
 				730760AFE10EFE6CD304086E /* Sources */,
 				5C226660CB59FA01D1CFB1B9 /* Resources */,
+				BC6E71B5C15B0C90E86317C6 /* Frameworks */,
+				0754885179EBC65A4EAA4DA0 /* Embed Frameworks */,
 			);
 			buildRules = (
 			);
@@ -156,6 +199,28 @@
 		};
 /* End PBXResourcesBuildPhase section */
 
+/* Begin PBXShellScriptBuildPhase section */
+		CCE21DAB8026D361575B119C /* Fetch Sparkle */ = {
+			isa = PBXShellScriptBuildPhase;
+			alwaysOutOfDate = 1;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputFileListPaths = (
+			);
+			inputPaths = (
+			);
+			name = "Fetch Sparkle";
+			outputFileListPaths = (
+			);
+			outputPaths = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "\"$SRCROOT/Support/fetch-sparkle.sh\"";
+		};
+/* End PBXShellScriptBuildPhase section */
+
 /* Begin PBXSourcesBuildPhase section */
 		730760AFE10EFE6CD304086E /* Sources */ = {
 			isa = PBXSourcesBuildPhase;
@@ -169,6 +234,7 @@
 				5A83A89C194B4CBDD5EBB53A /* CursorApprovals.swift in Sources */,
 				F9B3EA7C97AB5F501C50A03F /* GlobalShortcut.swift in Sources */,
 				43A345061120DED3E9DB641B /* MarkdownText.swift in Sources */,
+				AB1D3A44BD909788A394F49C /* Updater.swift in Sources */,
 				BEBB206B526CEE4A4543A67B /* Views.swift in Sources */,
 				99867582CC31A6C63ABFD281 /* main.swift in Sources */,
 			);
@@ -182,6 +248,10 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				COMBINE_HIDPI_IMAGES = YES;
+				FRAMEWORK_SEARCH_PATHS = (
+					"$(inherited)",
+					"\"Support/Sparkle\"",
+				);
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = Support/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = (
@@ -237,6 +307,7 @@
 				ENABLE_HARDENED_RUNTIME = NO;
 				ENABLE_NS_ASSERTIONS = NO;
 				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = NO;
 				GCC_C_LANGUAGE_STANDARD = gnu11;
 				GCC_NO_COMMON_BLOCKS = YES;
 				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
@@ -262,6 +333,10 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				COMBINE_HIDPI_IMAGES = YES;
+				FRAMEWORK_SEARCH_PATHS = (
+					"$(inherited)",
+					"\"Support/Sparkle\"",
+				);
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = Support/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = (
@@ -317,6 +392,7 @@
 				ENABLE_HARDENED_RUNTIME = NO;
 				ENABLE_STRICT_OBJC_MSGSEND = YES;
 				ENABLE_TESTABILITY = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = NO;
 				GCC_C_LANGUAGE_STANDARD = gnu11;
 				GCC_DYNAMIC_NO_PIC = NO;
 				GCC_NO_COMMON_BLOCKS = YES;

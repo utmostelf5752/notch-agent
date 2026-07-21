@@ -17,6 +17,9 @@ settings:
     DEVELOPMENT_TEAM: WJZ957T3P9
     ENABLE_HARDENED_RUNTIME: NO
     ENABLE_DEBUG_DYLIB: NO
+    # The Fetch Sparkle phase writes into Support/Sparkle/, which the script
+    # sandbox would block.
+    ENABLE_USER_SCRIPT_SANDBOXING: NO
 
 targets:
   Eave:
@@ -28,6 +31,17 @@ targets:
         buildPhase: resources
       - path: Support/MenuBarIcon.png
         buildPhase: resources
+    dependencies:
+      # Vendored binary framework (fetched by Support/fetch-sparkle.sh) so
+      # the Xcode target links the exact same Sparkle as build.sh, instead of
+      # resolving Package.swift's SPM copy.
+      - framework: Support/Sparkle/Sparkle.framework
+        embed: true
+        codeSign: true
+    preBuildScripts:
+      - name: Fetch Sparkle
+        script: '"$SRCROOT/Support/fetch-sparkle.sh"'
+        basedOnDependencyAnalysis: false
     settings:
       base:
         PRODUCT_NAME: Eave

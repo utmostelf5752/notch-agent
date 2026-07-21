@@ -49,6 +49,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         state.installScreenObservers()
         state.startBackgroundObservers()
         state.logGeometry()
+        _ = Updater.shared
     }
 
     // An accessory app has no menu bar, but key equivalents still route
@@ -87,6 +88,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     //   chats                             write history list to /tmp/eave-chats.txt
     //   restore:<index>                   reopen a past chat from the history list
     //   cfg                               write current provider settings to /tmp/eave-settings.txt
+    //   update                            run a user-initiated Sparkle update check
     //   model:<id|default>                set the current provider's model
     // With no command file, USR2 just logs geometry.
     private var signalSources: [DispatchSourceSignal] = []
@@ -199,6 +201,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 session.answerQuestion(String(cmd.dropFirst(7)))
             } else if cmd == "settings" {
                 AppState.shared.openSettings()
+            } else if cmd == "update" {
+                Updater.shared.checkForUpdates()
             } else if cmd == "collapse" {
                 AppState.shared.collapse()
             } else if cmd == "expand" {
@@ -258,6 +262,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         hint.isEnabled = false
         menu.addItem(hint)
         menu.addItem(.separator())
+        let update = NSMenuItem(title: "Check for Updates…", action: #selector(checkForUpdates), keyEquivalent: "")
+        update.target = self
+        menu.addItem(update)
+        let version = NSMenuItem(title: "Version \(Updater.shared.currentVersion)", action: nil, keyEquivalent: "")
+        version.isEnabled = false
+        menu.addItem(version)
+        menu.addItem(.separator())
         let quit = NSMenuItem(title: "Quit Eave", action: #selector(quitApp), keyEquivalent: "q")
         quit.target = self
         menu.addItem(quit)
@@ -311,6 +322,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     @objc private func openSettings() {
         AppState.shared.openSettings()
+    }
+
+    @objc private func checkForUpdates() {
+        Updater.shared.checkForUpdates()
     }
 
     @objc private func quitApp() {

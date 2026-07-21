@@ -3,5 +3,6 @@ bin/
 .build/
 .DS_Store
 Support/chatgpt-bridge/node_modules/
+Support/Sparkle/
 Support/AppIcon.iconset/
 .claude/

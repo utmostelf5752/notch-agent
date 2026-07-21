@@ -3,6 +3,8 @@ name: Build and publish DMG
 # Every push to main rebuilds the app and republishes it to the "latest"
 # release, so the download URL below always serves the newest build:
 #   https://github.com/utmostelf5752/notch-agent/releases/latest/download/Eave.dmg
+# The release also carries Eave.zip + appcast.xml, which installed apps poll
+# via Sparkle to update themselves in place.
 on:
   push:
     branches: [main]
@@ -20,22 +22,79 @@ jobs:
     runs-on: macos-14
     steps:
       - uses: actions/checkout@v4
+        with:
+          # build.sh derives CFBundleVersion from `git rev-list --count`,
+          # which needs full history.
+          fetch-depth: 0
+
+      - name: Import signing certificate
+        # A stable signing identity keeps macOS privacy grants (Screen
+        # Recording) attached across updates. Without the secrets, build.sh
+        # falls back to ad-hoc signing and every update resets those grants.
+        env:
+          CERT_P12: ${{ secrets.APPLE_DEV_CERT_P12 }}
+          CERT_PASSWORD: ${{ secrets.APPLE_DEV_CERT_PASSWORD }}
+        run: |
+          if [ -z "$CERT_P12" ]; then
+            echo "::warning::APPLE_DEV_CERT_P12 secret not set; building ad-hoc signed (privacy permissions will reset on update)."
+            exit 0
+          fi
+          KEYCHAIN="$RUNNER_TEMP/build.keychain-db"
+          KEYCHAIN_PASSWORD=$(uuidgen)
+          echo "$CERT_P12" | base64 -d > "$RUNNER_TEMP/cert.p12"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security import "$RUNNER_TEMP/cert.p12" -k "$KEYCHAIN" -P "$CERT_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN" > /dev/null
+          security list-keychains -d user -s "$KEYCHAIN" login.keychain-db
+          rm "$RUNNER_TEMP/cert.p12"
+          IDENTITY=$(security find-identity -v -p codesigning "$KEYCHAIN" \
+            | awk '/"Apple Development:/ { print $2; exit }')
+          if [ -z "$IDENTITY" ]; then
+            echo "::error::Certificate imported but no Apple Development identity found in it."
+            exit 1
+          fi
+          echo "EAVE_SIGN_IDENTITY=$IDENTITY" >> "$GITHUB_ENV"
 
       - name: Build app
         run: ./build.sh
 
-      - name: Package DMG
-        run: ./make-dmg.sh
+      - name: Package DMG and update archive
+        run: |
+          ./make-dmg.sh
+          # Sparkle installs from the zip; the DMG stays the human download.
+          ditto -c -k --keepParent build/Eave.app build/Eave.zip
+
+      - name: Generate signed appcast
+        env:
+          SPARKLE_ED_PRIVATE_KEY: ${{ secrets.SPARKLE_ED_PRIVATE_KEY }}
+        run: |
+          if [ -z "$SPARKLE_ED_PRIVATE_KEY" ]; then
+            echo "::warning::SPARKLE_ED_PRIVATE_KEY secret not set; skipping appcast — installed apps will NOT see this update."
+            exit 0
+          fi
+          mkdir build/appcast
+          cp build/Eave.zip build/appcast/
+          echo "$SPARKLE_ED_PRIVATE_KEY" | ./Support/Sparkle/bin/generate_appcast \
+            --ed-key-file - \
+            --download-url-prefix "https://github.com/$GITHUB_REPOSITORY/releases/latest/download/" \
+            --link "https://github.com/$GITHUB_REPOSITORY" \
+            build/appcast
 
       - name: Publish to latest release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          ASSETS="build/Eave.dmg build/Eave.zip"
+          [ -f build/appcast/appcast.xml ] && ASSETS="$ASSETS build/appcast/appcast.xml"
           # Rolling "latest" release: delete the old one (and its tag) so the
-          # tag moves to this commit, then recreate with the fresh DMG.
+          # tag moves to this commit, then recreate with the fresh assets.
+          # Sparkle clients that poll during the brief gap get a 404 or an
+          # EdDSA mismatch and simply retry on their next scheduled check.
           gh release delete latest --yes --cleanup-tag || true
-          gh release create latest build/Eave.dmg \
+          gh release create latest $ASSETS \
             --title "Latest build" \
             --target "$GITHUB_SHA" \
             --latest \
-            --notes "Automated build from ${GITHUB_SHA:0:7}. Download Eave.dmg below."
+            --notes "Automated build from ${GITHUB_SHA:0:7}. Download Eave.dmg below; installed apps auto-update via appcast.xml."

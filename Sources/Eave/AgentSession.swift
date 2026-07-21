@@ -808,6 +808,9 @@ final class AgentSession: ObservableObject {
     @Published var provider: AgentProvider = .claude {
         didSet {
             if usageLimit?.provider != provider { usageLimit = nil }
+            if oldValue != provider {
+                Telemetry.record("provider_switched", ["provider": provider.rawValue])
+            }
         }
     }
     // Missing key = provider default (no flag). Keyed per provider so
@@ -885,6 +888,10 @@ final class AgentSession: ObservableObject {
             do {
                 attachments.append(try ImageAttachmentNormalizer.jpegURL(for: url))
             } catch {
+                Telemetry.record("error", [
+                    "domain": "image_attachment",
+                    "code": String((error as NSError).code),
+                ])
                 messages.append(ChatMessage(
                     role: .error,
                     text: "Couldn't convert \(url.lastPathComponent) to JPEG — \(error.localizedDescription)."
@@ -1114,6 +1121,7 @@ final class AgentSession: ObservableObject {
         turnChars = 0
         let files = attachments
         attachments = []
+        Telemetry.record("message_sent", ["provider": provider.rawValue, "attachments": String(files.count)])
 
         if echo {
             messages.append(ChatMessage(role: .user, text: text, attachments: files))
@@ -2057,6 +2065,7 @@ final class AgentSession: ObservableObject {
 
     func restore(_ chat: ChatArchive) {
         cancel()
+        Telemetry.record("chat_restored", ["provider": chat.provider.rawValue])
         archiveCurrentIfNeeded()
         transcriptEpoch += 1
         currentArchiveID = chat.id
@@ -2151,12 +2160,21 @@ final class AgentSession: ObservableObject {
                     self.setStreamingAssistant(t)
                 case .error(let m):
                     self.isRunning = false
+                    Telemetry.record("error", [
+                        "domain": "provider.chatgpt",
+                        "kind": ChatGPTWeb.telemetryKind(forSendError: m),
+                    ])
                     self.appendError("Message failed — \(m)\nYour message was not sent.")
                 case .replyError(let m):
                     self.isRunning = false
+                    Telemetry.record("error", [
+                        "domain": "provider.chatgpt",
+                        "kind": ChatGPTWeb.telemetryKind(forReplyError: m),
+                    ])
                     self.appendError("Reply failed — \(m)\nYour message was sent, but the reply couldn't be read.")
                 case .limit(let detail, let uploadsOnly):
                     self.isRunning = false
+                    Telemetry.record("error", ["domain": "provider.chatgpt", "kind": "usage_limit"])
                     // The notice says the message wasn't sent — make the
                     // transcript and composer agree: withdraw the optimistic
                     // user bubble (and this turn's tool chips) and put the
@@ -2442,6 +2460,11 @@ final class AgentSession: ObservableObject {
     }
 
     private func presentProviderFailure(_ text: String, provider: AgentProvider) {
+        // Classified only — never forward `text` (provider stderr can contain paths).
+        Telemetry.record("error", [
+            "domain": "provider.\(provider.rawValue)",
+            "kind": Self.isUsageLimit(text) ? "usage_limit" : "failure",
+        ])
         if Self.isUsageLimit(text) {
             // Providers report one limit through both their structured stream
             // and process termination — one notice is enough. And a trailing

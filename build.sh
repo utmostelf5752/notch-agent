@@ -46,6 +46,8 @@ swiftc -O -o "$APP/Contents/MacOS/Eave" \
     Sources/Eave/GlobalShortcut.swift \
     Sources/Eave/AppDelegate.swift \
     Sources/Eave/AppState.swift \
+    Sources/Eave/Telemetry.swift \
+    Sources/Eave/ChatGPTSelectors.swift \
     Sources/Eave/AgentSession.swift \
     Sources/Eave/Updater.swift \
     Sources/Eave/CursorApprovals.swift \

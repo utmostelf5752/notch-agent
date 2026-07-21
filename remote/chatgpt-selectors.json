@@ -1,0 +1,34 @@
+{
+  "version": 1,
+  "composer": "#prompt-textarea, #mobile-composer-prompt, [data-testid='prompt-textarea'], div[role='textbox'], main [contenteditable='true'], [contenteditable='true'], main textarea, form textarea",
+  "send": [
+    "button[data-testid='send-button']",
+    "button[data-testid='composer-submit-button']",
+    "#composer-submit-button",
+    "button[aria-label*='Send']",
+    "button[aria-label*='Send message']",
+    "form button[type='submit']"
+  ],
+  "stop": [
+    "button[aria-label*='Stop']",
+    "button[data-testid='stop-button']",
+    "button[aria-label*='Stop generating']",
+    "button[aria-label*='Stop streaming']"
+  ],
+  "assistant": [
+    { "name": "data-message-author-role", "selector": "[data-message-author-role='assistant']" },
+    { "name": "data-message-role-visible", "selector": "[data-message-role='assistant']", "excludeHidden": true },
+    { "name": "data-message-role", "selector": "[data-message-role='assistant']" },
+    { "name": "data-testid-assistant", "selector": "[data-testid='assistant-message'], [data-testid='conversation-turn-assistant']" },
+    { "name": "data-turn", "selector": "[data-turn='assistant'], article[data-turn='assistant']" },
+    { "name": "aria-assistant", "selector": "[aria-label*='ChatGPT said'], [data-message-id][data-author='assistant']" }
+  ],
+  "user": [
+    { "name": "data-message-author-role", "selector": "[data-message-author-role='user']" },
+    { "name": "data-message-role-visible", "selector": "[data-message-role='user']", "excludeHidden": true },
+    { "name": "data-message-role", "selector": "[data-message-role='user']" },
+    { "name": "data-testid-user", "selector": "[data-testid='user-message'], [data-testid='conversation-turn-user']" },
+    { "name": "data-turn", "selector": "[data-turn='user'], article[data-turn='user']" },
+    { "name": "aria-user", "selector": "[aria-label*='You said'], [data-message-id][data-author='user']" }
+  ]
+}

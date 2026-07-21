@@ -29,6 +29,27 @@ final class ChatGPTWeb: NSObject, ObservableObject, WKUIDelegate, WKNavigationDe
         case done
     }
 
+    // Telemetry classification of the Eave-authored error strings emitted via
+    // onEvent(.error(...))/.replyError(...) below — keep the matched phrases in
+    // sync with those messages. "selector_missing" kinds are what the backend's
+    // chatgpt_error_spike view watches to detect a chatgpt.com UI change
+    // breaking everyone at once.
+    static func telemetryKind(forSendError message: String) -> String {
+        if message.contains("UI changed") || message.contains("UI may have changed") {
+            return "send_selector_missing"
+        }
+        let lower = message.lowercased()
+        if lower.contains("sign-in") || lower.contains("sign in") { return "auth_required" }
+        if lower.hasPrefix("timed out") { return "timeout" }
+        return "send_failure"
+    }
+
+    static func telemetryKind(forReplyError message: String) -> String {
+        if message.contains("UI changed") { return "reply_selector_missing" }
+        if message.lowercased().hasPrefix("timed out") { return "timeout" }
+        return "reply_failure"
+    }
+
     static let shared = ChatGPTWeb()
 
     @Published private(set) var accountStatus: AccountStatus = .checking
@@ -50,23 +71,17 @@ final class ChatGPTWeb: NSObject, ObservableObject, WKUIDelegate, WKNavigationDe
     private var awaitingAuthResult = false
     private var authResultChecksRemaining = 0
 
-    // Multi-strategy selectors: chatgpt.com renames data-testid / role attrs
-    // periodically. Prefer current attrs, then historical / structural fallbacks.
-    private static let sendSelector = "button[data-testid='send-button'], button[data-testid='composer-submit-button'], #composer-submit-button, button[aria-label*='Send'], button[aria-label*='Send message'], form button[type='submit']"
-    private static let stopSelector = "button[aria-label*='Stop'], button[data-testid='stop-button'], button[aria-label*='Stop generating'], button[aria-label*='Stop streaming']"
-
     // Shared DOM helpers injected into scrape/inject scripts. Single source of
     // truth for composer + message node resolution so fallbacks stay consistent.
-    private static let domHelpersJS = #"""
+    // The selector-dependent helpers (__composer, __assistantQuery, __userQuery,
+    // __sendButton, __stopButton) are generated from ChatGPTSelectors.current,
+    // which can be updated remotely when chatgpt.com's DOM changes.
+    private static var domHelpersJS: String {
+        domHelpersHeadJS + "\n" + ChatGPTSelectors.runtimeJS(ChatGPTSelectors.current) + "\n" + domHelpersTailJS
+    }
+
+    private static let domHelpersHeadJS = #"""
     const __visible = (el) => !!(el && el.getClientRects && el.getClientRects().length > 0);
-    const __composer = () => {
-      const cands = document.querySelectorAll(
-        "#prompt-textarea, #mobile-composer-prompt, [data-testid='prompt-textarea'], div[role='textbox'], " +
-        "main [contenteditable='true'], [contenteditable='true'], main textarea, form textarea"
-      );
-      for (const el of cands) { if (__visible(el)) return el; }
-      return null;
-    };
     const __nodesByStrategies = (strategies) => {
       for (const s of strategies) {
         const nodes = s.fn();
@@ -74,22 +89,9 @@ final class ChatGPTWeb: NSObject, ObservableObject, WKUIDelegate, WKNavigationDe
       }
       return { nodes: [], strategy: "none" };
     };
-    const __assistantQuery = () => __nodesByStrategies([
-      { name: "data-message-author-role", fn: () => document.querySelectorAll("[data-message-author-role='assistant']") },
-      { name: "data-message-role-visible", fn: () => Array.from(document.querySelectorAll("[data-message-role='assistant']")).filter(n => !n.closest("[hidden]")) },
-      { name: "data-message-role", fn: () => document.querySelectorAll("[data-message-role='assistant']") },
-      { name: "data-testid-assistant", fn: () => document.querySelectorAll("[data-testid='assistant-message'], [data-testid='conversation-turn-assistant']") },
-      { name: "data-turn", fn: () => document.querySelectorAll("[data-turn='assistant'], article[data-turn='assistant']") },
-      { name: "aria-assistant", fn: () => document.querySelectorAll("[aria-label*='ChatGPT said'], [data-message-id][data-author='assistant']") }
-    ]);
-    const __userQuery = () => __nodesByStrategies([
-      { name: "data-message-author-role", fn: () => document.querySelectorAll("[data-message-author-role='user']") },
-      { name: "data-message-role-visible", fn: () => Array.from(document.querySelectorAll("[data-message-role='user']")).filter(n => !n.closest("[hidden]")) },
-      { name: "data-message-role", fn: () => document.querySelectorAll("[data-message-role='user']") },
-      { name: "data-testid-user", fn: () => document.querySelectorAll("[data-testid='user-message'], [data-testid='conversation-turn-user']") },
-      { name: "data-turn", fn: () => document.querySelectorAll("[data-turn='user'], article[data-turn='user']") },
-      { name: "aria-user", fn: () => document.querySelectorAll("[aria-label*='You said'], [data-message-id][data-author='user']") }
-    ]);
+    """#
+
+    private static let domHelpersTailJS = #"""
     const __normalizeMarkdown = (value) => String(value || "")
       .split(String.fromCharCode(160)).join(" ")
       .split("\r\n").join("\n")
@@ -247,38 +249,6 @@ final class ChatGPTWeb: NSObject, ObservableObject, WKUIDelegate, WKNavigationDe
       } catch (_) {
         return plain;
       }
-    };
-    const __sendButton = () => {
-      const sels = [
-        "button[data-testid='send-button']",
-        "button[data-testid='composer-submit-button']",
-        "#composer-submit-button",
-        "button[aria-label*='Send']",
-        "button[aria-label*='Send message']",
-        "form button[type='submit']"
-      ];
-      for (const s of sels) {
-        const el = document.querySelector(s);
-        if (el && __visible(el)) return el;
-      }
-      for (const s of sels) {
-        const el = document.querySelector(s);
-        if (el) return el;
-      }
-      return null;
-    };
-    const __stopButton = () => {
-      const sels = [
-        "button[aria-label*='Stop']",
-        "button[data-testid='stop-button']",
-        "button[aria-label*='Stop generating']",
-        "button[aria-label*='Stop streaming']"
-      ];
-      for (const s of sels) {
-        const el = document.querySelector(s);
-        if (el) return el;
-      }
-      return null;
     };
     const __isStreaming = () => !!__stopButton() || !!document.querySelector("[data-streaming-dot]");
     const __probeUI = () => {

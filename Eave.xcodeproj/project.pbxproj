@@ -11,6 +11,8 @@
 		31210C8816D35460F7484282 /* Sparkle.framework in Embed Frameworks */ = {isa = PBXBuildFile; fileRef = DCB456E8D5F7420580212FD4 /* Sparkle.framework */; settings = {ATTRIBUTES = (CodeSignOnCopy, RemoveHeadersOnCopy, ); }; };
 		43A345061120DED3E9DB641B /* MarkdownText.swift in Sources */ = {isa = PBXBuildFile; fileRef = D219A8A6C0732C766F944131 /* MarkdownText.swift */; };
 		5A83A89C194B4CBDD5EBB53A /* CursorApprovals.swift in Sources */ = {isa = PBXBuildFile; fileRef = 910472E102846F4FE8E8A4FD /* CursorApprovals.swift */; };
+		4E1A7C93D02B85F1A6C40912 /* Telemetry.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9F30C8A241D57BE20C61A833 /* Telemetry.swift */; };
+		7D48E2A1B93C60F5D1A2E874 /* ChatGPTSelectors.swift in Sources */ = {isa = PBXBuildFile; fileRef = C5F91B3E27A84D06E3B7C215 /* ChatGPTSelectors.swift */; };
 		787859ECC511A895ED7CB92A /* AppState.swift in Sources */ = {isa = PBXBuildFile; fileRef = D72061058B7078617AE21053 /* AppState.swift */; };
 		7CA362EE858E60E2E040FAB5 /* AppDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2CD822116E0AD0EFF607E7C4 /* AppDelegate.swift */; };
 		99867582CC31A6C63ABFD281 /* main.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6AC734838EE8D16A49FBDDBE /* main.swift */; };
@@ -51,6 +53,8 @@
 		BCCEF1502A7E59CA3F04CB76 /* GlobalShortcut.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GlobalShortcut.swift; sourceTree = "<group>"; };
 		D219A8A6C0732C766F944131 /* MarkdownText.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MarkdownText.swift; sourceTree = "<group>"; };
 		D72061058B7078617AE21053 /* AppState.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppState.swift; sourceTree = "<group>"; };
+		9F30C8A241D57BE20C61A833 /* Telemetry.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Telemetry.swift; sourceTree = "<group>"; };
+		C5F91B3E27A84D06E3B7C215 /* ChatGPTSelectors.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatGPTSelectors.swift; sourceTree = "<group>"; };
 		DCB456E8D5F7420580212FD4 /* Sparkle.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Sparkle.framework; path = Support/Sparkle/Sparkle.framework; sourceTree = "<group>"; };
 		E08907AF743818A504A6CD06 /* ChatGPTWeb.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatGPTWeb.swift; sourceTree = "<group>"; };
 		E6D1A318B18CE03E3C75E349 /* AgentSession.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AgentSession.swift; sourceTree = "<group>"; };
@@ -74,12 +78,14 @@
 				E6D1A318B18CE03E3C75E349 /* AgentSession.swift */,
 				2CD822116E0AD0EFF607E7C4 /* AppDelegate.swift */,
 				D72061058B7078617AE21053 /* AppState.swift */,
+				C5F91B3E27A84D06E3B7C215 /* ChatGPTSelectors.swift */,
 				E08907AF743818A504A6CD06 /* ChatGPTWeb.swift */,
 				6CF6E3B6CC26C000AE79DC23 /* CodexAppServer.swift */,
 				910472E102846F4FE8E8A4FD /* CursorApprovals.swift */,
 				BCCEF1502A7E59CA3F04CB76 /* GlobalShortcut.swift */,
 				6AC734838EE8D16A49FBDDBE /* main.swift */,
 				D219A8A6C0732C766F944131 /* MarkdownText.swift */,
+				9F30C8A241D57BE20C61A833 /* Telemetry.swift */,
 				12B1EE0C17574F8DA01DBAB9 /* Updater.swift */,
 				8859037E38BFBBB86E59104C /* Views.swift */,
 			);
@@ -232,6 +238,8 @@
 				B41F6FCF1D66A1D3A8B38EB2 /* ChatGPTWeb.swift in Sources */,
 				A042FB50B4812481DBA704FC /* CodexAppServer.swift in Sources */,
 				5A83A89C194B4CBDD5EBB53A /* CursorApprovals.swift in Sources */,
+				4E1A7C93D02B85F1A6C40912 /* Telemetry.swift in Sources */,
+				7D48E2A1B93C60F5D1A2E874 /* ChatGPTSelectors.swift in Sources */,
 				F9B3EA7C97AB5F501C50A03F /* GlobalShortcut.swift in Sources */,
 				43A345061120DED3E9DB641B /* MarkdownText.swift in Sources */,
 				AB1D3A44BD909788A394F49C /* Updater.swift in Sources */,

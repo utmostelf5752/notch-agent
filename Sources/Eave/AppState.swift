@@ -184,6 +184,9 @@ final class AppState: ObservableObject {
 
     @Published var notchStyle: NotchStyle {
         didSet {
+            if oldValue != notchStyle {
+                Telemetry.record("setting_changed", ["key": "notchStyle", "value": notchStyle.rawValue])
+            }
             UserDefaults.standard.set(notchStyle.rawValue, forKey: "notchStyle")
             stealthComposerOpen = true
             syncNotchFrame(animated: true)
@@ -207,6 +210,9 @@ final class AppState: ObservableObject {
 
     @Published var panelStyle: PanelStyle {
         didSet {
+            if oldValue != panelStyle {
+                Telemetry.record("setting_changed", ["key": "panelStyle", "value": panelStyle.rawValue])
+            }
             UserDefaults.standard.set(panelStyle.rawValue, forKey: "panelStyle")
             applyPanelBlur()
         }

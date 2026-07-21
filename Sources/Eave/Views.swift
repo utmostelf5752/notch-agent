@@ -90,12 +90,14 @@ enum ScreenshotCapture {
             DispatchQueue.main.async {
                 restoreAppChrome()
                 if FileManager.default.fileExists(atPath: path) {
+                    Telemetry.record("screenshot_captured", ["target": target.fileLabel])
                     state.session.addAttachments([URL(fileURLWithPath: path)])
                     if let prompt = prompt {
                         state.silentTurn = true
                         state.session.send(prompt)
                     }
                 } else {
+                    Telemetry.record("error", ["domain": "screenshot", "kind": "permission_denied"])
                     state.session.messages.append(ChatMessage(
                         role: .error,
                         text: "Screenshot failed — grant Screen Recording permission to Eave in System Settings > Privacy."

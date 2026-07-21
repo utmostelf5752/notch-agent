@@ -50,6 +50,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         state.startBackgroundObservers()
         state.logGeometry()
         _ = Updater.shared
+        ChatGPTSelectors.startRefreshing()
+        Telemetry.start(settingsSnapshot: {
+            [
+                "notch_style": AppState.shared.notchStyle.rawValue,
+                "panel_style": AppState.shared.panelStyle.rawValue,
+                "provider": AppState.shared.session.provider.rawValue,
+                "screen_share_protection": String(AppState.shared.screenShareProtectionEnabled),
+            ]
+        })
     }
 
     // An accessory app has no menu bar, but key equivalents still route
@@ -390,6 +399,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     func applicationWillTerminate(_ notification: Notification) {
         // Keep the in-progress conversation across restarts.
         AppState.shared.session.archiveCurrentIfNeeded()
+        Telemetry.flushBeforeQuit()
     }
 
     // Losing key status alone no longer collapses the panel (the outside-click

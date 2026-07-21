@@ -808,11 +808,14 @@ final class AgentSession: ObservableObject {
     @Published var provider: AgentProvider = .claude {
         didSet {
             if usageLimit?.provider != provider { usageLimit = nil }
-            if oldValue != provider {
+            // Restores set provider as a side effect and already report
+            // chat_restored; counting them would pollute provider_switched.
+            if oldValue != provider, !isRestoringChat {
                 Telemetry.record("provider_switched", ["provider": provider.rawValue])
             }
         }
     }
+    private var isRestoringChat = false
     // Missing key = provider default (no flag). Keyed per provider so
     // switching between Claude and Codex remembers each one's choices.
     @Published var modelChoice: [AgentProvider: String] = [
@@ -2066,6 +2069,8 @@ final class AgentSession: ObservableObject {
     func restore(_ chat: ChatArchive) {
         cancel()
         Telemetry.record("chat_restored", ["provider": chat.provider.rawValue])
+        isRestoringChat = true
+        defer { isRestoringChat = false }
         archiveCurrentIfNeeded()
         transcriptEpoch += 1
         currentArchiveID = chat.id

@@ -19,7 +19,9 @@ concurrency:
 
 jobs:
   build:
-    runs-on: macos-14
+    # macos-15 for the Xcode 16 / macOS 15 SDK: the transcript's scroll
+    # tracking uses onScrollGeometryChange, which older SDKs can't compile.
+    runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
         with:

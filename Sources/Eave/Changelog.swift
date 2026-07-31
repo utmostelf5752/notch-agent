@@ -27,6 +27,18 @@ struct Changelog: Codable, Equatable {
     // an exact copy of this. Newest release first.
     static let builtin = Changelog(entries: [
         Entry(
+            version: "0.1.39",
+            date: "2026-07-31",
+            notes: [
+                "Scrolling up in the chat pauses auto-scroll so you can read while a reply streams in below; scroll back to the bottom or send a message to resume following.",
+                "ChatGPT replies now render tables natively.",
+                "ChatGPT replies now show images and charts instead of dropping them.",
+                "Source citations in ChatGPT replies show as clean labels instead of leaking raw link text.",
+                "The current tool step shows a spinner while it runs.",
+                "You can attach files while a response is still running.",
+            ]
+        ),
+        Entry(
             version: "0.1.38",
             date: "2026-07-21",
             notes: [

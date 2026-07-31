@@ -124,6 +124,113 @@ final class ChatGPTWeb: NSObject, ObservableObject, WKUIDelegate, WKNavigationDe
     const __serializeChildren = (el) => Array.from(el.childNodes)
       .map(child => __serializeMarkdownNode(child))
       .join("");
+    const __escapeMdCell = (value) => String(value || "")
+      .replace(/\|/g, "\\|")
+      .replace(/\n+/g, " ")
+      .trim();
+    const __serializeTable = (table) => {
+      const rows = Array.from(table.querySelectorAll(":scope > thead > tr, :scope > tbody > tr, :scope > tr"));
+      if (!rows.length) return "";
+      const matrix = rows.map(row => {
+        const cells = Array.from(row.children).filter(c => c.tagName === "TH" || c.tagName === "TD");
+        return cells.map(cell => __escapeMdCell(__serializeChildren(cell)));
+      }).filter(r => r.some(cell => cell.length));
+      if (!matrix.length) return "";
+      const width = Math.max(...matrix.map(r => r.length));
+      const norm = matrix.map(r => {
+        const copy = r.slice();
+        while (copy.length < width) copy.push("");
+        return copy;
+      });
+      const header = norm[0];
+      const body = norm.slice(1);
+      const line = (cells) => "| " + cells.join(" | ") + " |";
+      const sep = "| " + header.map(() => "---").join(" | ") + " |";
+      const bodyLines = body.map(line).join("\n");
+      return "\n\n" + line(header) + "\n" + sep + (bodyLines ? "\n" + bodyLines : "") + "\n\n";
+    };
+    // Citation chips append "+1" when multiple sources share a claim. Keep the
+    // primary label; the overflow counter is noise in plain markdown links.
+    const __stripCiteOverflow = (value) => String(value || "").replace(/\s*\+\d+\s*$/g, "").trim();
+    const __chartSize = (el) => {
+      const rect = el.getBoundingClientRect ? el.getBoundingClientRect() : { width: 0, height: 0 };
+      const w = Math.max(
+        Math.round(rect.width || 0),
+        Number(el.getAttribute("width")) || 0,
+        el.width || 0,
+        el.naturalWidth || 0
+      );
+      const h = Math.max(
+        Math.round(rect.height || 0),
+        Number(el.getAttribute("height")) || 0,
+        el.height || 0,
+        el.naturalHeight || 0
+      );
+      return { w, h };
+    };
+    // Skip glyph/icon SVGs; keep plot-sized canvases and charts.
+    const __isChartSized = (el) => {
+      const { w, h } = __chartSize(el);
+      return w >= 96 && h >= 72;
+    };
+    const __mdImage = (alt, src) => {
+      if (!src) return "";
+      const label = String(alt || "Chart").replace(/[\[\]]/g, "");
+      return "\n\n![" + label + "](" + String(src).split(")").join("%29") + ")\n\n";
+    };
+    const __canvasToPng = (canvas) => {
+      try {
+        if (!canvas || !canvas.toDataURL) return "";
+        const url = canvas.toDataURL("image/png");
+        return url && url.startsWith("data:image/") ? url : "";
+      } catch (_) { return ""; }
+    };
+    const __serializeChartCanvas = (canvas) => {
+      if (!__isChartSized(canvas)) return "";
+      // Avoid shipping huge base64 payloads on every streaming poll.
+      if (typeof __isStreaming === "function" && __isStreaming()) return "\n\n*[Chart]*\n\n";
+      const url = __canvasToPng(canvas);
+      return url ? __mdImage("Chart", url) : "";
+    };
+    const __serializeChartSVG = (svg) => {
+      if (!__isChartSized(svg)) return "";
+      if (typeof __isStreaming === "function" && __isStreaming()) return "\n\n*[Chart]*\n\n";
+      try {
+        const { w, h } = __chartSize(svg);
+        const clone = svg.cloneNode(true);
+        clone.setAttribute("xmlns", "http://www.w3.org/2000/svg");
+        if (!clone.getAttribute("width")) clone.setAttribute("width", String(w));
+        if (!clone.getAttribute("height")) clone.setAttribute("height", String(h));
+        const xml = new XMLSerializer().serializeToString(clone);
+        const b64 = btoa(unescape(encodeURIComponent(xml)));
+        return __mdImage("Chart", "data:image/svg+xml;base64," + b64);
+      } catch (_) { return ""; }
+    };
+    const __serializeImage = (img) => {
+      const alt = img.getAttribute("alt") || "Image";
+      let src = img.currentSrc || img.src || img.getAttribute("src") || "";
+      if (!src) return alt;
+      const { w, h } = __chartSize(img);
+      // Tiny decorative images → alt text only.
+      if ((w && w < 48) || (h && h < 48)) return alt === "Image" ? "" : alt;
+      if (src.startsWith("blob:") || (src.startsWith("data:") && !src.startsWith("data:image/svg+xml"))) {
+        if (typeof __isStreaming === "function" && __isStreaming()) {
+          return src.startsWith("blob:") ? (alt === "Image" ? "" : alt) : __mdImage(alt, src);
+        }
+        try {
+          if (img.naturalWidth >= 48 && img.naturalHeight >= 48) {
+            const c = document.createElement("canvas");
+            c.width = img.naturalWidth;
+            c.height = img.naturalHeight;
+            c.getContext("2d").drawImage(img, 0, 0);
+            const png = __canvasToPng(c);
+            if (png) return __mdImage(alt, png);
+          }
+        } catch (_) {}
+        if (src.startsWith("blob:")) return alt === "Image" ? "" : alt;
+      }
+      return __mdImage(alt, src);
+    };
     const __serializeList = (list, ordered) => {
       const items = Array.from(list.children).filter(child => child.tagName === "LI");
       const lines = [];
@@ -152,7 +259,7 @@ final class ChatGPTWeb: NSObject, ObservableObject, WKUIDelegate, WKNavigationDe
       if (node.nodeType !== Node.ELEMENT_NODE) return "";
       const el = node;
       const tag = el.tagName;
-      if (["SCRIPT", "STYLE", "NOSCRIPT", "TEMPLATE", "SVG", "BUTTON", "INPUT", "TEXTAREA"].includes(tag)) return "";
+      if (["SCRIPT", "STYLE", "NOSCRIPT", "TEMPLATE", "BUTTON", "INPUT", "TEXTAREA"].includes(tag)) return "";
       if (el.getAttribute("aria-hidden") === "true") return "";
       if (el.matches("[data-message-attribution], [role='status'], [data-streaming-placeholder]")) return "";
       if (/(?:^|[_\s-])sr-?only(?:[_\s-]|$)/i.test(String(el.className || ""))) return "";
@@ -177,6 +284,9 @@ final class ChatGPTWeb: NSObject, ObservableObject, WKUIDelegate, WKNavigationDe
       if (tag === "BR") return "\n";
       if (tag === "HR") return "\n\n---\n\n";
       if (tag === "UL" || tag === "OL") return __serializeList(el, tag === "OL");
+      if (tag === "TABLE") return __serializeTable(el);
+      if (tag === "SVG") return __serializeChartSVG(el);
+      if (tag === "CANVAS") return __serializeChartCanvas(el);
       if (tag === "BLOCKQUOTE") {
         const text = __normalizeMarkdown(__serializeChildren(el));
         return text ? text.split("\n").map(line => "> " + line).join("\n") + "\n\n" : "";
@@ -204,12 +314,18 @@ final class ChatGPTWeb: NSObject, ObservableObject, WKUIDelegate, WKNavigationDe
         return text ? "~~" + text + "~~" : "";
       }
       if (tag === "A") {
-        const text = __serializeChildren(el).trim();
+        const text = __stripCiteOverflow(__serializeChildren(el));
         const href = el.href || el.getAttribute("href") || "";
-        if (!text || !href || href.toLowerCase().startsWith("javascript:")) return text;
+        if (!text) return "";
+        if (!href || href.toLowerCase().startsWith("javascript:")) return text;
+        // Citation / source chips — label only. Full markdown links leak raw
+        // `](https://…?utm_source=chatgpt.com)` text in the panel.
+        const isCitation = /[?&]utm_source=chatgpt\.com\b/i.test(href)
+          || !!el.closest("[data-testid*='citation'], [data-cite]");
+        if (isCitation) return text;
         return "[" + text + "](" + href.split(")").join("%29") + ")";
       }
-      if (tag === "IMG") return el.getAttribute("alt") || "";
+      if (tag === "IMG") return __serializeImage(el);
 
       return __serializeChildren(el);
     };

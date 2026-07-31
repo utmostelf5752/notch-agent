@@ -1,5 +1,6 @@
 import AppKit
 import SwiftUI
+import WebKit
 
 // Lightweight Markdown for assistant replies (Claude / Codex / ChatGPT / any
 // future provider). No package deps — fence-aware block parse + Foundation's
@@ -12,6 +13,8 @@ enum MarkdownBlock: Equatable {
     case list(ordered: Bool, items: [String])
     case quote(String)
     case rule
+    case table(headers: [String], rows: [[String]])
+    case image(alt: String, url: String)
 }
 
 enum Markdown {
@@ -57,6 +60,33 @@ enum Markdown {
                 continue
             }
 
+            if let image = parseImageLine(trimmed) {
+                blocks.append(.image(alt: image.alt, url: image.url))
+                i += 1
+                continue
+            }
+
+            if isTableRow(trimmed),
+               i + 1 < lines.count,
+               isTableSeparator(lines[i + 1].trimmingCharacters(in: .whitespaces)) {
+                let headers = splitTableRow(trimmed)
+                i += 2 // skip header + separator
+                var rows: [[String]] = []
+                while i < lines.count {
+                    let t = lines[i].trimmingCharacters(in: .whitespaces)
+                    if !isTableRow(t) { break }
+                    var cells = splitTableRow(t)
+                    while cells.count < headers.count { cells.append("") }
+                    if cells.count > headers.count {
+                        cells = Array(cells.prefix(headers.count))
+                    }
+                    rows.append(cells)
+                    i += 1
+                }
+                blocks.append(.table(headers: headers, rows: rows))
+                continue
+            }
+
             if trimmed.hasPrefix(">") {
                 var parts: [String] = []
                 while i < lines.count {
@@ -94,7 +124,10 @@ enum Markdown {
                 let t = next.trimmingCharacters(in: .whitespaces)
                 if t.isEmpty { break }
                 if t.hasPrefix("```") || parseHeading(t) != nil || isRule(t)
-                    || t.hasPrefix(">") || parseListItem(t) != nil {
+                    || t.hasPrefix(">") || parseListItem(t) != nil
+                    || parseImageLine(t) != nil
+                    || (isTableRow(t) && i + 1 < lines.count
+                        && isTableSeparator(lines[i + 1].trimmingCharacters(in: .whitespaces))) {
                     break
                 }
                 parts.append(next)
@@ -142,6 +175,45 @@ enum Markdown {
         let afterDot = line.index(after: i)
         guard afterDot < line.endIndex, line[afterDot] == " " else { return nil }
         return (true, String(line[line.index(after: afterDot)...]))
+    }
+
+    private static func isTableRow(_ line: String) -> Bool {
+        line.hasPrefix("|") && line.hasSuffix("|") && line.count >= 3
+    }
+
+    private static func isTableSeparator(_ line: String) -> Bool {
+        guard isTableRow(line) else { return false }
+        let inner = line.dropFirst().dropLast()
+        let cells = inner.split(separator: "|", omittingEmptySubsequences: false)
+        guard !cells.isEmpty else { return false }
+        return cells.allSatisfy { cell in
+            let s = cell.trimmingCharacters(in: .whitespaces)
+            guard !s.isEmpty else { return false }
+            return s.allSatisfy { $0 == "-" || $0 == ":" }
+        }
+    }
+
+    private static func splitTableRow(_ line: String) -> [String] {
+        var inner = line
+        if inner.hasPrefix("|") { inner = String(inner.dropFirst()) }
+        if inner.hasSuffix("|") { inner = String(inner.dropLast()) }
+        return inner.split(separator: "|", omittingEmptySubsequences: false)
+            .map { $0.trimmingCharacters(in: .whitespaces).replacingOccurrences(of: "\\|", with: "|") }
+    }
+
+    /// Whole-line image: `![alt](url)` — url may be a long data: URI.
+    private static func parseImageLine(_ line: String) -> (alt: String, url: String)? {
+        guard line.hasPrefix("![") else { return nil }
+        guard let altEnd = line.firstIndex(of: "]") else { return nil }
+        let altStart = line.index(line.startIndex, offsetBy: 2)
+        let alt = String(line[altStart..<altEnd])
+        var i = line.index(after: altEnd)
+        guard i < line.endIndex, line[i] == "(" else { return nil }
+        i = line.index(after: i)
+        guard line.last == ")" else { return nil }
+        let url = String(line[i..<line.index(before: line.endIndex)])
+        guard !url.isEmpty else { return nil }
+        return (alt, url.replacingOccurrences(of: "%29", with: ")"))
     }
 
     // Inline markdown for prose. Math first so $…$ becomes Unicode before
@@ -220,6 +292,12 @@ struct MarkdownView: View {
                 .fill(Color.white.opacity(0.12))
                 .frame(height: 1)
                 .padding(.vertical, 4 * scale)
+
+        case .table(let headers, let rows):
+            MarkdownTableView(headers: headers, rows: rows, scale: scale)
+
+        case .image(let alt, let url):
+            MarkdownImageView(alt: alt, url: url, scale: scale)
         }
     }
 
@@ -230,6 +308,159 @@ struct MarkdownView: View {
             .textSelection(.enabled)
             .fixedSize(horizontal: false, vertical: true)
             .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
+private struct MarkdownTableView: View {
+    let headers: [String]
+    let rows: [[String]]
+    var scale: CGFloat = 1
+
+    var body: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            Grid(alignment: .leading, horizontalSpacing: 14 * scale, verticalSpacing: 0) {
+                GridRow {
+                    ForEach(Array(headers.enumerated()), id: \.offset) { _, header in
+                        cell(header, size: 11 * scale, weight: .semibold, opacity: 0.5)
+                    }
+                }
+                Rectangle()
+                    .fill(Color.white.opacity(0.1))
+                    .frame(height: 1)
+                    .gridCellColumns(max(headers.count, 1))
+                    .padding(.vertical, 4 * scale)
+
+                ForEach(Array(rows.enumerated()), id: \.offset) { _, row in
+                    GridRow {
+                        ForEach(Array(row.enumerated()), id: \.offset) { _, value in
+                            cell(value, size: 12 * scale, weight: .regular, opacity: 0.9)
+                        }
+                    }
+                    .padding(.vertical, 3 * scale)
+                }
+            }
+            .padding(.vertical, 2 * scale)
+        }
+    }
+
+    private func cell(_ raw: String, size: CGFloat, weight: Font.Weight, opacity: Double) -> some View {
+        Text(Markdown.inlineAttributed(raw))
+            .font(.system(size: size, weight: weight))
+            .foregroundStyle(.white.opacity(opacity))
+            .textSelection(.enabled)
+            .fixedSize(horizontal: true, vertical: true)
+            .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
+private struct MarkdownImageView: View {
+    let alt: String
+    let url: String
+    var scale: CGFloat = 1
+
+    var body: some View {
+        Group {
+            if let image = Self.bitmapImage(from: url) {
+                Image(nsImage: image)
+                    .resizable()
+                    .interpolation(.high)
+                    .aspectRatio(contentMode: .fit)
+                    .frame(maxWidth: .infinity, maxHeight: 280 * scale, alignment: .leading)
+            } else if let svg = Self.svgMarkup(from: url) {
+                SVGWebView(svg: svg)
+                    .frame(maxWidth: .infinity)
+                    .frame(height: 220 * scale)
+            } else if let remote = URL(string: url),
+                      let scheme = remote.scheme?.lowercased(),
+                      scheme == "http" || scheme == "https" {
+                AsyncImage(url: remote) { phase in
+                    switch phase {
+                    case .success(let image):
+                        image
+                            .resizable()
+                            .aspectRatio(contentMode: .fit)
+                            .frame(maxWidth: .infinity, maxHeight: 280 * scale, alignment: .leading)
+                    case .failure:
+                        fallback
+                    case .empty:
+                        ProgressView()
+                            .controlSize(.small)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(.vertical, 8 * scale)
+                    @unknown default:
+                        fallback
+                    }
+                }
+            } else {
+                fallback
+            }
+        }
+        .clipShape(RoundedRectangle(cornerRadius: 8 * scale, style: .continuous))
+        .accessibilityLabel(alt.isEmpty ? "Image" : alt)
+    }
+
+    private var fallback: some View {
+        Text(alt.isEmpty ? "Image" : alt)
+            .font(.system(size: 12 * scale))
+            .foregroundStyle(.white.opacity(0.45))
+            .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private static func bitmapImage(from urlString: String) -> NSImage? {
+        guard urlString.hasPrefix("data:image/"),
+              !urlString.hasPrefix("data:image/svg+xml") else { return nil }
+        guard let comma = urlString.firstIndex(of: ",") else { return nil }
+        let meta = urlString[..<comma]
+        let payload = String(urlString[urlString.index(after: comma)...])
+        let data: Data?
+        if meta.contains(";base64") {
+            data = Data(base64Encoded: payload, options: .ignoreUnknownCharacters)
+        } else {
+            data = payload.removingPercentEncoding?.data(using: .utf8)
+        }
+        guard let data, let image = NSImage(data: data), image.size.width > 0 else { return nil }
+        return image
+    }
+
+    private static func svgMarkup(from urlString: String) -> String? {
+        guard urlString.hasPrefix("data:image/svg+xml") else { return nil }
+        guard let comma = urlString.firstIndex(of: ",") else { return nil }
+        let meta = urlString[..<comma]
+        let payload = String(urlString[urlString.index(after: comma)...])
+        if meta.contains(";base64") {
+            guard let data = Data(base64Encoded: payload, options: .ignoreUnknownCharacters),
+                  let xml = String(data: data, encoding: .utf8) else { return nil }
+            return xml
+        }
+        return payload.removingPercentEncoding
+    }
+}
+
+private struct SVGWebView: NSViewRepresentable {
+    let svg: String
+
+    func makeNSView(context: Context) -> WKWebView {
+        let config = WKWebViewConfiguration()
+        config.suppressesIncrementalRendering = true
+        let webView = WKWebView(frame: .zero, configuration: config)
+        webView.setValue(false, forKey: "drawsBackground")
+        load(svg, into: webView)
+        return webView
+    }
+
+    func updateNSView(_ webView: WKWebView, context: Context) {
+        load(svg, into: webView)
+    }
+
+    private func load(_ svg: String, into webView: WKWebView) {
+        let html = """
+        <!doctype html><html><head><meta charset="utf-8">
+        <style>
+          html, body { margin: 0; padding: 0; background: transparent; overflow: hidden; }
+          svg { display: block; width: 100%; height: auto; max-height: 100vh; }
+        </style></head><body>\(svg)</body></html>
+        """
+        webView.loadHTMLString(html, baseURL: nil)
     }
 }
 

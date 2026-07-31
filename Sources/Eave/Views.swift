@@ -641,12 +641,70 @@ struct LiveDot: View {
     }
 }
 
+// Auto-scroll gate for the transcript. The transcript follows streaming
+// output only while the user is at the bottom; scrolling up disengages the
+// follow so they can read while generation continues below, and scrolling
+// back to the bottom (or sending a new message) re-engages it.
+//
+// User intent comes from raw scroll-wheel events, not from observing the
+// scroll view: SwiftUI's ScrollView is no longer NSScrollView-backed on
+// modern macOS (verified: the superview chain from a background
+// representable ends at AppKitPlatformViewHost), so AppKit-side observation
+// finds nothing, and offset observation alone can't tell a user scroll from
+// content growing at the bottom. Wheel events are unambiguous: only the
+// user produces them.
+private final class ChatScrollIntent {
+    // Kept fresh by onScrollGeometryChange (macOS 15+). On older systems it
+    // stays 0, which degrades to: any downward scroll re-engages the follow.
+    var distanceFromBottom: CGFloat = 0
+    var onUserScroll: ((_ up: Bool) -> Void)?
+    private var monitor: Any?
+
+    func install() {
+        guard monitor == nil else { return }
+        monitor = NSEvent.addLocalMonitorForEvents(matching: .scrollWheel) { [weak self] event in
+            if let self, event.window === AppState.shared.chatPanel {
+                let dy = event.scrollingDeltaY
+                if dy > 0.1 {
+                    self.onUserScroll?(true)
+                } else if dy < -0.1 {
+                    self.onUserScroll?(false)
+                }
+            }
+            return event
+        }
+    }
+
+    deinit {
+        if let monitor { NSEvent.removeMonitor(monitor) }
+    }
+}
+
+private struct ChatScrollDistanceReader: ViewModifier {
+    let onChange: (CGFloat) -> Void
+
+    func body(content: Content) -> some View {
+        if #available(macOS 15.0, *) {
+            content.onScrollGeometryChange(for: CGFloat.self) { geo in
+                max(0, geo.contentSize.height + geo.contentInsets.bottom
+                    - geo.contentOffset.y - geo.containerSize.height)
+            } action: { _, distance in
+                onChange(distance)
+            }
+        } else {
+            content
+        }
+    }
+}
+
 struct ChatRootView: View {
     @ObservedObject var state: AppState
     @ObservedObject var session: AgentSession
     @ObservedObject private var chatgptWeb = ChatGPTWeb.shared
     @FocusState private var inputFocused: Bool
     @State private var inspectedStep: ChatMessage?
+    @State private var followsLatestMessage = true
+    @State private var scrollIntent = ChatScrollIntent()
 
     private let cornerRadius: CGFloat = 24
     private let accent = Color(red: 10/255, green: 132/255, blue: 1)
@@ -1072,7 +1130,14 @@ struct ChatRootView: View {
                     ForEach(displayItems) { item in
                         switch item {
                         case .message(let message):
-                            MessageBubble(message: message, scale: s, onInspect: { inspectedStep = $0 })
+                            MessageBubble(
+                                message: message,
+                                scale: s,
+                                isActiveTool: session.isRunning
+                                    && message.role == .tool
+                                    && session.messages.last?.id == message.id,
+                                onInspect: { inspectedStep = $0 }
+                            )
                                 .id(item.id)
                         case .steps(let run):
                             StepsGroup(
@@ -1088,13 +1153,15 @@ struct ChatRootView: View {
                                 },
                                 onInspect: { inspectedStep = $0 }
                             )
-                            .id(item.id)
+                                .id(item.id)
                         }
                     }
-                    if session.isRunning && session.messages.last?.role != .assistant {
+                    if session.isRunning
+                        && session.messages.last?.role != .assistant
+                        && session.messages.last?.role != .tool {
                         HStack(spacing: 6) {
                             ProgressView().controlSize(.small)
-                            Text(currentActivity)
+                            Text("Waiting for response")
                                 .font(.system(size: 11 * s))
                                 .foregroundStyle(.white.opacity(0.5))
                                 .lineLimit(1)
@@ -1108,15 +1175,28 @@ struct ChatRootView: View {
                 .padding(.horizontal, 18 * s)
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
-            .onChange(of: session.messages) { _ in
-                withAnimation(.easeOut(duration: 0.12)) {
-                    proxy.scrollTo("bottom", anchor: .bottom)
+            .modifier(ChatScrollDistanceReader { distance in
+                scrollIntent.distanceFromBottom = distance
+            })
+            .onAppear {
+                scrollIntent.onUserScroll = { up in
+                    if up {
+                        followsLatestMessage = false
+                    } else if scrollIntent.distanceFromBottom < 60 {
+                        followsLatestMessage = true
+                    }
                 }
+                scrollIntent.install()
+            }
+            .onChange(of: session.messages) { _ in
+                // Sending a message always snaps back to the latest turn.
+                if session.messages.last?.role == .user { followsLatestMessage = true }
+                guard followsLatestMessage else { return }
+                proxy.scrollTo("bottom", anchor: .bottom)
             }
             .onChange(of: session.isRunning) { _ in
-                withAnimation(.easeOut(duration: 0.12)) {
-                    proxy.scrollTo("bottom", anchor: .bottom)
-                }
+                guard followsLatestMessage else { return }
+                proxy.scrollTo("bottom", anchor: .bottom)
             }
             // Fog at the bottom edge: text dissolves just above the composer
             // instead of being cut off mid-glyph. An alpha mask, not a color
@@ -1158,14 +1238,6 @@ struct ChatRootView: View {
                 state.stealthComposerOpen.toggle()
             }
         }
-    }
-
-    // While running, the spinner row narrates the most recent tool action.
-    private var currentActivity: String {
-        if let last = session.messages.last, last.role == .tool {
-            return last.text
-        }
-        return "Waiting for response"
     }
 
     // Clicking a step raises this card over the transcript with the exact
@@ -1705,7 +1777,6 @@ struct ChatRootView: View {
         .menuIndicator(.hidden)
         .fixedSize()
         .help("Attach files or a screenshot")
-        .disabled(session.isRunning)
     }
 
     private func pickFiles() {
@@ -1943,13 +2014,13 @@ struct ChatRootView: View {
     private func menuItem(
         _ title: String, checked: Bool, action: @escaping () -> Void
     ) -> some View {
-        Button(action: action) {
-            if checked {
-                Label(title, systemImage: "checkmark")
-            } else {
-                Text(title)
-            }
-        }
+        Toggle(
+            title,
+            isOn: Binding(
+                get: { checked },
+                set: { _ in action() }
+            )
+        )
     }
 
     // The checked effort item and the pill's effort segment. An unset (or
@@ -2095,6 +2166,7 @@ struct StepsGroup: View {
 struct MessageBubble: View {
     let message: ChatMessage
     var scale: CGFloat = 1
+    var isActiveTool = false
     var onInspect: ((ChatMessage) -> Void)? = nil
 
     @ViewBuilder
@@ -2123,9 +2195,16 @@ struct MessageBubble: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
         case .tool:
             let row = HStack(spacing: 5) {
-                Image(systemName: message.icon ?? "wrench.fill")
-                    .font(.system(size: 9 * scale))
-                    .frame(width: 12 * scale)
+                if isActiveTool {
+                    ProgressView()
+                        .controlSize(.small)
+                        .scaleEffect(0.7)
+                        .frame(width: 12 * scale, height: 12 * scale)
+                } else {
+                    Image(systemName: message.icon ?? "wrench.fill")
+                        .font(.system(size: 9 * scale))
+                        .frame(width: 12 * scale)
+                }
                 Text(message.text)
                     .font(.system(size: 11 * scale))
                     .lineLimit(1)

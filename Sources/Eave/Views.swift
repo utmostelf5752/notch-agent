@@ -2502,6 +2502,12 @@ struct SettingsView: View {
         case .checking: return ("Checking for updates…", .secondary)
         case .upToDate: return ("You're up to date.", .secondary)
         case .available(let version): return ("Version \(version) is available.", .primary)
+        case .downloading(let fraction):
+            if let fraction {
+                return ("Downloading update… \(Int(fraction * 100))%", .secondary)
+            }
+            return ("Downloading update…", .secondary)
+        case .installing: return ("Installing update… Eave will relaunch.", .secondary)
         case .error(let message): return ("Update check failed — \(message)", .red)
         }
     }
@@ -2521,13 +2527,19 @@ struct SettingsView: View {
                 .textSelection(.enabled)
 
             HStack(spacing: 8) {
-                if case .available = updater.status {
+                switch updater.status {
+                case .available:
                     // Only offer to install once a probe has actually found an
                     // update — otherwise "Update Now" is a lie that just runs a
-                    // check and reports "up to date".
+                    // check and reports "up to date". Clicking installs and
+                    // relaunches directly; the silent driver shows no dialogs.
                     Button("Update Now") { updater.updateNow() }
                         .keyboardShortcut(.defaultAction)
-                } else {
+                case .downloading:
+                    Button("Downloading…") {}.disabled(true)
+                case .installing:
+                    Button("Installing…") {}.disabled(true)
+                default:
                     Button("Check for Updates") {
                         updater.check()
                         // Pull the newest notes so the update's changelog is
@@ -2552,23 +2564,41 @@ struct SettingsView: View {
             changelogSection
         }
         .frame(maxWidth: .infinity)
-        // Opening About refreshes the feed so the list is current the moment
-        // the user looks — including right after they hit Check for Updates.
-        .onAppear { Changelog.refresh() }
+        // Opening About refreshes the feed and probes the appcast so the tab
+        // reflects reality the moment the user looks — no manual check needed
+        // for the Update Now button to appear.
+        .onAppear {
+            Changelog.refresh()
+            updater.probeIfStale()
+        }
     }
 
-    // A running "What's New" list under the update controls. The version the
-    // updater is offering (if any) gets an accent badge so the notes for the
-    // pending update stand out.
+    // The "What's New" notes under the update controls. One entry only: the
+    // pending update's notes when one is available (with an accent badge), the
+    // running version's notes otherwise — showing both reads as clutter.
     private var changelogSection: some View {
         let availableVersion: String? = {
-            if case .available(let version) = updater.status { return version }
-            return nil
+            switch updater.status {
+            case .available(let version): return version
+            case .downloading, .installing:
+                // Mid-install the offered version is no longer in `status`;
+                // the newest entry is the one being installed.
+                return changelogStore.changelog.entries.first?.version
+            default: return nil
+            }
+        }()
+        let displayed: [Changelog.Entry] = {
+            let entries = changelogStore.changelog.entries
+            let target = availableVersion ?? updater.currentVersion
+            if let match = entries.first(where: { $0.version == target }) { return [match] }
+            // No note for the target version (e.g. a hotfix build that never
+            // got an entry): fall back to the newest so the section isn't empty.
+            return Array(entries.prefix(1))
         }()
         return VStack(alignment: .leading, spacing: 14) {
             Divider().padding(.top, 6)
             sectionHeader("What's New")
-            ForEach(changelogStore.changelog.entries) { entry in
+            ForEach(displayed) { entry in
                 VStack(alignment: .leading, spacing: 5) {
                     HStack(spacing: 6) {
                         Text(entry.version)

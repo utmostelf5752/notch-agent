@@ -1,6 +1,16 @@
 {
   "entries": [
     {
+      "version": "0.1.41",
+      "date": "2026-07-31",
+      "notes": [
+        "Update Now installs the update immediately — download, install, and relaunch with progress shown, no Install / Remind Me Later / Skip dialog.",
+        "Opening Settings > About now checks for updates automatically, so an available update appears without clicking Check for Updates.",
+        "What's New shows one set of notes: the update being offered, or the installed version when you're up to date.",
+        "The app checks for updates every 6 hours instead of once a day, matching how often release notes refresh."
+      ]
+    },
+    {
       "version": "0.1.40",
       "date": "2026-07-31",
       "notes": [

@@ -727,6 +727,11 @@ struct ChatRootView: View {
     @State private var inspectedStep: ChatMessage?
     @State private var followsLatestMessage = true
     @State private var scrollIntent = ChatScrollIntent()
+    @State private var editingQueueID: UUID?
+    @State private var draftBeforeQueueEdit = ""
+    @State private var attachmentsBeforeQueueEdit: [URL] = []
+    @State private var draggedQueueID: UUID?
+    @State private var hoveredQueueID: UUID?
 
     private let cornerRadius: CGFloat = 24
     private let accent = Color(red: 10/255, green: 132/255, blue: 1)
@@ -833,6 +838,13 @@ struct ChatRootView: View {
             .onChange(of: state.stealthComposerOpen) { open in
                 if open && state.panelIsKey {
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { inputFocused = true }
+                }
+            }
+            // A hidden chat must not remain suspended because its temporary
+            // composer editor disappeared during a conversation switch.
+            .onDisappear {
+                if let editingQueueID {
+                    rollbackQueueEdit(editingQueueID)
                 }
             }
         }
@@ -1051,7 +1063,7 @@ struct ChatRootView: View {
                                 Text(chat.title)
                                     .font(.system(size: 12))
                                     .lineLimit(1)
-                                Text("\(chat.provider.label) · \(chat.date.formatted(date: .abbreviated, time: .shortened))")
+                                Text(historyDetail(for: chat))
                                     .font(.system(size: 9.5))
                                     .foregroundStyle(.secondary)
                             }
@@ -1084,6 +1096,13 @@ struct ChatRootView: View {
         }
         .frame(width: 230)
         .frame(maxHeight: 260)
+    }
+
+    private func historyDetail(for chat: ChatArchive) -> String {
+        let activity = state.isChatRunning(chat.id)
+            ? "Working"
+            : ((chat.queuedMessages?.isEmpty == false) ? "Queued" : chat.provider.label)
+        return "\(activity) · \(chat.date.formatted(date: .abbreviated, time: .shortened))"
     }
 
     private var pinButton: some View {
@@ -1487,6 +1506,9 @@ struct ChatRootView: View {
 
     private var standardComposer: some View {
         VStack(alignment: .leading, spacing: 8) {
+            if !session.queuedMessages.isEmpty {
+                queueList
+            }
             if !session.attachments.isEmpty {
                 attachmentChips
             }
@@ -1529,6 +1551,158 @@ struct ChatRootView: View {
                 sendButton
             }
         }
+    }
+
+    private var queueList: some View {
+        ScrollView(.vertical, showsIndicators: session.queuedMessages.count > 2) {
+            LazyVStack(spacing: 0) {
+                ForEach(session.queuedMessages) { item in
+                    queueRow(item)
+                        .onDrop(
+                            of: [UTType.text],
+                            delegate: QueueDropDelegate(
+                                targetID: item.id,
+                                draggedID: $draggedQueueID,
+                                move: session.moveQueuedMessage
+                            )
+                        )
+                }
+            }
+        }
+        .frame(height: queueListHeight)
+        .padding(.horizontal, 2 * s)
+        .padding(.bottom, 2 * s)
+        .overlay(alignment: .bottom) {
+            Divider().overlay(Color.white.opacity(0.12))
+        }
+    }
+
+    private var queueListHeight: CGFloat {
+        let rowHeight = 32 * s
+        let count = session.queuedMessages.count
+        if count <= 2 { return CGFloat(count) * rowHeight }
+        // Two complete rows plus a sliver of the third advertises scrolling
+        // without letting a long queue keep enlarging the composer.
+        return rowHeight * 2.28
+    }
+
+    @ViewBuilder
+    private func queueRow(_ item: QueuedMessage) -> some View {
+        let isEditing = editingQueueID == item.id
+        let isLast = session.queuedMessages.last?.id == item.id
+        HStack(spacing: 7 * s) {
+            Image(systemName: hoveredQueueID == item.id || draggedQueueID == item.id
+                  ? "circle.grid.3x3.fill" : "arrow.turn.up.left")
+                .font(.system(size: 10 * s, weight: .medium))
+                .foregroundStyle(.white.opacity(0.48))
+                .frame(width: 15 * s, height: 24 * s)
+                .rotationEffect(.degrees(180))
+                .contentShape(Rectangle())
+                .onDrag {
+                    draggedQueueID = item.id
+                    return NSItemProvider(object: item.id.uuidString as NSString)
+                } preview: {
+                    Color.clear.frame(width: 1, height: 1)
+                }
+                .help("Drag to reorder")
+
+            Text(item.text)
+                .font(.system(size: 12 * s))
+                .foregroundStyle(.white.opacity(isEditing ? 0.9 : 0.72))
+                .lineLimit(1)
+                .truncationMode(.tail)
+
+            Spacer(minLength: 4)
+
+            Button {
+                if isEditing {
+                    rollbackQueueEdit(item.id)
+                } else {
+                    beginQueueEdit(item)
+                }
+            } label: {
+                Image(systemName: isEditing ? "arrow.uturn.backward" : "pencil")
+                    .font(.system(size: 10 * s, weight: .medium))
+                    .foregroundStyle(isEditing ? accent : .white.opacity(0.58))
+            }
+            .buttonStyle(.plain)
+            .disabled(editingQueueID != nil && !isEditing)
+            .help(isEditing ? "Discard changes" : "Edit queued message")
+
+            Button {
+                removeQueuedMessage(item.id)
+            } label: {
+                Image(systemName: "trash")
+                    .font(.system(size: 10 * s, weight: .medium))
+                    .foregroundStyle(.white.opacity(0.48))
+            }
+            .buttonStyle(.plain)
+            .help("Remove queued message")
+        }
+        .frame(height: 32 * s)
+        .contentShape(Rectangle())
+        .overlay(alignment: .bottom) {
+            if !isLast {
+                Divider().overlay(Color.white.opacity(0.08))
+            }
+        }
+        .onHover { hovering in
+            if hovering {
+                hoveredQueueID = item.id
+            } else if hoveredQueueID == item.id {
+                hoveredQueueID = nil
+            }
+        }
+    }
+
+    private func beginQueueEdit(_ item: QueuedMessage) {
+        guard editingQueueID == nil,
+              session.beginEditingQueuedMessage(item.id)
+        else { return }
+        draftBeforeQueueEdit = session.draft
+        attachmentsBeforeQueueEdit = session.attachments
+        editingQueueID = item.id
+        session.draft = item.text
+        session.attachments = item.attachments
+        inputFocused = true
+    }
+
+    private func commitQueueEdit(_ id: UUID) {
+        let committed = session.commitQueuedMessageEdit(
+            id,
+            text: session.draft,
+            attachments: session.attachments
+        )
+        if !committed {
+            session.cancelQueuedMessageEdit(id)
+        }
+        restoreComposerAfterQueueEdit()
+    }
+
+    private func rollbackQueueEdit(_ id: UUID) {
+        session.cancelQueuedMessageEdit(id)
+        restoreComposerAfterQueueEdit()
+    }
+
+    private func removeQueuedMessage(_ id: UUID) {
+        let wasEditing = editingQueueID == id
+        session.removeQueuedMessage(id)
+        if wasEditing {
+            restoreComposerAfterQueueEdit()
+        }
+    }
+
+    private func restoreComposerAfterQueueEdit() {
+        session.draft = draftBeforeQueueEdit
+        session.attachments = attachmentsBeforeQueueEdit
+        editingQueueID = nil
+        draftBeforeQueueEdit = ""
+        attachmentsBeforeQueueEdit = []
+        // Queue edit APIs archive while the queued text is temporarily in the
+        // composer. Persist once more after restoring the chat's real draft so
+        // switching chats or relaunching cannot resurrect the edit buffer.
+        session.archiveCurrentIfNeeded()
+        inputFocused = true
     }
 
     // Eye next to the model/permissions chip: enters stealth from normal
@@ -2133,7 +2307,18 @@ struct ChatRootView: View {
 
     @ViewBuilder
     private var sendButton: some View {
-        if session.isRunning {
+        if editingQueueID != nil {
+            Button(action: sendDraft) {
+                Image(systemName: "checkmark.circle.fill")
+                    .font(.system(size: 20 * s))
+                    .foregroundStyle(session.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                                     ? AnyShapeStyle(.white.opacity(0.25))
+                                     : AnyShapeStyle(accent))
+            }
+            .buttonStyle(.plain)
+            .disabled(session.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            .help("Save queued message")
+        } else if session.isRunning && session.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             Button(action: session.cancel) {
                 Image(systemName: "stop.circle.fill")
                     .font(.system(size: 20 * s))
@@ -2152,14 +2337,19 @@ struct ChatRootView: View {
             }
             .buttonStyle(.plain)
             .disabled(session.draft.isEmpty)
+            .help(session.isRunning ? "Add to this chat's queue" : "Send")
         }
     }
 
     private func sendDraft() {
         let text = session.draft.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty, !session.isRunning else { return }
+        guard !text.isEmpty else { return }
+        if let editingQueueID {
+            commitQueueEdit(editingQueueID)
+            return
+        }
         session.draft = ""
-        session.send(text)
+        session.submit(text)
     }
 
     private func pickFolder() {
@@ -2179,6 +2369,26 @@ struct ChatRootView: View {
         if response == .OK, let url = panel.url {
             session.workingDirectory = url
         }
+    }
+}
+
+private struct QueueDropDelegate: DropDelegate {
+    let targetID: UUID
+    @Binding var draggedID: UUID?
+    let move: (UUID, UUID) -> Void
+
+    func dropEntered(info: DropInfo) {
+        guard let draggedID, draggedID != targetID else { return }
+        move(draggedID, targetID)
+    }
+
+    func performDrop(info: DropInfo) -> Bool {
+        draggedID = nil
+        return true
+    }
+
+    func dropUpdated(info: DropInfo) -> DropProposal? {
+        DropProposal(operation: .move)
     }
 }
 

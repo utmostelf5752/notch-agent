@@ -575,7 +575,13 @@ final class AppState: ObservableObject {
         }
         let w = defaults.double(forKey: "panelWidth")
         if w > 0 { panelWidthOverride = CGFloat(w) }
-        let h = defaults.double(forKey: "panelHeight")
+        var h = defaults.double(forKey: "panelHeight")
+        let queuePeekHeightMigrationKey = "eave.didIncreasePanelHeightForQueuePeek"
+        if h > 0, !defaults.bool(forKey: queuePeekHeightMigrationKey) {
+            h += 12
+            defaults.set(h, forKey: "panelHeight")
+        }
+        defaults.set(true, forKey: queuePeekHeightMigrationKey)
         if h > 0 { panelHeightOverride = CGFloat(h) }
         screenShareProtectionEnabled = defaults.bool(forKey: "screenShareProtectionEnabled")
         autoHideOnScreenShare = defaults.bool(forKey: "autoHideOnScreenShare")
@@ -673,6 +679,9 @@ final class AppState: ObservableObject {
             candidate.silentTurn = false
             candidate.multipleChoiceTurn = false
         }
+        // Intermediate queue turns are not completion events. The queue
+        // worker either already started the next turn or is about to do so.
+        guard !candidate.isRunning, candidate.queuedMessages.isEmpty else { return }
         guard let last = candidate.messages.last, last.role == .assistant else { return }
         if candidate.silentTurn {
             candidate.multipleChoiceTurn = !Self.multipleChoiceAnswers(from: last.text).isEmpty
@@ -1304,7 +1313,7 @@ final class AppState: ObservableObject {
         return min(max(panelWidthOverride ?? minPanelWidth, minPanelWidth), maxPanelWidth)
     }
     var panelHeight: CGFloat {
-        min(max(panelHeightOverride ?? 280, minPanelHeight), maxPanelHeight)
+        min(max(panelHeightOverride ?? 292, minPanelHeight), maxPanelHeight)
     }
 
     var expandedFrame: NSRect {

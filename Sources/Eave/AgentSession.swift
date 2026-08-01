@@ -310,6 +310,8 @@ struct ChatArchive: Identifiable, Codable {
     // leaks an unfinished prompt or pending files into another conversation.
     var draft: String?
     var pendingAttachmentPaths: [String]?
+    // Queues belong to the conversation, not whichever chat is visible.
+    var queuedMessages: [QueuedMessage]?
     let date: Date
 }
 
@@ -322,6 +324,26 @@ struct ChatSettings: Codable, Equatable {
     var effort: String?
     var fastMode: Bool?
     var contextVersion: String?
+}
+
+struct QueuedMessage: Identifiable, Codable, Equatable {
+    let id: UUID
+    var text: String
+    var attachmentPaths: [String]
+    let createdAt: Date
+
+    init(id: UUID = UUID(), text: String, attachments: [URL], createdAt: Date = Date()) {
+        self.id = id
+        self.text = text
+        self.attachmentPaths = attachments.map(\.path)
+        self.createdAt = createdAt
+    }
+
+    var attachments: [URL] {
+        attachmentPaths.map {
+            AppPaths.relocatedManagedURL(for: URL(fileURLWithPath: $0))
+        }
+    }
 }
 
 
@@ -844,10 +866,16 @@ final class AgentSession: ObservableObject {
             if !isRunning {
                 if let started = turnStartedAt { lastTurnDuration = Date().timeIntervalSince(started) }
                 turnStartedAt = nil
+                guard oldValue else { return }
+                DispatchQueue.main.async { [weak self] in
+                    self?.turnDidFinish()
+                }
             }
         }
     }
     @Published var draft = ""
+    @Published private(set) var queuedMessages: [QueuedMessage] = []
+    @Published private(set) var queuePaused = false
     // Background-mode telemetry: when the current turn began, and a running
     // character count of streamed output (a cheap, provider-agnostic token
     // estimate ~= chars/4). Both reset at the start of each turn. lastTurnDuration
@@ -914,6 +942,7 @@ final class AgentSession: ObservableObject {
     private static let effortChoiceDefaultsKey = "Eave.effortChoice"
     private static let fastModeChoiceDefaultsKey = "Eave.fastModeChoice"
     private static let cursorContextDefaultsKey = "Eave.cursorContextChoice"
+    private static let workingDirectoryDefaultsKey = "Eave.workingDirectory"
     // The history entry the live session was restored from, if any. Keeps a
     // reopened chat listed (and in place) in history; archiving updates that
     // entry instead of inserting a duplicate.
@@ -926,6 +955,10 @@ final class AgentSession: ObservableObject {
     // AppState supplies a cross-session gate for providers whose transport is
     // process-global (the shared ChatGPT web view and Cursor approval hook).
     var runBlockReason: ((AgentProvider) -> String?)?
+    private var queueDrainSuspended = false
+    // Checked immediately before dequeueing so a turn finishing during an
+    // edit can never send the stale queue-head text.
+    private var queuedMessageBeingEditedID: UUID?
 
     init() {
         AppPaths.migrateLegacyScreenshots()
@@ -946,6 +979,14 @@ final class AgentSession: ObservableObject {
         fastModeChoice = Self.savedChoices(
             from: defaults, key: Self.fastModeChoiceDefaultsKey, fallback: fastModeChoice
         )
+        if let savedPath = defaults.string(forKey: Self.workingDirectoryDefaultsKey) {
+            let savedURL = URL(fileURLWithPath: savedPath, isDirectory: true).standardizedFileURL
+            var isDirectory: ObjCBool = false
+            if FileManager.default.fileExists(atPath: savedURL.path, isDirectory: &isDirectory),
+               isDirectory.boolValue {
+                workingDirectory = savedURL
+            }
+        }
         if let saved = UserDefaults.standard.dictionary(forKey: Self.cursorContextDefaultsKey)
             as? [String: String] {
             var migrated = saved
@@ -1168,7 +1209,14 @@ final class AgentSession: ObservableObject {
 
     @Published var workingDirectory: URL = FileManager.default
         .homeDirectoryForCurrentUser
-        .appendingPathComponent("Documents/code")
+        .appendingPathComponent("Documents/code") {
+            didSet {
+                UserDefaults.standard.set(
+                    workingDirectory.standardizedFileURL.path,
+                    forKey: Self.workingDirectoryDefaultsKey
+                )
+            }
+        }
 
     private var claudeSessionID: String?
     private var codexThreadID: String?
@@ -1210,21 +1258,163 @@ final class AgentSession: ObservableObject {
         return (out?.isEmpty == false) ? out : nil
     }
 
+    // While a turn is running, submit moves the current composer contents into
+    // this chat's queue. Otherwise it starts the turn immediately.
+    func submit(_ text: String) {
+        let files = attachments
+        attachments = []
+        if isRunning || !queuedMessages.isEmpty {
+            queuedMessages.append(QueuedMessage(text: text, attachments: files))
+            queuePaused = false
+            queueDrainSuspended = false
+            archiveCurrentIfNeeded()
+            if !isRunning { startNextQueuedMessage() }
+            return
+        }
+        sendPrepared(text, files: files, echo: true)
+    }
+
+    @discardableResult
+    func beginEditingQueuedMessage(_ id: UUID) -> Bool {
+        guard queuedMessages.contains(where: { $0.id == id }) else { return false }
+        queuedMessageBeingEditedID = id
+        if queuedMessages.first?.id == id {
+            queuePaused = true
+        }
+        return true
+    }
+
+    @discardableResult
+    func commitQueuedMessageEdit(_ id: UUID, text: String, attachments: [URL]) -> Bool {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty,
+              let index = queuedMessages.firstIndex(where: { $0.id == id })
+        else { return false }
+        queuedMessages[index].text = trimmed
+        queuedMessages[index].attachmentPaths = attachments.map(\.path)
+        if queuedMessageBeingEditedID == id {
+            queuedMessageBeingEditedID = nil
+        }
+        archiveCurrentIfNeeded()
+        resumeQueueAfterEditIfPossible()
+        return true
+    }
+
+    func cancelQueuedMessageEdit(_ id: UUID) {
+        guard queuedMessageBeingEditedID == id else { return }
+        queuedMessageBeingEditedID = nil
+        resumeQueueAfterEditIfPossible()
+    }
+
+    func removeQueuedMessage(_ id: UUID) {
+        let wasBeingEdited = queuedMessageBeingEditedID == id
+        queuedMessages.removeAll { $0.id == id }
+        if wasBeingEdited {
+            queuedMessageBeingEditedID = nil
+        }
+        if queuedMessages.isEmpty {
+            queuePaused = false
+        }
+        archiveCurrentIfNeeded()
+        if wasBeingEdited {
+            resumeQueueAfterEditIfPossible()
+        }
+    }
+
+    func moveQueuedMessage(_ id: UUID, before targetID: UUID) {
+        guard id != targetID,
+              let source = queuedMessages.firstIndex(where: { $0.id == id }),
+              let target = queuedMessages.firstIndex(where: { $0.id == targetID })
+        else { return }
+        let item = queuedMessages.remove(at: source)
+        queuedMessages.insert(item, at: target)
+        archiveCurrentIfNeeded()
+    }
+
+    private func startNextQueuedMessage() {
+        guard !isRunning, let next = queuedMessages.first else { return }
+        guard queuedMessageBeingEditedID != next.id else {
+            queuePaused = true
+            archiveCurrentIfNeeded()
+            return
+        }
+        guard runBlockReason?(provider) == nil else {
+            queuePaused = true
+            archiveCurrentIfNeeded()
+            return
+        }
+        queuedMessages.removeFirst()
+        archiveCurrentIfNeeded()
+        sendPrepared(next.text, files: next.attachments, echo: true)
+        if !isRunning {
+            queuePaused = true
+            archiveCurrentIfNeeded()
+        }
+    }
+
+    private func turnDidFinish() {
+        archiveCurrentIfNeeded()
+        guard !queuedMessages.isEmpty else {
+            queuePaused = false
+            return
+        }
+        guard !queueDrainSuspended,
+              usageLimit == nil,
+              messages.last?.role != .error
+        else {
+            queuePaused = true
+            archiveCurrentIfNeeded()
+            return
+        }
+        startNextQueuedMessage()
+    }
+
+    private func resumeQueueAfterEditIfPossible() {
+        guard !queuedMessages.isEmpty else {
+            queuePaused = false
+            return
+        }
+        guard queuedMessageBeingEditedID == nil else { return }
+        guard !queueDrainSuspended,
+              usageLimit == nil,
+              messages.last?.role != .error
+        else {
+            queuePaused = true
+            archiveCurrentIfNeeded()
+            return
+        }
+        if isRunning {
+            queuePaused = false
+            return
+        }
+        queuePaused = false
+        startNextQueuedMessage()
+    }
+
     // echo=false sends text the transcript already shows in another form (a
     // question answer, which answerQuestion has already appended as the user's
     // bubble) so it isn't printed twice.
     func send(_ text: String, echo: Bool = true) {
+        let files = attachments
+        attachments = []
+        sendPrepared(text, files: files, echo: echo)
+    }
+
+    private func sendPrepared(_ text: String, files: [URL], echo: Bool) {
         guard !isRunning else { return }
         if let reason = runBlockReason?(provider) {
             if draft.isEmpty { draft = text }
+            for file in files where !attachments.contains(file) {
+                attachments.append(file)
+            }
             appendError(reason)
             return
         }
+        queueDrainSuspended = false
+        queuePaused = false
         usageLimit = nil
         turnStartedAt = Date()
         turnChars = 0
-        let files = attachments
-        attachments = []
         Telemetry.record("message_sent", ["provider": provider.rawValue, "attachments": String(files.count)])
 
         if echo {
@@ -2129,6 +2319,8 @@ final class AgentSession: ObservableObject {
     }
 
     func cancel() {
+        queueDrainSuspended = true
+        queuePaused = !queuedMessages.isEmpty
         // A pending approval must be answered before tearing the turn down,
         // otherwise the CLI side is left hanging on the request.
         if let request = pendingPermission {
@@ -2162,6 +2354,10 @@ final class AgentSession: ObservableObject {
         lastRunSettings = nil
         messages.removeAll()
         attachments.removeAll()
+        queuedMessages.removeAll()
+        queuedMessageBeingEditedID = nil
+        queuePaused = false
+        queueDrainSuspended = false
         usageLimit = nil
         claudeSessionID = nil
         codexThreadID = nil
@@ -2181,6 +2377,10 @@ final class AgentSession: ObservableObject {
         attachments = (chat.pendingAttachmentPaths ?? []).map {
             AppPaths.relocatedManagedURL(for: URL(fileURLWithPath: $0))
         }
+        queuedMessages = chat.queuedMessages ?? []
+        queuedMessageBeingEditedID = nil
+        queuePaused = !queuedMessages.isEmpty
+        queueDrainSuspended = !queuedMessages.isEmpty
         provider = chat.provider
         usageLimit = nil
         claudeSessionID = chat.claudeSessionID
@@ -2228,6 +2428,7 @@ final class AgentSession: ObservableObject {
         guard messages.contains(where: { $0.role == .user })
                 || !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
                 || !attachments.isEmpty
+                || !queuedMessages.isEmpty
         else { return }
         if currentArchiveID == nil { currentArchiveID = UUID() }
         let draftTitle = draft.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -2254,6 +2455,7 @@ final class AgentSession: ObservableObject {
             ),
             draft: draft.isEmpty ? nil : draft,
             pendingAttachmentPaths: attachments.isEmpty ? nil : attachments.map(\.path),
+            queuedMessages: queuedMessages.isEmpty ? nil : queuedMessages,
             date: lastTouchedAt
         )
         ChatArchiveStore.shared.upsert(archive)

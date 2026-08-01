@@ -19,7 +19,7 @@ cp Support/Info.plist "$APP/Contents/Info.plist"
 # so it must increase monotonically with every build; the commit count does
 # exactly that. Falls back to 1 outside a git checkout (release tarballs).
 BUILD_NUMBER=$(git rev-list --count HEAD 2>/dev/null || echo 1)
-MARKETING_VERSION="0.1.41"
+MARKETING_VERSION="0.1.42"
 if [ "${EAVE_RELEASE_BUILD:-0}" = "1" ]; then
     BUILD_CHANNEL="release"
 else

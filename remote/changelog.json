@@ -1,6 +1,17 @@
 {
   "entries": [
     {
+      "version": "0.1.42",
+      "date": "2026-07-31",
+      "notes": [
+        "Messages written while a chat is working now join that chat's queue and continue processing even after you switch conversations.",
+        "Queued messages can be reordered, deleted, or edited through the main composer before they run.",
+        "Editing the next queued message pauses dispatch safely, restores your previous draft and attachments afterward, and resumes on save or rollback.",
+        "Long queues show two full messages plus a preview of the next and scroll in place instead of continuously growing the panel.",
+        "The last working folder now persists across new chats, relaunches, and app updates."
+      ]
+    },
+    {
       "version": "0.1.41",
       "date": "2026-07-31",
       "notes": [

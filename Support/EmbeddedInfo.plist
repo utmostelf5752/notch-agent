@@ -7,6 +7,7 @@
     <key>CFBundleDisplayName</key><string>Eave</string>
     <key>CFBundleShortVersionString</key><string>$(MARKETING_VERSION)</string>
     <key>CFBundleVersion</key><string>$(CURRENT_PROJECT_VERSION)</string>
+    <key>EaveBuildChannel</key><string>$(EAVE_BUILD_CHANNEL)</string>
     <key>LSUIElement</key><true/>
     <key>SUFeedURL</key><string>https://github.com/utmostelf5752/notch-agent/releases/latest/download/appcast.xml</string>
     <key>SUPublicEDKey</key><string>GQROM9pTFSlGYoNsfS+qJAd6R+Ba87mS06fcQr9HiBI=</string>

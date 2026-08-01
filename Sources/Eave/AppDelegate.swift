@@ -126,8 +126,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             return
         }
         try? FileManager.default.removeItem(atPath: path)
-        let session = AppState.shared.session
         for line in raw.split(separator: "\n") {
+            let session = AppState.shared.session
             let cmd = line.trimmingCharacters(in: .whitespaces)
             if cmd.hasPrefix("provider:"), let p = AgentProvider(rawValue: String(cmd.dropFirst(9))) {
                 session.provider = p
@@ -142,7 +142,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             } else if cmd == "dump" {
                 ChatGPTWeb.shared.dumpState(to: "/tmp/eave-dom.txt")
             } else if cmd == "newchat" {
-                session.reset()
+                AppState.shared.startNewChat()
             } else if cmd == "cfg" {
                 let p = session.provider
                 let out = """
@@ -155,7 +155,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 """
                 try? out.write(toFile: "/tmp/eave-settings.txt", atomically: true, encoding: .utf8)
             } else if cmd == "chats" {
-                let out = session.pastChats.enumerated().map { idx, chat in
+                let out = ChatArchiveStore.shared.chats.enumerated().map { idx, chat in
                     "\(idx): [\(chat.provider.rawValue)] \(chat.title)"
                         + " claude=\(chat.claudeSessionID ?? "-")"
                         + " codex=\(chat.codexThreadID ?? "-")"
@@ -166,9 +166,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 try? out.write(toFile: "/tmp/eave-chats.txt", atomically: true, encoding: .utf8)
             } else if cmd.hasPrefix("restore:"),
                       let idx = Int(cmd.dropFirst(8)),
-                      session.pastChats.indices.contains(idx) {
+                      ChatArchiveStore.shared.chats.indices.contains(idx) {
                 AppState.shared.expand(takeKeyboard: false)
-                session.restore(session.pastChats[idx])
+                AppState.shared.restoreChat(ChatArchiveStore.shared.chats[idx])
             } else if cmd == "screenshot:full" {
                 ScreenshotCapture.capture(.fullScreen)
             } else if cmd == "screenshot:window" {
@@ -277,7 +277,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         let update = NSMenuItem(title: "Check for Updates…", action: #selector(checkForUpdates), keyEquivalent: "")
         update.target = self
         menu.addItem(update)
-        let version = NSMenuItem(title: "Version \(Updater.shared.currentVersion)", action: nil, keyEquivalent: "")
+        let version = NSMenuItem(title: "Version \(Updater.shared.displayVersion)", action: nil, keyEquivalent: "")
         version.isEnabled = false
         menu.addItem(version)
         menu.addItem(.separator())
@@ -287,7 +287,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         item.menu = menu
         statusItem = item
 
-        runningObserver = state.session.$isRunning
+        runningObserver = state.$session
+            .map { $0.$isRunning }
+            .switchToLatest()
             .receive(on: DispatchQueue.main)
             .sink { [weak self] running in
                 // Silent screenshot turns keep the status bar appearance idle
@@ -309,10 +311,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             ?? NSImage(systemSymbolName: "terminal", accessibilityDescription: nil)
         image?.size = NSSize(width: 18, height: 18)
         image?.isTemplate = true
-        image?.accessibilityDescription = running ? "Eave (working)" : "Eave"
+        let beta = Updater.shared.isBetaBuild
+        image?.accessibilityDescription = running
+            ? "Eave\(beta ? " Beta" : "") (working)"
+            : "Eave\(beta ? " Beta" : "")"
         button.image = image
-        button.contentTintColor = running ? .controlAccentColor : nil
-        button.toolTip = running ? "Eave is working" : "Eave"
+        button.contentTintColor = beta ? .systemBlue : (running ? .controlAccentColor : nil)
+        button.toolTip = running
+            ? "Eave\(beta ? " Beta" : "") is working"
+            : "Eave\(beta ? " Beta" : "")"
     }
 
     private static func menuHint(toggle: GlobalShortcut) -> String {
@@ -364,7 +371,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         window.isOpaque = false
         window.hasShadow = false
         window.isMovable = false
-        window.contentView = FirstMouseHostingView(rootView: NotchTargetView(state: state, session: state.session))
+        window.contentView = FirstMouseHostingView(rootView: ActiveNotchTargetView(state: state))
         window.setFrame(state.collapsedFrame, display: true)
         window.orderFrontRegardless()
         state.targetWindow = window
@@ -387,7 +394,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         panel.hidesOnDeactivate = false
         panel.delegate = self
         let hosting = NSHostingView(
-            rootView: ChatRootView(state: state, session: state.session)
+            rootView: ActiveChatRootView(state: state)
         )
         // The window frame is owned by AppState's resize math. Without this,
         // the hosting view constrains the window to the content's minimum
@@ -405,7 +412,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     func applicationWillTerminate(_ notification: Notification) {
         // Keep the in-progress conversation across restarts.
-        AppState.shared.session.archiveCurrentIfNeeded()
+        AppState.shared.archiveAllSessions()
         Telemetry.flushBeforeQuit()
     }
 

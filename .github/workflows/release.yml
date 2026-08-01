@@ -60,7 +60,7 @@ jobs:
           echo "EAVE_SIGN_IDENTITY=$IDENTITY" >> "$GITHUB_ENV"
 
       - name: Build app
-        run: ./build.sh
+        run: EAVE_RELEASE_BUILD=1 ./build.sh
 
       - name: Package DMG and update archive
         run: |

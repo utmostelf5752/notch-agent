@@ -19,7 +19,12 @@ cp Support/Info.plist "$APP/Contents/Info.plist"
 # so it must increase monotonically with every build; the commit count does
 # exactly that. Falls back to 1 outside a git checkout (release tarballs).
 BUILD_NUMBER=$(git rev-list --count HEAD 2>/dev/null || echo 1)
-MARKETING_VERSION="0.1.$BUILD_NUMBER"
+MARKETING_VERSION="0.1.41"
+if [ "${EAVE_RELEASE_BUILD:-0}" = "1" ]; then
+    BUILD_CHANNEL="release"
+else
+    BUILD_CHANNEL="beta"
+fi
 
 # Expand the same build-setting placeholders that Xcode resolves when it
 # builds the native app target. Keeping one plist makes shell and Xcode runs
@@ -31,6 +36,7 @@ EXPAND_PLACEHOLDERS=(
     -e 's/$(PRODUCT_BUNDLE_IDENTIFIER)/com.jagruth.eave/g'
     -e "s/\$(MARKETING_VERSION)/$MARKETING_VERSION/g"
     -e "s/\$(CURRENT_PROJECT_VERSION)/$BUILD_NUMBER/g"
+    -e "s/\$(EAVE_BUILD_CHANNEL)/$BUILD_CHANNEL/g"
 )
 sed -i '' "${EXPAND_PLACEHOLDERS[@]}" "$APP/Contents/Info.plist"
 sed "${EXPAND_PLACEHOLDERS[@]}" Support/EmbeddedInfo.plist > build/EmbeddedInfo.plist

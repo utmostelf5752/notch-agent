@@ -1,7 +1,7 @@
 import Foundation
 
 // Release notes shown in Settings > About, keyed by marketing version
-// (CFBundleShortVersionString, i.e. "0.1.<commit count>"). Like the ChatGPT
+// (CFBundleShortVersionString). Like the ChatGPT
 // selectors, installed apps fetch remote/changelog.json from
 // raw.githubusercontent.com on launch, every 6 hours, and on demand when the
 // user checks for updates.
@@ -34,6 +34,10 @@ struct Changelog: Codable, Equatable {
                 "Opening Settings > About now checks for updates automatically, so an available update appears without clicking Check for Updates.",
                 "What's New shows one set of notes: the update being offered, or the installed version when you're up to date.",
                 "The app checks for updates every 6 hours instead of once a day, matching how often release notes refresh.",
+                "Provider, model, thinking level, and bypass-permission choices now persist across restarts and new chats.",
+                "Switching chats preserves drafts, attachments, messages, and background work; running chats show a spinner in history.",
+                "The collapsed notch follows the last-opened chat while queuing background questions, permissions, and completions in order.",
+                "Long drafts now scroll to keep the newest text visible as you type, and chat history is ordered by the latest sent message.",
             ]
         ),
         Entry(

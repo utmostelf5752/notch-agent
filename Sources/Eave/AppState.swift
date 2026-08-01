@@ -423,7 +423,27 @@ final class AppState: ObservableObject {
     // clicking the history area pulls it up / puts it away.
     @Published var stealthComposerOpen = true
 
-    let session = AgentSession()
+    @Published private(set) var session = AgentSession()
+    private var liveSessions: [UUID: AgentSession] = [:]
+    private var observedSessions: [ObjectIdentifier: AnyCancellable] = [:]
+    private struct ObservedSessionState {
+        var isRunning: Bool
+        var permissionID: UUID?
+        var questionID: UUID?
+    }
+    private var observedSessionStates: [ObjectIdentifier: ObservedSessionState] = [:]
+
+    enum NotchAttentionKind: Equatable { case permission, question, completed }
+    private struct NotchAttention: Identifiable {
+        let id = UUID()
+        let session: AgentSession
+        let kind: NotchAttentionKind
+        let signalID: UUID?
+    }
+    @Published private var notchAttentionQueue: [NotchAttention] = []
+    private var presentedAttentionID: UUID?
+
+    var notchSession: AgentSession { notchAttentionQueue.first?.session ?? session }
 
     private func updatePopoverSuspend() {
         suspendCollapse = showSettings || showHistory
@@ -468,10 +488,11 @@ final class AppState: ObservableObject {
     @Published var clockTick = Date()
     private var clockTimer: Timer?
     private var cancellables: Set<AnyCancellable> = []
+    private var activeSessionCancellables: Set<AnyCancellable> = []
+    private var backgroundObserversStarted = false
 
     // A brief "Done" pill shown after a turn finishes while collapsed, then it
     // dismisses itself. completedStartedAt anchors the draining progress bar.
-    @Published var showingCompleted = false
     var completedStartedAt = Date()
     let completedDuration: TimeInterval = 5
     private var completedTimer: Timer?
@@ -485,10 +506,16 @@ final class AppState: ObservableObject {
 
     // Silent screenshot turn: the auto-send shortcut fires a turn without any
     // visible notch background activity, exactly like stealth mode.
-    var silentTurn = false
+    var silentTurn: Bool {
+        get { session.silentTurn }
+        set { session.silentTurn = newValue }
+    }
     // Screenshot multiple-choice turn: the response is parsed for A/B/C/D or
     // 1/2/3/4 and the haptic fires that many times instead of once.
-    var multipleChoiceTurn = false
+    var multipleChoiceTurn: Bool {
+        get { session.multipleChoiceTurn }
+        set { session.multipleChoiceTurn = newValue }
+    }
 
     private init() {
         let defaults = UserDefaults.standard
@@ -563,6 +590,281 @@ final class AppState: ObservableObject {
             self.applyScreenShareProtection(to: window)
         }
         cancellables.insert(AnyCancellable { NotificationCenter.default.removeObserver(observer) })
+        observeSession(session)
+    }
+
+    // MARK: - Conversation switching
+
+    private func observeSession(_ candidate: AgentSession) {
+        let key = ObjectIdentifier(candidate)
+        guard observedSessions[key] == nil else { return }
+        observedSessionStates[key] = observedState(for: candidate)
+        candidate.runBlockReason = { [weak self, weak candidate] provider in
+            guard let self, let candidate else { return nil }
+            guard provider == .chatgpt || provider == .cursor else { return nil }
+            let conflict = self.liveSessions.values.first {
+                $0 !== candidate && $0.provider == provider && $0.isRunning
+            }
+            guard let conflict else { return nil }
+            let title = conflict.currentArchiveID
+                .flatMap { id in ChatArchiveStore.shared.chats.first { $0.id == id }?.title }
+                ?? "another chat"
+            return "\(provider.label) is still running in “\(title)”. Return to that chat or wait for it to finish before starting another \(provider.label) turn."
+        }
+        observedSessions[key] = candidate.objectWillChange.sink { [weak self, weak candidate] in
+            DispatchQueue.main.async {
+                guard let self, let candidate else { return }
+                if let id = candidate.currentArchiveID {
+                    self.liveSessions[id] = candidate
+                }
+                let previous = self.observedSessionStates[key]
+                    ?? self.observedState(for: candidate)
+                let current = self.observedState(for: candidate)
+                self.observedSessionStates[key] = current
+                self.processNotchSignals(for: candidate, from: previous, to: current)
+                if previous.isRunning && !current.isRunning {
+                    candidate.archiveCurrentIfNeeded()
+                }
+                // History spinners and the collapsed-notch source can belong
+                // to a session other than the visible one.
+                if previous.isRunning != current.isRunning {
+                    self.objectWillChange.send()
+                }
+            }
+        }
+    }
+
+    private func observedState(for candidate: AgentSession) -> ObservedSessionState {
+        ObservedSessionState(
+            isRunning: candidate.isRunning,
+            permissionID: candidate.pendingPermission?.id,
+            questionID: candidate.pendingQuestion?.id
+        )
+    }
+
+    private func processNotchSignals(
+        for candidate: AgentSession,
+        from previous: ObservedSessionState,
+        to current: ObservedSessionState
+    ) {
+        if previous.permissionID != current.permissionID {
+            removeAttention(for: candidate, kind: .permission)
+            if let id = current.permissionID {
+                enqueueAttention(for: candidate, kind: .permission, signalID: id)
+            }
+        }
+        if previous.questionID != current.questionID {
+            removeAttention(for: candidate, kind: .question)
+            if let id = current.questionID {
+                enqueueAttention(for: candidate, kind: .question, signalID: id)
+            }
+        }
+        if !previous.isRunning, current.isRunning {
+            removeAttention(for: candidate, kind: .completed)
+        } else if previous.isRunning, !current.isRunning {
+            handleCompletedTurn(for: candidate)
+        }
+        syncNotchFrame(animated: true)
+        updateClockTimer()
+    }
+
+    private func handleCompletedTurn(for candidate: AgentSession) {
+        defer {
+            candidate.silentTurn = false
+            candidate.multipleChoiceTurn = false
+        }
+        guard let last = candidate.messages.last, last.role == .assistant else { return }
+        if candidate.silentTurn {
+            candidate.multipleChoiceTurn = !Self.multipleChoiceAnswers(from: last.text).isEmpty
+            if candidate.multipleChoiceTurn {
+                performMultipleChoiceFeedback(for: last.text)
+            } else {
+                CapsLockLED.shared.setOn(true)
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+                    CapsLockLED.shared.setOn(false)
+                }
+            }
+            return
+        }
+        performFeedback()
+        guard candidate.pendingPermission == nil, candidate.pendingQuestion == nil else { return }
+        enqueueAttention(for: candidate, kind: .completed, signalID: nil)
+    }
+
+    private func enqueueAttention(
+        for candidate: AgentSession,
+        kind: NotchAttentionKind,
+        signalID: UUID?
+    ) {
+        let duplicate = notchAttentionQueue.contains {
+            $0.session === candidate && $0.kind == kind && $0.signalID == signalID
+        }
+        guard !duplicate else { return }
+        notchAttentionQueue.append(NotchAttention(
+            session: candidate, kind: kind, signalID: signalID
+        ))
+        refreshAttentionPresentation()
+    }
+
+    private func removeAttention(
+        for candidate: AgentSession,
+        kind: NotchAttentionKind? = nil
+    ) {
+        let previousFront = notchAttentionQueue.first?.id
+        notchAttentionQueue.removeAll {
+            $0.session === candidate && (kind == nil || $0.kind == kind)
+        }
+        if notchAttentionQueue.first?.id != previousFront {
+            presentedAttentionID = nil
+        }
+        refreshAttentionPresentation()
+    }
+
+    private func refreshAttentionPresentation() {
+        guard !expanded, let attention = notchAttentionQueue.first else {
+            completedTimer?.invalidate()
+            completedTimer = nil
+            presentedAttentionID = nil
+            stealthAlertTimer?.invalidate()
+            stealthAlertTimer = nil
+            stealthAlertSliverVisible = false
+            syncNotchFrame(animated: true)
+            updateClockTimer()
+            return
+        }
+        guard presentedAttentionID != attention.id else { return }
+        completedTimer?.invalidate()
+        completedTimer = nil
+        presentedAttentionID = attention.id
+        switch attention.kind {
+        case .permission, .question:
+            stealthAlertStartedAt = Date()
+            stealthAlertSliverVisible = true
+            stealthAlertTimer?.invalidate()
+            stealthAlertTimer = Timer.scheduledTimer(withTimeInterval: 2, repeats: false) { [weak self] _ in
+                self?.stealthAlertSliverVisible = false
+                self?.syncNotchFrame(animated: true)
+            }
+        case .completed:
+            stealthAlertTimer?.invalidate()
+            stealthAlertTimer = nil
+            stealthAlertSliverVisible = false
+            completedStartedAt = Date()
+            let noticeID = attention.id
+            completedTimer = Timer.scheduledTimer(
+                withTimeInterval: stealthMode ? 2 : completedDuration,
+                repeats: false
+            ) { [weak self] _ in
+                guard let self, self.notchAttentionQueue.first?.id == noticeID else { return }
+                self.notchAttentionQueue.removeFirst()
+                self.presentedAttentionID = nil
+                self.refreshAttentionPresentation()
+            }
+        }
+        syncNotchFrame(animated: true)
+        updateClockTimer()
+    }
+
+    private func rememberCurrentSession() {
+        session.archiveCurrentIfNeeded()
+        if let id = session.currentArchiveID {
+            liveSessions[id] = session
+        } else {
+            stopObserving(session)
+        }
+        pruneLiveSessions()
+    }
+
+    private func stopObserving(_ candidate: AgentSession) {
+        let key = ObjectIdentifier(candidate)
+        observedSessions.removeValue(forKey: key)
+        observedSessionStates.removeValue(forKey: key)
+        removeAttention(for: candidate)
+    }
+
+    private func pruneLiveSessions() {
+        let archivedIDs = Set(ChatArchiveStore.shared.chats.map(\.id))
+        let expiredIDs = liveSessions.compactMap { id, candidate in
+            !archivedIDs.contains(id) && candidate !== session && !candidate.isRunning
+                ? id : nil
+        }
+        for id in expiredIDs {
+            if let candidate = liveSessions.removeValue(forKey: id) {
+                stopObserving(candidate)
+            }
+        }
+    }
+
+    private func activateSession(_ next: AgentSession) {
+        session = next
+        observeSession(next)
+        // Explicitly opening a chat consumes any notch notices for it. Its
+        // live pending question/permission remains in the panel itself.
+        removeAttention(for: next)
+        pruneLiveSessions()
+        if backgroundObserversStarted { bindActiveSessionObservers() }
+        DispatchQueue.main.async { [weak self] in
+            self?.syncNotchFrame(animated: true)
+            self?.updateClockTimer()
+        }
+    }
+
+    func startNewChat() {
+        rememberCurrentSession()
+        activateSession(AgentSession())
+    }
+
+    func restoreChat(_ chat: ChatArchive) {
+        guard session.currentArchiveID != chat.id else { return }
+        rememberCurrentSession()
+        if let live = liveSessions[chat.id] {
+            activateSession(live)
+            return
+        }
+        let restored = AgentSession()
+        restored.load(chat)
+        liveSessions[chat.id] = restored
+        activateSession(restored)
+    }
+
+    func deleteChat(_ id: UUID) {
+        if let live = liveSessions.removeValue(forKey: id) {
+            if live.isRunning { live.cancel() }
+            stopObserving(live)
+        }
+        if session.currentArchiveID == id {
+            activateSession(AgentSession())
+        }
+        ChatArchiveStore.shared.delete(id)
+    }
+
+    func isChatRunning(_ id: UUID) -> Bool {
+        if session.currentArchiveID == id { return session.isRunning }
+        return liveSessions[id]?.isRunning == true
+    }
+
+    func archiveAllSessions() {
+        rememberCurrentSession()
+        for candidate in liveSessions.values { candidate.archiveCurrentIfNeeded() }
+    }
+
+    // Opening a queued question/completion makes its conversation the active
+    // one. Permission buttons deliberately bypass this path so a quick allow
+    // or deny never changes the last-opened chat.
+    func openNotchContent(takeKeyboard: Bool = true) {
+        if let attention = notchAttentionQueue.first {
+            if attention.session !== session {
+                activateSession(attention.session)
+            } else {
+                removeAttention(for: attention.session)
+            }
+        }
+        expand(takeKeyboard: takeKeyboard)
+    }
+
+    func respondToNotchPermission(_ decision: PermissionDecision) {
+        guard notchMode == .permission else { return }
+        notchSession.respondPermission(decision)
     }
 
     func installShortcutRegistrationHandler(_ handler: @escaping (GlobalShortcut.Kind, GlobalShortcut) -> String?) {
@@ -848,11 +1150,17 @@ final class AppState: ObservableObject {
 
     var notchMode: NotchMode {
         if expanded { return .idle }
+        if let attention = notchAttentionQueue.first {
+            switch attention.kind {
+            case .permission: return .permission
+            case .question: return .question
+            case .completed: return .completed
+            }
+        }
         if session.pendingPermission != nil { return .permission }
         if session.pendingQuestion != nil { return .question }
         // Silent screenshot turn: hide all background activity in the notch.
         if session.isRunning { return silentTurn ? .idle : .working }
-        if showingCompleted { return .completed }
         return .idle
     }
 
@@ -900,7 +1208,7 @@ final class AppState: ObservableObject {
         case .idle:
             return base
         case .working:
-            let extra: CGFloat = session.provider == .chatgpt ? 170 : 300
+            let extra: CGFloat = notchSession.provider == .chatgpt ? 170 : 300
             return NSSize(width: min(base.width + extra, maxPanelWidth), height: base.height + 1)
         case .permission:
             return NSSize(width: min(base.width + 220, maxPanelWidth), height: base.height + 66)
@@ -917,6 +1225,32 @@ final class AppState: ObservableObject {
     // session state that affects the notch shape re-syncs the window frame;
     // async so the @Published value has settled before we read notchMode.
     func startBackgroundObservers() {
+        backgroundObserversStarted = true
+        bindActiveSessionObservers()
+        $expanded.dropFirst().sink { [weak self] _ in
+            DispatchQueue.main.async {
+                if self?.expanded == false {
+                    self?.enqueueActivePendingAttentionIfNeeded()
+                }
+                self?.presentedAttentionID = nil
+                self?.refreshAttentionPresentation()
+                self?.syncNotchFrame(animated: true)
+                self?.updateClockTimer()
+            }
+        }.store(in: &cancellables)
+    }
+
+    private func enqueueActivePendingAttentionIfNeeded() {
+        if let request = session.pendingPermission {
+            enqueueAttention(for: session, kind: .permission, signalID: request.id)
+        }
+        if let request = session.pendingQuestion {
+            enqueueAttention(for: session, kind: .question, signalID: request.id)
+        }
+    }
+
+    private func bindActiveSessionObservers() {
+        activeSessionCancellables.removeAll()
         let resync: () -> Void = { [weak self] in
             DispatchQueue.main.async {
                 guard let self else { return }
@@ -924,84 +1258,7 @@ final class AppState: ObservableObject {
                 self.updateClockTimer()
             }
         }
-        // isRunning also drives the transient "Done" pill, so it gets its own
-        // handler rather than the plain resync.
-        session.$isRunning.dropFirst().sink { [weak self] _ in
-            DispatchQueue.main.async { self?.handleRunningChanged() }
-        }.store(in: &cancellables)
-        // Alerts also drive the stealth announcement sliver's lifecycle.
-        let alertResync: () -> Void = { [weak self] in
-            DispatchQueue.main.async {
-                guard let self else { return }
-                self.updateStealthAlertSliver()
-                self.syncNotchFrame(animated: true)
-                self.updateClockTimer()
-            }
-        }
-        session.$pendingPermission.dropFirst().sink { _ in alertResync() }.store(in: &cancellables)
-        session.$pendingQuestion.dropFirst().sink { _ in alertResync() }.store(in: &cancellables)
-        session.$provider.dropFirst().sink { _ in resync() }.store(in: &cancellables)
-        $expanded.dropFirst().sink { _ in resync() }.store(in: &cancellables)
-    }
-
-    // Restarts the 2-sweep announcement whenever a new alert lands (a new
-    // question in a multi-question request re-announces too), and clears it
-    // the moment the alert is answered.
-    private func updateStealthAlertSliver() {
-        let active = session.pendingPermission != nil || session.pendingQuestion != nil
-        stealthAlertTimer?.invalidate()
-        stealthAlertTimer = nil
-        guard active else {
-            stealthAlertSliverVisible = false
-            return
-        }
-        stealthAlertStartedAt = Date()
-        stealthAlertSliverVisible = true
-        stealthAlertTimer = Timer.scheduledTimer(withTimeInterval: 2, repeats: false) { [weak self] _ in
-            self?.stealthAlertSliverVisible = false
-            self?.syncNotchFrame(animated: true)
-        }
-    }
-
-    private func handleRunningChanged() {
-        if session.isRunning {
-            // A new turn cancels any lingering completed pill.
-            showingCompleted = false
-            completedTimer?.invalidate()
-            completedTimer = nil
-        } else {
-            if let last = session.messages.last, last.role == .assistant {
-                if silentTurn {
-                    // Screenshot turns: classify the response based on content.
-                    multipleChoiceTurn = !Self.multipleChoiceAnswers(from: last.text).isEmpty
-                    if multipleChoiceTurn {
-                        performMultipleChoiceFeedback(for: last.text)
-                    } else {
-                        // Normal response to a screenshot: steady Caps Lock LED for 1 second.
-                        CapsLockLED.shared.setOn(true)
-                        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
-                            CapsLockLED.shared.setOn(false)
-                        }
-                    }
-                } else {
-                    performFeedback()
-                }
-                if !expanded, !silentTurn, !multipleChoiceTurn {
-                    showingCompleted = true
-                    completedStartedAt = Date()
-                    completedTimer?.invalidate()
-                    completedTimer = Timer.scheduledTimer(withTimeInterval: stealthMode ? 2 : completedDuration, repeats: false) { [weak self] _ in
-                        self?.showingCompleted = false
-                        self?.syncNotchFrame(animated: true)
-                    }
-                }
-            }
-            // A silent / multiple-choice turn ends when the session stops running.
-            silentTurn = false
-            multipleChoiceTurn = false
-        }
-        syncNotchFrame(animated: true)
-        updateClockTimer()
+        session.$provider.dropFirst().sink { _ in resync() }.store(in: &activeSessionCancellables)
     }
 
     private func syncNotchFrame(animated: Bool) {

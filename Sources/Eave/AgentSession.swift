@@ -303,6 +303,13 @@ struct ChatArchive: Identifiable, Codable {
     // "unknown, leave the current settings alone", while a present struct
     // with a nil field means "the chat used the provider default".
     var settings: ChatSettings?
+    // The live picker can differ from the settings used by the last completed
+    // turn. Preserve both so an unfinished draft reopens exactly as left.
+    var pickerSettings: ChatSettings?
+    // Composer state is kept with the conversation so switching chats never
+    // leaks an unfinished prompt or pending files into another conversation.
+    var draft: String?
+    var pendingAttachmentPaths: [String]?
     let date: Date
 }
 
@@ -314,6 +321,7 @@ struct ChatSettings: Codable, Equatable {
     var mode: String?
     var effort: String?
     var fastMode: Bool?
+    var contextVersion: String?
 }
 
 
@@ -771,13 +779,56 @@ struct AgentQuestion {
     let multiSelect: Bool
 }
 
-struct QuestionRequest {
+struct QuestionRequest: Identifiable {
+    let id = UUID()
     let questions: [AgentQuestion]
     var index = 0
     var answers: [String: String] = [:]
     let respond: ([String: String]) -> Void
 
     var current: AgentQuestion { questions[index] }
+}
+
+// Shared persisted history. Live conversations remain separate AgentSession
+// objects; this store is only their durable index and restart snapshot.
+final class ChatArchiveStore: ObservableObject {
+    static let shared = ChatArchiveStore()
+
+    @Published private(set) var chats: [ChatArchive] = []
+
+    private static let maxChats = 10
+    private static let chatsURL = AppPaths.supportDirectory.appendingPathComponent("chats.json")
+
+    private init() {
+        if let data = try? Data(contentsOf: Self.chatsURL),
+           let saved = try? JSONDecoder().decode([ChatArchive].self, from: data) {
+            chats = Array(saved.sorted { $0.date > $1.date }.prefix(Self.maxChats))
+        }
+    }
+
+    func upsert(_ chat: ChatArchive) {
+        if let index = chats.firstIndex(where: { $0.id == chat.id }) {
+            chats[index] = chat
+        } else {
+            chats.append(chat)
+        }
+        chats.sort { $0.date > $1.date }
+        if chats.count > Self.maxChats {
+            chats.removeLast(chats.count - Self.maxChats)
+        }
+        persist()
+    }
+
+    func delete(_ id: UUID) {
+        chats.removeAll { $0.id == id }
+        persist()
+    }
+
+    private func persist() {
+        if let data = try? JSONEncoder().encode(chats) {
+            try? data.write(to: Self.chatsURL, options: .atomic)
+        }
+    }
 }
 
 // Drives a coding-agent CLI in headless mode. CLI providers speak JSONL over
@@ -804,9 +855,12 @@ final class AgentSession: ObservableObject {
     @Published var turnStartedAt: Date?
     @Published var turnChars = 0
     @Published var lastTurnDuration: TimeInterval = 0
+    var silentTurn = false
+    var multipleChoiceTurn = false
     @Published var usageLimit: ProviderLimitNotice?
     @Published var provider: AgentProvider = .claude {
         didSet {
+            UserDefaults.standard.set(provider.rawValue, forKey: Self.providerDefaultsKey)
             if usageLimit?.provider != provider { usageLimit = nil }
             // Restores set provider as a side effect and already report
             // chat_restored; counting them would pollute provider_switched.
@@ -816,23 +870,31 @@ final class AgentSession: ObservableObject {
         }
     }
     private var isRestoringChat = false
-    // Missing key = provider default (no flag). Keyed per provider so
-    // switching between Claude and Codex remembers each one's choices.
+    // Missing key = provider default (no flag). Persisted per provider so
+    // switching providers, starting a new chat, and relaunching keep each
+    // provider's choices.
     @Published var modelChoice: [AgentProvider: String] = [
         .claude: "claude-sonnet-5",
         .codex: "gpt-5.6-terra",
         .cursor: "composer-2.5",
-    ]
+    ] {
+        didSet { persist(modelChoice, key: Self.modelChoiceDefaultsKey) }
+    }
     @Published var modeChoice: [AgentProvider: String] = [
         .claude: "auto",
         .cursor: "force",
-    ]
+    ] {
+        didSet { persist(modeChoice, key: Self.modeChoiceDefaultsKey) }
+    }
     // Missing key = the CLI's own default effort; set once the user picks a
     // level. Keyed per provider like modelChoice.
-    @Published var effortChoice: [AgentProvider: String] = [:]
-    // Speed is session state for every CLI. Cursor's raw `-fast` id is chosen
-    // only when a request launches.
-    @Published var fastModeChoice: [AgentProvider: Bool] = [:]
+    @Published var effortChoice: [AgentProvider: String] = [:] {
+        didSet { persist(effortChoice, key: Self.effortChoiceDefaultsKey) }
+    }
+    // Cursor's raw `-fast` id is chosen only when a request launches.
+    @Published var fastModeChoice: [AgentProvider: Bool] = [:] {
+        didSet { persist(fastModeChoice, key: Self.fastModeChoiceDefaultsKey) }
+    }
     @Published private(set) var cursorModelFamilies = CursorModelFamily.build(
         from: AgentProvider.cursor.models
     )
@@ -846,22 +908,44 @@ final class AgentSession: ObservableObject {
     @Published var questionSelection: Set<String> = []
     @Published var questionDraft = ""
     @Published var attachments: [URL] = []
-    @Published var pastChats: [ChatArchive] = []
-    private static let maxPastChats = 10
+    private static let providerDefaultsKey = "Eave.provider"
+    private static let modelChoiceDefaultsKey = "Eave.modelChoice"
+    private static let modeChoiceDefaultsKey = "Eave.modeChoice"
+    private static let effortChoiceDefaultsKey = "Eave.effortChoice"
+    private static let fastModeChoiceDefaultsKey = "Eave.fastModeChoice"
     private static let cursorContextDefaultsKey = "Eave.cursorContextChoice"
     // The history entry the live session was restored from, if any. Keeps a
     // reopened chat listed (and in place) in history; archiving updates that
     // entry instead of inserting a duplicate.
-    private var currentArchiveID: UUID?
+    private(set) var currentArchiveID: UUID?
+    private var lastTouchedAt = Date()
     // Settings the current conversation last ran with (set on send, carried
     // over on restore). Archived instead of the live picker values so that
     // changing the picker without sending never rewrites a chat's history.
     private var lastRunSettings: ChatSettings?
-
-    private static let chatsURL = AppPaths.supportDirectory.appendingPathComponent("chats.json")
+    // AppState supplies a cross-session gate for providers whose transport is
+    // process-global (the shared ChatGPT web view and Cursor approval hook).
+    var runBlockReason: ((AgentProvider) -> String?)?
 
     init() {
         AppPaths.migrateLegacyScreenshots()
+        let defaults = UserDefaults.standard
+        if let value = defaults.string(forKey: Self.providerDefaultsKey),
+           let savedProvider = AgentProvider(rawValue: value) {
+            provider = savedProvider
+        }
+        modelChoice = Self.savedChoices(
+            from: defaults, key: Self.modelChoiceDefaultsKey, fallback: modelChoice
+        )
+        modeChoice = Self.savedChoices(
+            from: defaults, key: Self.modeChoiceDefaultsKey, fallback: modeChoice
+        )
+        effortChoice = Self.savedChoices(
+            from: defaults, key: Self.effortChoiceDefaultsKey, fallback: effortChoice
+        )
+        fastModeChoice = Self.savedChoices(
+            from: defaults, key: Self.fastModeChoiceDefaultsKey, fallback: fastModeChoice
+        )
         if let saved = UserDefaults.standard.dictionary(forKey: Self.cursorContextDefaultsKey)
             as? [String: String] {
             var migrated = saved
@@ -875,11 +959,28 @@ final class AgentSession: ObservableObject {
                 UserDefaults.standard.set(migrated, forKey: Self.cursorContextDefaultsKey)
             }
         }
-        if let data = try? Data(contentsOf: Self.chatsURL),
-           let chats = try? JSONDecoder().decode([ChatArchive].self, from: data) {
-            pastChats = Array(chats.prefix(Self.maxPastChats))
-        }
         refreshCursorModelCatalog()
+    }
+
+    private static func savedChoices<Value>(
+        from defaults: UserDefaults,
+        key: String,
+        fallback: [AgentProvider: Value]
+    ) -> [AgentProvider: Value] {
+        guard let saved = defaults.dictionary(forKey: key) else { return fallback }
+        return saved.reduce(into: [:]) { result, entry in
+            guard let provider = AgentProvider(rawValue: entry.key),
+                  let value = entry.value as? Value
+            else { return }
+            result[provider] = value
+        }
+    }
+
+    private func persist<Value>(_ choices: [AgentProvider: Value], key: String) {
+        UserDefaults.standard.set(
+            Dictionary(uniqueKeysWithValues: choices.map { ($0.key.rawValue, $0.value) }),
+            forKey: key
+        )
     }
 
     func addAttachments(_ urls: [URL]) {
@@ -1065,11 +1166,6 @@ final class AgentSession: ObservableObject {
         return (effort, thinkingMode)
     }
 
-    private func persistChats() {
-        if let data = try? JSONEncoder().encode(pastChats) {
-            try? data.write(to: Self.chatsURL, options: .atomic)
-        }
-    }
     @Published var workingDirectory: URL = FileManager.default
         .homeDirectoryForCurrentUser
         .appendingPathComponent("Documents/code")
@@ -1119,6 +1215,11 @@ final class AgentSession: ObservableObject {
     // bubble) so it isn't printed twice.
     func send(_ text: String, echo: Bool = true) {
         guard !isRunning else { return }
+        if let reason = runBlockReason?(provider) {
+            if draft.isEmpty { draft = text }
+            appendError(reason)
+            return
+        }
         usageLimit = nil
         turnStartedAt = Date()
         turnChars = 0
@@ -1137,15 +1238,17 @@ final class AgentSession: ObservableObject {
             model: modelChoice[provider],
             mode: modeChoice[provider],
             effort: effortChoice[provider],
-            fastMode: fastModeChoice[provider]
+            fastMode: fastModeChoice[provider],
+            contextVersion: effectiveContextVersion(for: provider)
         )
 
-        // A reopened chat sits in place in history until actually continued;
-        // the first new message bumps it to the top.
-        if let id = currentArchiveID,
-           let idx = pastChats.firstIndex(where: { $0.id == id }), idx != 0 {
-            pastChats.insert(pastChats.remove(at: idx), at: 0)
-            persistChats()
+        // Only an ordinary user send touches history ordering. Permission
+        // decisions, question answers, opening a chat, and background output
+        // all preserve its existing position.
+        if echo {
+            if currentArchiveID == nil { currentArchiveID = UUID() }
+            lastTouchedAt = Date()
+            archiveCurrentIfNeeded()
         }
 
         if provider == .chatgpt {
@@ -2066,15 +2169,18 @@ final class AgentSession: ObservableObject {
         cursorSessionID = nil
     }
 
-    func restore(_ chat: ChatArchive) {
-        cancel()
+    func load(_ chat: ChatArchive) {
         Telemetry.record("chat_restored", ["provider": chat.provider.rawValue])
         isRestoringChat = true
         defer { isRestoringChat = false }
-        archiveCurrentIfNeeded()
         transcriptEpoch += 1
         currentArchiveID = chat.id
+        lastTouchedAt = chat.date
         messages = chat.messages
+        draft = chat.draft ?? ""
+        attachments = (chat.pendingAttachmentPaths ?? []).map {
+            AppPaths.relocatedManagedURL(for: URL(fileURLWithPath: $0))
+        }
         provider = chat.provider
         usageLimit = nil
         claudeSessionID = chat.claudeSessionID
@@ -2082,13 +2188,17 @@ final class AgentSession: ObservableObject {
         chatgptThreadID = chat.chatgptThreadID
         cursorSessionID = chat.cursorSessionID
         lastRunSettings = chat.settings
-        if let settings = chat.settings {
+        if let settings = chat.pickerSettings ?? chat.settings {
             // Restore only the chat's own provider slot; the other providers'
             // choices are unrelated to this chat.
             apply(settings.model, into: &modelChoice)
             apply(settings.mode, into: &modeChoice)
             apply(settings.effort, into: &effortChoice)
             apply(settings.fastMode, into: &fastModeChoice)
+            if provider == .cursor,
+               !contextVersions(for: provider).isEmpty {
+                setContextVersion(settings.contextVersion ?? "regular", for: provider)
+            }
         }
         if let path = chat.workingDirectory {
             var isDirectory: ObjCBool = false
@@ -2110,17 +2220,22 @@ final class AgentSession: ObservableObject {
     }
 
     func deleteChat(_ id: UUID) {
-        pastChats.removeAll { $0.id == id }
         if currentArchiveID == id { currentArchiveID = nil }
-        persistChats()
+        ChatArchiveStore.shared.delete(id)
     }
 
     func archiveCurrentIfNeeded() {
-        guard messages.contains(where: { $0.role == .user }) else { return }
+        guard messages.contains(where: { $0.role == .user })
+                || !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                || !attachments.isEmpty
+        else { return }
+        if currentArchiveID == nil { currentArchiveID = UUID() }
+        let draftTitle = draft.trimmingCharacters(in: .whitespacesAndNewlines)
         let title = messages.first(where: { $0.role == .user })
-            .map { String($0.text.prefix(60)) } ?? "Untitled"
+            .map { String($0.text.prefix(60)) }
+            ?? (draftTitle.isEmpty ? "Draft" : String(draftTitle.prefix(60)))
         let archive = ChatArchive(
-            id: currentArchiveID ?? UUID(),
+            id: currentArchiveID!,
             title: title,
             provider: provider,
             messages: messages,
@@ -2130,22 +2245,18 @@ final class AgentSession: ObservableObject {
             cursorSessionID: cursorSessionID,
             workingDirectory: workingDirectory.path,
             settings: lastRunSettings,
-            date: Date()
+            pickerSettings: ChatSettings(
+                model: modelChoice[provider],
+                mode: modeChoice[provider],
+                effort: effortChoice[provider],
+                fastMode: fastModeChoice[provider],
+                contextVersion: effectiveContextVersion(for: provider)
+            ),
+            draft: draft.isEmpty ? nil : draft,
+            pendingAttachmentPaths: attachments.isEmpty ? nil : attachments.map(\.path),
+            date: lastTouchedAt
         )
-        if let idx = pastChats.firstIndex(where: { $0.id == archive.id }) {
-            // The reopened chat is already listed: refresh it in place rather
-            // than reinsert, so merely viewing it doesn't reshuffle history.
-            // (send() already bumped it to the top if it was continued.)
-            if pastChats[idx].messages == archive.messages,
-               pastChats[idx].settings == archive.settings { return }
-            pastChats[idx] = archive
-        } else {
-            pastChats.insert(archive, at: 0)
-        }
-        if pastChats.count > Self.maxPastChats {
-            pastChats.removeLast(pastChats.count - Self.maxPastChats)
-        }
-        persistChats()
+        ChatArchiveStore.shared.upsert(archive)
     }
 
     // MARK: - ChatGPT embedded web view (ChatGPTWeb.swift)

@@ -58,6 +58,14 @@ final class Updater: NSObject, ObservableObject, SPUUpdaterDelegate {
         return short ?? "dev"
     }
 
+    var isBetaBuild: Bool {
+        Bundle.main.object(forInfoDictionaryKey: "EaveBuildChannel") as? String == "beta"
+    }
+
+    var displayVersion: String {
+        currentVersion + (isBetaBuild ? " Beta" : "")
+    }
+
     var buildNumber: String? {
         Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String
     }

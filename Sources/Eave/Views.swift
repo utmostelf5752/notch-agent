@@ -238,6 +238,18 @@ struct VisualEffectBackdrop: NSViewRepresentable {
     }
 }
 
+// Rebuilds the observing child when AppState activates a different live chat.
+// The AgentSession object itself remains alive, so background provider work
+// continues to publish into the conversation it started in.
+struct ActiveNotchTargetView: View {
+    @ObservedObject var state: AppState
+
+    var body: some View {
+        NotchTargetView(state: state, session: state.notchSession)
+            .id(ObjectIdentifier(state.notchSession))
+    }
+}
+
 // The always-on click target drawn over the physical notch. While the panel
 // is collapsed it doubles as "background mode": the notch grows sideways to
 // narrate the running turn (activity + elapsed/tokens) and grows downward into
@@ -372,7 +384,7 @@ struct NotchTargetView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
         .contentShape(Rectangle())
-        .onTapGesture { state.expand(takeKeyboard: true) }
+        .onTapGesture { state.openNotchContent(takeKeyboard: true) }
     }
 
     // MARK: Stealth — nothing at all while idle or working. Alerts and
@@ -385,7 +397,7 @@ struct NotchTargetView: View {
             Color.clear
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .contentShape(Rectangle())
-                .onTapGesture { state.expand(takeKeyboard: true) }
+                .onTapGesture { state.openNotchContent(takeKeyboard: true) }
         case .permission, .question:
             if state.stealthAlertSliverVisible {
                 compactSliver(
@@ -395,7 +407,7 @@ struct NotchTargetView: View {
                 Color.clear
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                     .contentShape(Rectangle())
-                    .onTapGesture { state.expand(takeKeyboard: true) }
+                    .onTapGesture { state.openNotchContent(takeKeyboard: true) }
             }
         case .completed:
             drainingSliver(
@@ -413,7 +425,7 @@ struct NotchTargetView: View {
             .animation(.easeOut(duration: 0.15), value: state.notchHovering)
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .contentShape(Rectangle())
-            .onTapGesture { state.expand(takeKeyboard: true) }
+            .onTapGesture { state.openNotchContent(takeKeyboard: true) }
     }
 
     // MARK: Working — activity in the left wing, tokens/time in the right,
@@ -452,7 +464,7 @@ struct NotchTargetView: View {
             .frame(maxWidth: .infinity, alignment: .trailing)
         }
         .contentShape(Rectangle())
-        .onTapGesture { state.expand(takeKeyboard: true) }
+        .onTapGesture { state.openNotchContent(takeKeyboard: true) }
     }
 
     // MARK: Completed — Done on the left; tokens + turn duration on the right;
@@ -488,7 +500,7 @@ struct NotchTargetView: View {
                 .padding(.bottom, 3)
         }
         .contentShape(Rectangle())
-        .onTapGesture { state.expand(takeKeyboard: true) }
+        .onTapGesture { state.openNotchContent(takeKeyboard: true) }
     }
 
     // One continuous green fill that shrinks left→right. Cubic ease-out so it
@@ -532,7 +544,7 @@ struct NotchTargetView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
         .contentShape(Rectangle())
-        .onTapGesture { state.expand(takeKeyboard: true) }
+        .onTapGesture { state.openNotchContent(takeKeyboard: true) }
     }
 
     // MARK: Alert band — permission or question, below the camera row.
@@ -560,7 +572,7 @@ struct NotchTargetView: View {
 
     private var permissionButtons: some View {
         HStack(spacing: 6) {
-            Button { session.respondPermission(.deny) } label: {
+            Button { state.respondToNotchPermission(.deny) } label: {
                 Text("Deny")
                     .font(.system(size: 11.5, weight: .semibold))
                     .foregroundStyle(Color(red: 224/255, green: 122/255, blue: 106/255))
@@ -568,7 +580,7 @@ struct NotchTargetView: View {
                     .background(Capsule().fill(Color.white.opacity(0.08)))
             }
             .buttonStyle(.plain)
-            Button { session.respondPermission(.allow) } label: {
+            Button { state.respondToNotchPermission(.allow) } label: {
                 Text("Allow")
                     .font(.system(size: 11.5, weight: .semibold))
                     .foregroundStyle(.black)
@@ -581,7 +593,7 @@ struct NotchTargetView: View {
 
     // Multiple choice needs the real UI, so Answer just opens the panel.
     private var answerButton: some View {
-        Button { state.expand(takeKeyboard: true) } label: {
+        Button { state.openNotchContent(takeKeyboard: true) } label: {
             HStack(spacing: 3) {
                 Text("Answer")
                 Image(systemName: "chevron.right").font(.system(size: 8, weight: .bold))
@@ -697,9 +709,19 @@ private struct ChatScrollDistanceReader: ViewModifier {
     }
 }
 
+struct ActiveChatRootView: View {
+    @ObservedObject var state: AppState
+
+    var body: some View {
+        ChatRootView(state: state, session: state.session)
+            .id(ObjectIdentifier(state.session))
+    }
+}
+
 struct ChatRootView: View {
     @ObservedObject var state: AppState
     @ObservedObject var session: AgentSession
+    @ObservedObject private var chatStore = ChatArchiveStore.shared
     @ObservedObject private var chatgptWeb = ChatGPTWeb.shared
     @FocusState private var inputFocused: Bool
     @State private var inspectedStep: ChatMessage?
@@ -1013,16 +1035,16 @@ struct ChatRootView: View {
     private var historyList: some View {
         ScrollView(showsIndicators: false) {
             VStack(alignment: .leading, spacing: 2) {
-                if session.pastChats.isEmpty {
+                if chatStore.chats.isEmpty {
                     Text("No past chats")
                         .font(.system(size: 12))
                         .foregroundStyle(.secondary)
                         .padding(8)
                 }
-                ForEach(session.pastChats) { chat in
+                ForEach(chatStore.chats) { chat in
                     HStack(spacing: 6) {
                         Button {
-                            session.restore(chat)
+                            state.restoreChat(chat)
                             state.showHistory = false
                         } label: {
                             VStack(alignment: .leading, spacing: 2) {
@@ -1037,15 +1059,22 @@ struct ChatRootView: View {
                             .contentShape(Rectangle())
                         }
                         .buttonStyle(.plain)
-                        Button {
-                            session.deleteChat(chat.id)
-                        } label: {
-                            Image(systemName: "trash")
-                                .font(.system(size: 10))
-                                .foregroundStyle(.secondary)
+                        if state.isChatRunning(chat.id) {
+                            ProgressView()
+                                .controlSize(.small)
+                                .frame(width: 14, height: 14)
+                                .help("Running in background")
+                        } else {
+                            Button {
+                                state.deleteChat(chat.id)
+                            } label: {
+                                Image(systemName: "trash")
+                                    .font(.system(size: 10))
+                                    .foregroundStyle(.secondary)
+                            }
+                            .buttonStyle(.plain)
+                            .help("Delete")
                         }
-                        .buttonStyle(.plain)
-                        .help("Delete")
                     }
                     .padding(.horizontal, 8)
                     .padding(.vertical, 5)
@@ -1078,7 +1107,7 @@ struct ChatRootView: View {
     }
 
     private var newChatButton: some View {
-        Button(action: session.reset) {
+        Button(action: state.startNewChat) {
             Image(systemName: "square.and.pencil")
                 .font(.system(size: 11 * s, weight: .medium))
                 .foregroundStyle(.white.opacity(0.55))
@@ -1461,14 +1490,37 @@ struct ChatRootView: View {
             if !session.attachments.isEmpty {
                 attachmentChips
             }
-            TextField("Ask anything…", text: $session.draft, axis: .vertical)
-                .textFieldStyle(.plain)
-                .lineLimit(1...4)
-                .font(.system(size: 13 * s))
-                .foregroundStyle(.white)
-                .tint(accent)
-                .focused($inputFocused)
-                .onSubmit(sendDraft)
+            ScrollViewReader { proxy in
+                ScrollView(.vertical) {
+                    VStack(spacing: 0) {
+                        TextField("Ask anything…", text: $session.draft, axis: .vertical)
+                            .textFieldStyle(.plain)
+                            .lineLimit(nil)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .font(.system(size: 13 * s))
+                            .foregroundStyle(.white)
+                            .tint(accent)
+                            .focused($inputFocused)
+                            .onSubmit(sendDraft)
+                        Color.clear
+                            .frame(height: 1)
+                            .id("composer-draft-bottom")
+                    }
+                    .frame(maxWidth: .infinity)
+                }
+                .onAppear {
+                    proxy.scrollTo("composer-draft-bottom", anchor: .bottom)
+                }
+                .onChange(of: session.draft) { _ in
+                    // TextField lays out its new line on the next pass; scroll
+                    // after that pass so the caret and newest text stay visible.
+                    DispatchQueue.main.async {
+                        proxy.scrollTo("composer-draft-bottom", anchor: .bottom)
+                    }
+                }
+            }
+            .frame(minHeight: 17 * s, maxHeight: 68 * s)
+            .fixedSize(horizontal: false, vertical: true)
             HStack(spacing: 6) {
                 attachButton
                 contextMenus
@@ -2318,7 +2370,7 @@ struct SettingsView: View {
             Divider()
 
             HStack {
-                Text("Eave \(Updater.shared.currentVersion)")
+                Text("Eave \(Updater.shared.displayVersion)")
                     .font(.system(size: 11)).foregroundStyle(.secondary)
                 Spacer()
                 Button("Quit") { NSApp.terminate(nil) }
@@ -2520,7 +2572,7 @@ struct SettingsView: View {
                 .padding(.top, 6)
             Text("Eave")
                 .font(.system(size: 17, weight: .semibold))
-            Text("Version \(updater.currentVersion)"
+            Text("Version \(updater.displayVersion)"
                 + (updater.buildNumber.map { " (\($0))" } ?? ""))
                 .font(.system(size: 11.5))
                 .foregroundStyle(.secondary)

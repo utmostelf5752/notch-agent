@@ -8,6 +8,7 @@ Eave is a Swift 5.9 macOS 13+ menu-bar application. Production code lives in `So
 
 - `./build.sh` compiles, bundles, and signs `build/Eave.app` using `swiftc`.
 - `open build/Eave.app` launches the shell-built app; use `pkill Eave` to stop it.
+- Treat workspace and Xcode Debug instances as beta builds: show `Beta` beside the version number and tint the menu-bar icon blue so they are immediately distinguishable from an installed release. Keep Release/CI artifacts unmarked with the standard menu-bar icon.
 - Open `Eave.xcodeproj` and run the shared `Eave` scheme for normal debugging. Do not open `Package.swift` as the primary Xcode project.
 - `xcodegen generate` regenerates the project after changing `project.yml` or the source layout.
 - `./make-dmg.sh` packages an already-built app as `build/Eave.dmg`.

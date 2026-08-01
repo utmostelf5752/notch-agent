@@ -10,8 +10,8 @@ settings:
   base:
     SWIFT_VERSION: "5.9"
     MACOSX_DEPLOYMENT_TARGET: "13.0"
-    MARKETING_VERSION: "0.1.0"
-    CURRENT_PROJECT_VERSION: "1"
+    MARKETING_VERSION: "0.1.41"
+    CURRENT_PROJECT_VERSION: "42"
     CODE_SIGN_STYLE: Manual
     CODE_SIGN_IDENTITY: "Apple Development"
     DEVELOPMENT_TEAM: WJZ957T3P9
@@ -48,6 +48,11 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: com.jagruth.eave
         INFOPLIST_FILE: Support/Info.plist
         GENERATE_INFOPLIST_FILE: NO
+      configs:
+        Debug:
+          EAVE_BUILD_CHANNEL: beta
+        Release:
+          EAVE_BUILD_CHANNEL: release
 
 schemes:
   Eave:

@@ -32,6 +32,7 @@ final class CodexAppServer {
     // Completion receives (result, errorMessage) — exactly one is non-nil.
     private var pendingRequests: [Int: (JSON?, String?) -> Void] = [:]
     private var initialized = false
+    private var readyCallbacks: [(String?) -> Void] = []
     // Threads opened by this process instance; anything else needs thread/resume.
     private var knownThreads: Set<String> = []
 
@@ -39,10 +40,22 @@ final class CodexAppServer {
 
     // MARK: - Process lifecycle
 
-    func start(executable: String, environment: [String: String]) throws {
-        guard !isRunning else { return }
+    func start(
+        executable: String,
+        environment: [String: String],
+        onReady: ((String?) -> Void)? = nil
+    ) throws {
+        if isRunning {
+            if initialized {
+                onReady?(nil)
+            } else if let onReady {
+                readyCallbacks.append(onReady)
+            }
+            return
+        }
         pendingRequests.removeAll()
         knownThreads.removeAll()
+        readyCallbacks.removeAll()
         initialized = false
 
         let p = Process()
@@ -80,20 +93,74 @@ final class CodexAppServer {
                 let waiting = self.pendingRequests.values
                 self.pendingRequests.removeAll()
                 waiting.forEach { $0(nil, "codex app-server exited") }
+                self.finishReady("codex app-server exited")
             }
         }
 
         try p.run()
         process = p
         stdinHandle = stdin.fileHandleForWriting
+        if let onReady { readyCallbacks.append(onReady) }
 
         request("initialize", [
             "clientInfo": ["name": "eave", "title": "Eave", "version": "0.1.0"],
             "capabilities": ["experimentalApi": true],
         ]) { [weak self] _, error in
-            guard error == nil else { return }
-            self?.initialized = true
-            self?.notify("initialized", nil)
+            guard let self else { return }
+            guard error == nil else {
+                self.finishReady(error)
+                return
+            }
+            self.initialized = true
+            self.notify("initialized", nil)
+            self.finishReady(nil)
+        }
+    }
+
+    func stop() {
+        guard process?.isRunning == true else { return }
+        process?.terminate()
+    }
+
+    deinit {
+        if process?.isRunning == true { process?.terminate() }
+    }
+
+    private func finishReady(_ error: String?) {
+        let callbacks = readyCallbacks
+        readyCallbacks.removeAll()
+        callbacks.forEach { $0(error) }
+    }
+
+    // Fetch every visible model page. Catalog callers use a short-lived
+    // server; conversation callers keep their existing long-lived process.
+    func listModels(completion: @escaping ([JSON]?, String?) -> Void) {
+        collectModels(cursor: nil, accumulated: [], completion: completion)
+    }
+
+    private func collectModels(
+        cursor: String?,
+        accumulated: [JSON],
+        completion: @escaping ([JSON]?, String?) -> Void
+    ) {
+        var params: JSON = ["includeHidden": false, "limit": 100]
+        if let cursor { params["cursor"] = cursor }
+        request("model/list", params) { [weak self] result, error in
+            if let error {
+                completion(nil, error)
+                return
+            }
+            let page = (result?["data"] as? [JSON]) ?? []
+            let models = accumulated + page
+            if let nextCursor = result?["nextCursor"] as? String, !nextCursor.isEmpty {
+                self?.collectModels(
+                    cursor: nextCursor,
+                    accumulated: models,
+                    completion: completion
+                )
+            } else {
+                completion(models, nil)
+            }
         }
     }
 

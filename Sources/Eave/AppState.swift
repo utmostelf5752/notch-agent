@@ -141,6 +141,13 @@ final class CapsLockLED {
 }
 
 // Main-thread only. Not @MainActor-annotated so it can be reached from the
+// A background chat that finished unseen, shown as a status-bar menu shortcut.
+struct UnreadChat: Identifiable, Equatable {
+    let id: UUID          // the chat's archive id
+    var title: String
+    var finishedAt: Date
+}
+
 // Carbon hotkey callback via DispatchQueue.main without strict-concurrency friction.
 final class AppState: ObservableObject {
     static let shared = AppState()
@@ -443,6 +450,14 @@ final class AppState: ObservableObject {
     @Published private var notchAttentionQueue: [NotchAttention] = []
     private var presentedAttentionID: UUID?
 
+    // Chats that finished a turn while the user wasn't looking and hasn't opened
+    // since. Drives the status-bar unread dot and the menu shortcut list. Newest
+    // first, capped, and expired after two days. Unlike a completion pill this
+    // persists until the chat is opened.
+    @Published private(set) var unreadChats: [UnreadChat] = []
+    private static let unreadMaxItems = 4
+    private static let unreadMaxAge: TimeInterval = 2 * 24 * 60 * 60
+
     var notchSession: AgentSession { notchAttentionQueue.first?.session ?? session }
 
     private func updatePopoverSuspend() {
@@ -697,7 +712,61 @@ final class AppState: ObservableObject {
         }
         performFeedback()
         guard candidate.pendingPermission == nil, candidate.pendingQuestion == nil else { return }
+        // Mark the chat unread unless the user is watching this very chat right
+        // now (its panel open and focused). A background chat finishing while
+        // the panel shows a different chat still counts as unseen.
+        if candidate !== session || !expanded {
+            noteBackgroundUnread(for: candidate)
+        }
+        // The "Done" pill is a glance-notification for when the panel is closed.
+        // If the panel is already open the user is present, and queuing the pill
+        // would just replay the Done animation when they later collapse the notch.
+        guard !expanded else { return }
         enqueueAttention(for: candidate, kind: .completed, signalID: nil)
+    }
+
+    private func noteBackgroundUnread(for candidate: AgentSession) {
+        guard let id = candidate.currentArchiveID else { return }
+        let title = candidate.messages.first(where: { $0.role == .user })
+            .map { String($0.text.prefix(60)) } ?? "Chat"
+        var list = pruneUnread(unreadChats)
+        list.removeAll { $0.id == id }
+        list.insert(UnreadChat(id: id, title: title, finishedAt: Date()), at: 0)
+        unreadChats = Array(list.prefix(Self.unreadMaxItems))
+    }
+
+    private func pruneUnread(_ list: [UnreadChat]) -> [UnreadChat] {
+        let cutoff = Date().addingTimeInterval(-Self.unreadMaxAge)
+        return list.filter { $0.finishedAt >= cutoff }
+    }
+
+    func clearUnread(_ id: UUID?) {
+        guard let id, unreadChats.contains(where: { $0.id == id }) else { return }
+        unreadChats.removeAll { $0.id == id }
+    }
+
+    // Prune expired entries lazily and hand back the current list (newest first,
+    // already capped). Called when the status-bar menu opens.
+    func currentUnread() -> [UnreadChat] {
+        let pruned = pruneUnread(unreadChats)
+        if pruned.count != unreadChats.count { unreadChats = pruned }
+        return pruned
+    }
+
+    // Open the chat behind an unread menu shortcut and clear its mark.
+    func openUnreadChat(_ id: UUID) {
+        clearUnread(id)
+        if session.currentArchiveID == id {
+            expand(takeKeyboard: true)
+            return
+        }
+        if let chat = ChatArchiveStore.shared.chats.first(where: { $0.id == id }) {
+            restoreChat(chat)
+        } else if let live = liveSessions[id] {
+            rememberCurrentSession()
+            activateSession(live)
+        }
+        expand(takeKeyboard: true)
     }
 
     private func enqueueAttention(
@@ -723,6 +792,15 @@ final class AppState: ObservableObject {
         notchAttentionQueue.removeAll {
             $0.session === candidate && (kind == nil || $0.kind == kind)
         }
+        if notchAttentionQueue.first?.id != previousFront {
+            presentedAttentionID = nil
+        }
+        refreshAttentionPresentation()
+    }
+
+    private func clearCompletedAttentions() {
+        let previousFront = notchAttentionQueue.first?.id
+        notchAttentionQueue.removeAll { $0.kind == .completed }
         if notchAttentionQueue.first?.id != previousFront {
             presentedAttentionID = nil
         }
@@ -810,6 +888,7 @@ final class AppState: ObservableObject {
         // Explicitly opening a chat consumes any notch notices for it. Its
         // live pending question/permission remains in the panel itself.
         removeAttention(for: next)
+        clearUnread(next.currentArchiveID)
         pruneLiveSessions()
         if backgroundObserversStarted { bindActiveSessionObservers() }
         DispatchQueue.main.async { [weak self] in
@@ -837,6 +916,7 @@ final class AppState: ObservableObject {
     }
 
     func deleteChat(_ id: UUID) {
+        clearUnread(id)
         if let live = liveSessions.removeValue(forKey: id) {
             if live.isRunning { live.cancel() }
             stopObserving(live)
@@ -1367,6 +1447,12 @@ final class AppState: ObservableObject {
             panel.setFrame(expandedFrame, display: false)
             expanded = true
             lastExpandAt = Date()
+            // Opening the panel consumes any pending "Done" pills so they don't
+            // replay when the notch collapses again, and marks the chat now on
+            // screen as seen.
+            clearCompletedAttentions()
+            clearUnread(session.currentArchiveID)
+            unreadChats = pruneUnread(unreadChats)
             panel.orderFrontRegardless()
             applyPanelBlur()
             NSLog("Eave: expand(takeKeyboard=\(takeKeyboard)) frame=\(NSStringFromRect(panel.frame)) visible=\(panel.isVisible)")

@@ -192,13 +192,17 @@ enum ImageAttachmentNormalizer {
     }
 
     private static func renderedBitmap(_ image: NSImage, width: Int, height: Int) -> NSBitmapImageRep? {
+        // 32-bit RGBA: NSGraphicsContext(bitmapImageRep:) rejects the 24-bit
+        // no-alpha layout on recent macOS and returns nil. We fill an opaque
+        // white background before drawing, so the alpha channel is unused and
+        // the JPEG encode (which drops alpha) is unaffected.
         guard let bitmap = NSBitmapImageRep(
             bitmapDataPlanes: nil,
             pixelsWide: width,
             pixelsHigh: height,
             bitsPerSample: 8,
-            samplesPerPixel: 3,
-            hasAlpha: false,
+            samplesPerPixel: 4,
+            hasAlpha: true,
             isPlanar: false,
             colorSpaceName: .deviceRGB,
             bytesPerRow: 0,
@@ -234,13 +238,18 @@ struct ChatMessage: Identifiable, Equatable, Codable {
     // row, shown when the step is clicked. Optional for the same decoding
     // reason as attachmentPaths.
     var detail: String?
+    // Structured version of the same step, used by the inspector to render a
+    // clean command or diff. Optional so older archives still decode; `detail`
+    // remains the fallback and the copy source.
+    var step: StepPayload?
 
     init(
         role: Role,
         text: String,
         icon: String? = nil,
         attachments: [URL] = [],
-        detail: String? = nil
+        detail: String? = nil,
+        step: StepPayload? = nil
     ) {
         self.id = UUID()
         self.role = role
@@ -248,6 +257,7 @@ struct ChatMessage: Identifiable, Equatable, Codable {
         self.icon = icon
         self.attachmentPaths = attachments.isEmpty ? nil : attachments.map(\.path)
         self.detail = detail
+        self.step = step
     }
 
     var attachmentURLs: [URL] {
@@ -278,6 +288,87 @@ struct ChatMessage: Identifiable, Equatable, Codable {
         return text.split(separator: "\n", omittingEmptySubsequences: false)
             .filter { !$0.hasPrefix("Attached: ") }
             .joined(separator: "\n")
+    }
+}
+
+// Structured detail behind a tool step, so the inspector can render a clean
+// command or a red/green diff instead of the raw JSON dump. Optional on
+// ChatMessage keeps chats archived before this was added decodable.
+enum StepPayload: Equatable, Codable {
+    case command(text: String, cwd: String?, exitCode: Int?)
+    case fileChange(files: [FileChange])
+}
+
+struct FileChange: Equatable, Codable {
+    enum Kind: String, Codable { case create, edit, delete }
+    // Relative to the working directory when it could be resolved, else the
+    // path as the backend reported it.
+    var path: String
+    var kind: Kind
+    // Unified diff text. Real hunks (with @@ headers) come from Codex; Claude
+    // and Cursor edits are synthesized as a plain replace block with no line
+    // numbers. Nil when the backend gave us no content to diff.
+    var diff: String?
+}
+
+// One rendered line of a unified diff. oldNumber/newNumber are nil for
+// synthesized diffs that carry no line information.
+struct DiffLine {
+    enum Kind { case add, del, context, hunk }
+    let kind: Kind
+    let oldNumber: Int?
+    let newNumber: Int?
+    let text: String
+}
+
+enum DiffParser {
+    static func lines(_ diff: String) -> [DiffLine] {
+        var result: [DiffLine] = []
+        var oldN = 0, newN = 0
+        var numbered = false
+        for raw in diff.components(separatedBy: "\n") {
+            if raw.hasPrefix("@@") {
+                numbered = true
+                if let (o, n) = hunkStart(raw) { oldN = o; newN = n }
+                result.append(DiffLine(kind: .hunk, oldNumber: nil, newNumber: nil, text: raw))
+            } else if raw.hasPrefix("+++") || raw.hasPrefix("---")
+                || raw.hasPrefix("diff ") || raw.hasPrefix("index ") {
+                continue // file headers, not content
+            } else if raw.hasPrefix("+") {
+                result.append(DiffLine(kind: .add, oldNumber: nil,
+                                       newNumber: numbered ? newN : nil, text: String(raw.dropFirst())))
+                newN += 1
+            } else if raw.hasPrefix("-") {
+                result.append(DiffLine(kind: .del, oldNumber: numbered ? oldN : nil,
+                                       newNumber: nil, text: String(raw.dropFirst())))
+                oldN += 1
+            } else {
+                let t = raw.hasPrefix(" ") ? String(raw.dropFirst()) : raw
+                result.append(DiffLine(kind: .context, oldNumber: numbered ? oldN : nil,
+                                       newNumber: numbered ? newN : nil, text: t))
+                oldN += 1; newN += 1
+            }
+        }
+        return result
+    }
+
+    // Parse the starting line numbers out of "@@ -a,b +c,d @@".
+    private static func hunkStart(_ header: String) -> (old: Int, new: Int)? {
+        let nums = header.split(whereSeparator: { !"0123456789-+,".contains($0) })
+        guard let minus = nums.first(where: { $0.hasPrefix("-") }),
+              let plus = nums.first(where: { $0.hasPrefix("+") }) else { return nil }
+        let old = Int(minus.dropFirst().split(separator: ",").first ?? "") ?? 0
+        let new = Int(plus.dropFirst().split(separator: ",").first ?? "") ?? 0
+        return (old, new)
+    }
+
+    // Synthesize a replace block for backends that report old/new text rather
+    // than a unified diff. Empty `old` yields an all-additions block.
+    static func replaceDiff(old: String, new: String) -> String {
+        var parts: [String] = []
+        if !old.isEmpty { parts += old.components(separatedBy: "\n").map { "-" + $0 } }
+        if !new.isEmpty { parts += new.components(separatedBy: "\n").map { "+" + $0 } }
+        return parts.joined(separator: "\n")
     }
 }
 
@@ -372,7 +463,16 @@ enum AgentProvider: String, CaseIterable, Identifiable, Codable {
     var models: [AgentOption] {
         switch self {
         case .claude: return [
+            // Claude Code's family aliases intentionally follow the latest
+            // model available for the user's provider and account. Exact
+            // versions below are retained only to render older saved choices;
+            // the picker exposes the rolling aliases.
+            AgentOption(label: "Fable (Latest)", short: "Fable", value: "fable"),
+            AgentOption(label: "Opus (Latest)", short: "Opus", value: "opus"),
+            AgentOption(label: "Sonnet (Latest)", short: "Sonnet", value: "sonnet"),
+            AgentOption(label: "Haiku (Latest)", short: "Haiku", value: "haiku"),
             AgentOption(label: "Fable 5", short: "Fable 5", value: "claude-fable-5"),
+            AgentOption(label: "Opus 5", short: "Opus 5", value: "claude-opus-5"),
             AgentOption(label: "Opus 4.8", short: "Opus 4.8", value: "claude-opus-4-8"),
             AgentOption(label: "Sonnet 5", short: "Sonnet 5", value: "claude-sonnet-5"),
             AgentOption(label: "Haiku 4.5", short: "Haiku 4.5", value: "claude-haiku-4-5-20251001"),
@@ -390,8 +490,11 @@ enum AgentProvider: String, CaseIterable, Identifiable, Codable {
         case .cursor: return [
             AgentOption(label: "Composer 2.5", short: "Composer", value: "composer-2.5"),
             AgentOption(label: "Composer Fast", short: "Composer Fast", value: "composer-2.5-fast"),
+            AgentOption(label: "Opus 5", short: "Opus 5", value: "claude-opus-5-thinking-high"),
+            AgentOption(label: "Opus 5 Fast", short: "Opus 5 Fast", value: "claude-opus-5-thinking-high-fast"),
             AgentOption(label: "Opus 4.8", short: "Opus 4.8", value: "claude-opus-4-8-thinking-high"),
             AgentOption(label: "Opus 4.8 Fast", short: "Opus 4.8 Fast", value: "claude-opus-4-8-thinking-high-fast"),
+            AgentOption(label: "Fable 5", short: "Fable 5", value: "claude-fable-5-thinking-high"),
             AgentOption(label: "Sonnet 5", short: "Sonnet 5", value: "claude-sonnet-5-thinking-high"),
             AgentOption(label: "GPT-5.6 Sol", short: "5.6 Sol", value: "gpt-5.6-sol-high"),
             AgentOption(label: "GPT-5.6 Sol Fast", short: "5.6 Sol Fast", value: "gpt-5.6-sol-high-fast"),
@@ -408,7 +511,10 @@ enum AgentProvider: String, CaseIterable, Identifiable, Codable {
     // raw catalog is collapsed into families by AgentSession after it loads.
     var modelMenuGroups: [AgentModelMenuGroup] {
         if self == .cursor { return CursorModelFamily.build(from: models).map(\.menuGroup) }
-        return models.map { model in
+        let visibleModels = self == .claude
+            ? models.filter { Self.claudeRollingAliases.contains($0.value ?? "") }
+            : models
+        return visibleModels.map { model in
             AgentModelMenuGroup(
                 label: model.label,
                 variants: [.init(label: model.label, option: model, fastMode: false)]
@@ -416,10 +522,16 @@ enum AgentProvider: String, CaseIterable, Identifiable, Codable {
         }
     }
 
+    private static let claudeRollingAliases: Set<String> = [
+        "fable", "opus", "sonnet", "haiku",
+    ]
+
     func supportsFastMode(_ model: String?) -> Bool {
         switch self {
         case .claude:
-            return model == "claude-opus-4-8"
+            return model == "opus"
+                || model == "claude-opus-5"
+                || model == "claude-opus-4-8"
         case .codex:
             return ["gpt-5.5", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.4"]
                 .contains(model)
@@ -545,6 +657,51 @@ struct AgentModelMenuGroup: Identifiable {
     var id: String { variants.first?.option.id ?? label }
 }
 
+// Structured metadata returned by Codex app-server's model/list endpoint.
+// Keeping capabilities beside the option prevents new models from inheriting
+// stale effort or speed assumptions from a previously hard-coded generation.
+struct CodexModelCatalogEntry {
+    let option: AgentOption
+    let efforts: [AgentOption]
+    let defaultEffortValue: String?
+    let supportsFastMode: Bool
+
+    init?(json: [String: Any]) {
+        guard json["hidden"] as? Bool != true,
+              let model = (json["model"] as? String) ?? (json["id"] as? String),
+              !model.isEmpty
+        else { return nil }
+        let displayName = (json["displayName"] as? String)?.trimmingCharacters(in: .whitespaces)
+        let label = displayName?.isEmpty == false ? displayName! : model
+        option = AgentOption(label: label, short: label, value: model)
+
+        let reportedEfforts = (json["supportedReasoningEfforts"] as? [[String: Any]]) ?? []
+        let values = reportedEfforts.compactMap { $0["reasoningEffort"] as? String }
+        efforts = Self.effortOrder.filter(values.contains).map(Self.effortOption)
+        defaultEffortValue = json["defaultReasoningEffort"] as? String
+
+        let speedTiers = (json["additionalSpeedTiers"] as? [String]) ?? []
+        let serviceTiers = (json["serviceTiers"] as? [[String: Any]]) ?? []
+        supportsFastMode = speedTiers.contains("fast")
+            || serviceTiers.contains { $0["id"] as? String == "priority" }
+    }
+
+    private static let effortOrder = ["none", "low", "medium", "high", "xhigh", "max", "ultra"]
+
+    private static func effortOption(_ value: String) -> AgentOption {
+        switch value {
+        case "none": return AgentOption(label: "None", short: "None", value: value)
+        case "low": return AgentOption(label: "Light", short: "Light", value: value)
+        case "medium": return AgentOption(label: "Medium", short: "Med", value: value)
+        case "high": return AgentOption(label: "High", short: "High", value: value)
+        case "xhigh": return AgentOption(label: "Extra High", short: "XHigh", value: value)
+        case "max": return AgentOption(label: "Max", short: "Max", value: value)
+        case "ultra": return AgentOption(label: "Ultra", short: "Ultra", value: value)
+        default: return AgentOption(label: value.capitalized, short: value, value: value)
+        }
+    }
+}
+
 // Cursor lists every effort/speed combination as a separate model. These
 // types normalize that catalog into one visible model family, keeping the raw
 // ids only for the final CLI launch.
@@ -641,8 +798,6 @@ struct CursorModelFamily: Identifiable {
             ?? configurations.first
     }
 
-    var isCurrentGeneration: Bool { Self.currentGenerationIDs.contains(id) }
-
     private static let effortOrder = ["none", "low", "medium", "high", "xhigh", "max"]
     private static let effortSuffixes: [(suffix: String, value: String)] = [
         ("extra-high", "xhigh"),
@@ -653,23 +808,48 @@ struct CursorModelFamily: Identifiable {
         ("low", "low"),
         ("max", "max"),
     ]
-    private static let currentGenerationIDs: Set<String> = [
-        "auto",
-        "composer-2.5",
-        "cursor-grok-4.5",
-        "claude-opus-4-8",
-        "claude-sonnet-5",
-        "claude-fable-5",
-        "gpt-5.6-sol",
-        "gpt-5.6-terra",
-        "gpt-5.6-luna",
-        "gpt-5.5",
-        "gpt-5.3-codex",
-        "gemini-3.1-pro",
-        "gemini-3.5-flash",
-        "kimi-k2.7-code",
-        "glm-5.2",
-    ]
+    // Cursor returns newest/recommended entries before older versions. Pick
+    // the first member of each featured product line rather than pinning an
+    // exact generation, so Opus 5 replaces 4.8 (and future versions replace
+    // 5) without an Eave release. Unrecognized families remain available in
+    // Other instead of disappearing.
+    static func featuredFamilyIDs(in families: [CursorModelFamily]) -> Set<String> {
+        var seenSeries: Set<String> = []
+        var featured: Set<String> = []
+        for family in families {
+            guard let series = featuredSeries(for: family.id), seenSeries.insert(series).inserted
+            else { continue }
+            featured.insert(family.id)
+        }
+        return featured
+    }
+
+    private static func featuredSeries(for id: String) -> String? {
+        if id == "auto" { return "auto" }
+        let prefixes: [(String, String)] = [
+            ("composer-", "composer"),
+            ("cursor-grok-", "cursor-grok"),
+            ("claude-fable-", "claude-fable"),
+            ("claude-opus-", "claude-opus"),
+            ("claude-sonnet-", "claude-sonnet"),
+            ("claude-haiku-", "claude-haiku"),
+            ("gpt-5.5", "gpt-frontier"),
+            ("kimi-", "kimi"),
+            ("glm-", "glm"),
+        ]
+        if let match = prefixes.first(where: { id.hasPrefix($0.0) }) { return match.1 }
+        if id.hasPrefix("gpt-") {
+            if id.contains("-sol") { return "gpt-sol" }
+            if id.contains("-terra") { return "gpt-terra" }
+            if id.contains("-luna") { return "gpt-luna" }
+            if id.contains("-codex") { return "gpt-codex" }
+        }
+        if id.hasPrefix("gemini-") {
+            if id.contains("-pro") { return "gemini-pro" }
+            if id.contains("-flash") { return "gemini-flash" }
+        }
+        return nil
+    }
 
     static func build(from options: [AgentOption]) -> [CursorModelFamily] {
         struct Parsed {
@@ -902,7 +1082,7 @@ final class AgentSession: ObservableObject {
     // switching providers, starting a new chat, and relaunching keep each
     // provider's choices.
     @Published var modelChoice: [AgentProvider: String] = [
-        .claude: "claude-sonnet-5",
+        .claude: "sonnet",
         .codex: "gpt-5.6-terra",
         .cursor: "composer-2.5",
     ] {
@@ -926,6 +1106,8 @@ final class AgentSession: ObservableObject {
     @Published private(set) var cursorModelFamilies = CursorModelFamily.build(
         from: AgentProvider.cursor.models
     )
+    @Published private(set) var codexModelCatalog: [CodexModelCatalogEntry] = []
+    private var codexCatalogLoader: CodexAppServer?
     // Context choice is remembered per Cursor model family. Missing means the
     // lower-cost/lower-context 250K version.
     @Published private(set) var cursorContextChoice: [String: String] = [:]
@@ -1000,7 +1182,7 @@ final class AgentSession: ObservableObject {
                 UserDefaults.standard.set(migrated, forKey: Self.cursorContextDefaultsKey)
             }
         }
-        refreshCursorModelCatalog()
+        refreshModelCatalogs()
     }
 
     private static func savedChoices<Value>(
@@ -1046,28 +1228,54 @@ final class AgentSession: ObservableObject {
     }
 
     func modelMenuGroups(for provider: AgentProvider) -> [AgentModelMenuGroup] {
-        provider == .cursor
-            ? cursorModelFamilies.filter(\.isCurrentGeneration).map(\.menuGroup)
-            : provider.modelMenuGroups
-    }
-
-    func otherModelMenuGroups(for provider: AgentProvider) -> [AgentModelMenuGroup] {
-        guard provider == .cursor else { return [] }
-        return cursorModelFamilies.filter { !$0.isCurrentGeneration }.map(\.menuGroup)
+        if provider == .cursor {
+            let featured = CursorModelFamily.featuredFamilyIDs(in: cursorModelFamilies)
+            return cursorModelFamilies.filter { featured.contains($0.id) }.map(\.menuGroup)
+        }
+        if provider == .codex {
+            return models(for: provider).map { model in
+                AgentModelMenuGroup(
+                    label: model.label,
+                    variants: [.init(label: model.label, option: model, fastMode: false)]
+                )
+            }
+        }
+        return provider.modelMenuGroups
     }
 
     func models(for provider: AgentProvider) -> [AgentOption] {
-        if provider != .cursor { return provider.models }
-        return cursorModelFamilies.map(\.option)
+        let available: [AgentOption]
+        switch provider {
+        case .cursor:
+            available = cursorModelFamilies.map(\.option)
+        case .codex:
+            available = codexModelCatalog.isEmpty
+                ? provider.models : codexModelCatalog.map(\.option)
+        case .claude, .chatgpt:
+            available = provider.models
+        }
+        guard let selected = modelChoice[provider],
+              !available.contains(where: { $0.value == selected })
+        else { return available }
+        let preserved = provider.models.first(where: { $0.value == selected })
+            ?? AgentOption(label: selected, short: selected, value: selected)
+        return available + [preserved]
     }
 
     func efforts(for provider: AgentProvider) -> [AgentOption] {
-        guard provider == .cursor else { return provider.efforts(for: modelChoice[provider]) }
-        return selectedCursorFamily?.effortOptions ?? []
+        if provider == .cursor { return selectedCursorFamily?.effortOptions ?? [] }
+        if provider == .codex, let entry = selectedCodexCatalogEntry {
+            return entry.efforts
+        }
+        return provider.efforts(for: modelChoice[provider])
     }
 
     func defaultEffortValue(for provider: AgentProvider) -> String? {
-        provider == .cursor ? selectedCursorFamily?.defaultControlValue : provider.defaultEffortValue
+        if provider == .cursor { return selectedCursorFamily?.defaultControlValue }
+        if provider == .codex, let entry = selectedCodexCatalogEntry {
+            return entry.defaultEffortValue
+        }
+        return provider.defaultEffortValue
     }
 
     func effortMenuLabel(for provider: AgentProvider) -> String {
@@ -1083,6 +1291,8 @@ final class AgentSession: ObservableObject {
                 effort: choice.effort,
                 thinkingMode: choice.thinkingMode
             )
+        } else if provider == .codex, let entry = selectedCodexCatalogEntry {
+            supportsFast = entry.supportsFastMode
         } else {
             supportsFast = provider.supportsFastMode(modelChoice[provider])
         }
@@ -1146,7 +1356,15 @@ final class AgentSession: ObservableObject {
         guard fastModeChoice[provider] == true,
               let selectedModel = modelChoice[provider]
         else { return false }
+        if provider == .codex, let entry = selectedCodexCatalogEntry {
+            return entry.supportsFastMode
+        }
         return provider.supportsFastMode(selectedModel)
+    }
+
+    func refreshModelCatalogs() {
+        refreshCursorModelCatalog()
+        refreshCodexModelCatalog()
     }
 
     private func refreshCursorModelCatalog() {
@@ -1175,6 +1393,38 @@ final class AgentSession: ObservableObject {
         }
     }
 
+    private func refreshCodexModelCatalog() {
+        guard codexCatalogLoader == nil,
+              let executable = Self.findExecutable("codex")
+        else { return }
+        let loader = CodexAppServer()
+        codexCatalogLoader = loader
+        do {
+            try loader.start(
+                executable: executable,
+                environment: Self.cliEnvironment()
+            ) { [weak self, weak loader] error in
+                guard let self, let loader else { return }
+                guard error == nil else {
+                    loader.stop()
+                    self.codexCatalogLoader = nil
+                    return
+                }
+                loader.listModels { [weak self, weak loader] models, _ in
+                    guard let self else { return }
+                    let entries = (models ?? []).compactMap(CodexModelCatalogEntry.init(json:))
+                    if !entries.isEmpty { self.codexModelCatalog = entries }
+                    loader?.stop()
+                    self.codexCatalogLoader = nil
+                }
+            }
+        } catch {
+            loader.stop()
+            codexCatalogLoader = nil
+            // Keep the bundled fallback catalog when app-server is unavailable.
+        }
+    }
+
     private static func parseCursorModels(_ output: String) -> [AgentOption] {
         output.split(separator: "\n").compactMap { rawLine in
             let line = String(rawLine)
@@ -1191,6 +1441,11 @@ final class AgentSession: ObservableObject {
     private var selectedCursorFamily: CursorModelFamily? {
         guard let selected = modelChoice[.cursor] else { return nil }
         return cursorModelFamilies.first { $0.id == selected }
+    }
+
+    private var selectedCodexCatalogEntry: CodexModelCatalogEntry? {
+        guard let selected = modelChoice[.codex] else { return nil }
+        return codexModelCatalog.first { $0.option.value == selected }
     }
 
     private func cursorConfigurationChoice(
@@ -2040,7 +2295,8 @@ final class AgentSession: ObservableObject {
             appendTool(
                 display.text,
                 icon: display.icon,
-                detail: Self.toolDetail(name: display.text, arguments: toolCall)
+                detail: Self.toolDetail(name: display.text, arguments: toolCall),
+                step: cursorStep(toolCall)
             )
         case "result":
             if let id = event["session_id"] as? String { cursorSessionID = id }
@@ -2205,13 +2461,32 @@ final class AgentSession: ObservableObject {
             }
         case "commandExecution":
             let cmd = item["command"] as? String ?? "a command"
-            appendTool("Running \(String(cmd.prefix(60)))", icon: "terminal", detail: detail("Shell"))
+            let exit = item["exitCode"] as? Int ?? item["exit_code"] as? Int
+            appendTool(
+                "Running \(String(cmd.prefix(60)))",
+                icon: "terminal",
+                detail: detail("Shell"),
+                step: .command(text: cmd, cwd: item["cwd"] as? String ?? workingDirectory.path, exitCode: exit)
+            )
         case "fileChange":
-            let paths = ((item["changes"] as? [[String: Any]]) ?? [])
-                .compactMap { $0["path"] as? String }
-                .map { ($0 as NSString).lastPathComponent }
+            let changes = (item["changes"] as? [[String: Any]]) ?? []
+            let files = changes.map { change in
+                FileChange(
+                    path: relativeToWorkingDir(change["path"] as? String ?? ""),
+                    kind: Self.fileKind(change["kind"] as? String),
+                    diff: Self.codexDiff(change)
+                )
+            }
+            let paths = files
+                .map { ($0.path as NSString).lastPathComponent }
+                .filter { !$0.isEmpty }
                 .joined(separator: ", ")
-            appendTool("Editing \(paths.isEmpty ? "files" : paths)", icon: "pencil", detail: detail("Edit"))
+            appendTool(
+                "Editing \(paths.isEmpty ? "files" : paths)",
+                icon: "pencil",
+                detail: detail("Edit"),
+                step: .fileChange(files: files)
+            )
         case "webSearch":
             appendTool(
                 "Searching \(String((item["query"] as? String ?? "the web").prefix(50)))",
@@ -2551,7 +2826,8 @@ final class AgentSession: ObservableObject {
                 appendTool(
                     display.text,
                     icon: display.icon,
-                    detail: Self.toolDetail(name: name, arguments: input)
+                    detail: Self.toolDetail(name: name, arguments: input),
+                    step: claudeStep(name: name, input: input)
                 )
             }
         case "control_request":
@@ -2731,8 +3007,95 @@ final class AgentSession: ObservableObject {
         }
     }
 
-    private func appendTool(_ text: String, icon: String = "wrench.fill", detail: String? = nil) {
-        messages.append(ChatMessage(role: .tool, text: text, icon: icon, detail: detail))
+    private func appendTool(
+        _ text: String,
+        icon: String = "wrench.fill",
+        detail: String? = nil,
+        step: StepPayload? = nil
+    ) {
+        messages.append(ChatMessage(role: .tool, text: text, icon: icon, detail: detail, step: step))
+    }
+
+    // Shorten an absolute path to one relative to the chat's working directory
+    // so steps read as "Sources/Eave/AppState.swift", not a home-dir path.
+    func relativeToWorkingDir(_ path: String) -> String {
+        guard !path.isEmpty else { return path }
+        let base = workingDirectory.standardizedFileURL.path
+        let full = URL(fileURLWithPath: path).standardizedFileURL.path
+        if full == base { return (full as NSString).lastPathComponent }
+        let prefix = base.hasSuffix("/") ? base : base + "/"
+        return full.hasPrefix(prefix) ? String(full.dropFirst(prefix.count)) : path
+    }
+
+    private static func fileKind(_ raw: String?) -> FileChange.Kind {
+        switch raw?.lowercased() {
+        case "add", "added", "create", "created", "new": return .create
+        case "delete", "deleted", "remove", "removed": return .delete
+        default: return .edit
+        }
+    }
+
+    // Codex change entries carry the unified diff under one of a few key names.
+    private static func codexDiff(_ change: [String: Any]) -> String? {
+        for key in ["diff", "unifiedDiff", "unified_diff", "patch"] {
+            if let d = change[key] as? String, !d.isEmpty { return d }
+        }
+        return nil
+    }
+
+    // Claude reports edits as find/replace (no line numbers), commands via Bash.
+    private func claudeStep(name: String, input: [String: Any]?) -> StepPayload? {
+        guard let input else { return nil }
+        switch name {
+        case "Bash":
+            guard let cmd = input["command"] as? String else { return nil }
+            return .command(text: cmd, cwd: workingDirectory.path, exitCode: nil)
+        case "Edit":
+            guard let path = input["file_path"] as? String else { return nil }
+            let diff = DiffParser.replaceDiff(
+                old: input["old_string"] as? String ?? "",
+                new: input["new_string"] as? String ?? ""
+            )
+            return .fileChange(files: [FileChange(path: relativeToWorkingDir(path), kind: .edit, diff: diff)])
+        case "MultiEdit":
+            guard let path = input["file_path"] as? String else { return nil }
+            let diff = ((input["edits"] as? [[String: Any]]) ?? []).map {
+                DiffParser.replaceDiff(old: $0["old_string"] as? String ?? "",
+                                       new: $0["new_string"] as? String ?? "")
+            }.joined(separator: "\n")
+            return .fileChange(files: [FileChange(path: relativeToWorkingDir(path), kind: .edit, diff: diff)])
+        case "Write":
+            guard let path = input["file_path"] as? String else { return nil }
+            let diff = DiffParser.replaceDiff(old: "", new: input["content"] as? String ?? "")
+            return .fileChange(files: [FileChange(path: relativeToWorkingDir(path), kind: .create, diff: diff)])
+        default:
+            return nil
+        }
+    }
+
+    // Cursor tool calls nest their args under a per-tool key.
+    private func cursorStep(_ toolCall: [String: Any]) -> StepPayload? {
+        if let shell = (toolCall["shellToolCall"] ?? toolCall["bashToolCall"]) as? [String: Any],
+           let args = shell["args"] as? [String: Any],
+           let cmd = args["command"] as? String {
+            return .command(text: cmd, cwd: workingDirectory.path, exitCode: nil)
+        }
+        if let write = toolCall["writeToolCall"] as? [String: Any],
+           let args = write["args"] as? [String: Any],
+           let path = args["path"] as? String ?? args["file_path"] as? String {
+            let content = args["contents"] as? String ?? args["content"] as? String ?? ""
+            return .fileChange(files: [FileChange(path: relativeToWorkingDir(path), kind: .create,
+                                                  diff: DiffParser.replaceDiff(old: "", new: content))])
+        }
+        if let edit = (toolCall["editToolCall"] ?? toolCall["searchReplaceToolCall"]) as? [String: Any],
+           let args = edit["args"] as? [String: Any],
+           let path = args["path"] as? String ?? args["file_path"] as? String {
+            let old = args["old_string"] as? String ?? args["oldString"] as? String ?? ""
+            let new = args["new_string"] as? String ?? args["newString"] as? String ?? ""
+            let diff = old.isEmpty && new.isEmpty ? nil : DiffParser.replaceDiff(old: old, new: new)
+            return .fileChange(files: [FileChange(path: relativeToWorkingDir(path), kind: .edit, diff: diff)])
+        }
+        return nil
     }
 
     // The exact call behind a step row: readable header plus the raw

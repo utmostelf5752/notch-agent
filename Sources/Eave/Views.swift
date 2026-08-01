@@ -1331,11 +1331,20 @@ struct ChatRootView: View {
             .foregroundStyle(.white.opacity(0.7))
 
             ScrollView(showsIndicators: false) {
-                Text(step.detail ?? step.text)
-                    .font(.system(size: 11 * s, design: .monospaced))
-                    .foregroundStyle(.white.opacity(0.85))
-                    .textSelection(.enabled)
-                    .frame(maxWidth: .infinity, alignment: .leading)
+                Group {
+                    switch step.step {
+                    case .command(let text, let cwd, let exitCode):
+                        commandDetail(text: text, cwd: cwd, exitCode: exitCode)
+                    case .fileChange(let files):
+                        fileChangeDetail(files)
+                    case .none:
+                        Text(step.detail ?? step.text)
+                            .font(.system(size: 11 * s, design: .monospaced))
+                            .foregroundStyle(.white.opacity(0.85))
+                            .textSelection(.enabled)
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
             }
         }
         .padding(12 * s)
@@ -1350,6 +1359,176 @@ struct ChatRootView: View {
         )
         .shadow(color: .black.opacity(0.5), radius: 18, y: 6)
         .padding(16 * s)
+    }
+
+    // A shell step: the exact command, then a small status row (exit + folder).
+    private func commandDetail(text: String, cwd: String?, exitCode: Int?) -> some View {
+        VStack(alignment: .leading, spacing: 8 * s) {
+            HStack(alignment: .top, spacing: 8 * s) {
+                Text("$")
+                    .foregroundStyle(.white.opacity(0.35))
+                Text(text)
+                    .foregroundStyle(.white.opacity(0.92))
+                    .textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .font(.system(size: 11.5 * s, design: .monospaced))
+            .padding(10 * s)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(
+                RoundedRectangle(cornerRadius: 8 * s)
+                    .fill(.white.opacity(0.04))
+                    .overlay(RoundedRectangle(cornerRadius: 8 * s).strokeBorder(.white.opacity(0.08)))
+            )
+
+            HStack(spacing: 14 * s) {
+                if let exitCode {
+                    Label(
+                        exitCode == 0 ? "exit 0" : "exit \(exitCode)",
+                        systemImage: exitCode == 0 ? "checkmark.circle" : "xmark.circle"
+                    )
+                    .foregroundStyle(exitCode == 0 ? Color.green.opacity(0.85) : Color.red.opacity(0.85))
+                }
+                if let cwd, !cwd.isEmpty {
+                    Label((cwd as NSString).lastPathComponent, systemImage: "folder")
+                        .foregroundStyle(.white.opacity(0.4))
+                }
+            }
+            .font(.system(size: 10.5 * s))
+            .labelStyle(.titleAndIcon)
+        }
+    }
+
+    private func fileChangeDetail(_ files: [FileChange]) -> some View {
+        VStack(alignment: .leading, spacing: 12 * s) {
+            ForEach(Array(files.enumerated()), id: \.offset) { _, file in
+                fileDiffView(file)
+            }
+        }
+    }
+
+    private func fileDiffView(_ file: FileChange) -> some View {
+        let lines = file.diff.map { DiffParser.lines($0) } ?? []
+        let added = lines.filter { $0.kind == .add }.count
+        let removed = lines.filter { $0.kind == .del }.count
+        return VStack(alignment: .leading, spacing: 6 * s) {
+            HStack(spacing: 8 * s) {
+                fileBadge(file.kind)
+                filePath(file.path)
+                Spacer(minLength: 8 * s)
+                if !lines.isEmpty {
+                    Text("+\(added)").foregroundStyle(Color.green.opacity(0.9))
+                    Text("-\(removed)").foregroundStyle(Color.red.opacity(0.9))
+                }
+            }
+            .font(.system(size: 11 * s, weight: .semibold))
+
+            if !lines.isEmpty {
+                VStack(spacing: 0) {
+                    ForEach(Array(lines.enumerated()), id: \.offset) { _, line in
+                        diffRow(line)
+                    }
+                }
+                .clipShape(RoundedRectangle(cornerRadius: 8 * s))
+                .overlay(RoundedRectangle(cornerRadius: 8 * s).strokeBorder(.white.opacity(0.08)))
+            }
+        }
+    }
+
+    private func diffRow(_ line: DiffLine) -> some View {
+        Group {
+            if line.kind == .hunk {
+                Text(line.text)
+                    .font(.system(size: 10 * s, design: .monospaced))
+                    .foregroundStyle(.white.opacity(0.4))
+                    .padding(.horizontal, 8 * s)
+                    .padding(.vertical, 2 * s)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(Color.blue.opacity(0.09))
+            } else {
+                HStack(spacing: 0) {
+                    Text(line.oldNumber.map(String.init) ?? "")
+                        .frame(width: 26 * s, alignment: .trailing)
+                    Text(line.newNumber.map(String.init) ?? "")
+                        .frame(width: 26 * s, alignment: .trailing)
+                        .padding(.trailing, 8 * s)
+                    Text(diffSign(line.kind))
+                        .frame(width: 10 * s, alignment: .leading)
+                        .foregroundStyle(diffSignColor(line.kind))
+                    Text(line.text.isEmpty ? " " : line.text)
+                        .foregroundStyle(diffTextColor(line.kind))
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                .font(.system(size: 10.5 * s, design: .monospaced))
+                .foregroundStyle(.white.opacity(0.25))
+                .padding(.horizontal, 8 * s)
+                .padding(.vertical, 1 * s)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(diffRowBackground(line.kind))
+            }
+        }
+    }
+
+    private func diffSign(_ kind: DiffLine.Kind) -> String {
+        switch kind {
+        case .add: return "+"
+        case .del: return "-"
+        default: return " "
+        }
+    }
+
+    private func diffSignColor(_ kind: DiffLine.Kind) -> Color {
+        switch kind {
+        case .add: return Color.green.opacity(0.9)
+        case .del: return Color.red.opacity(0.9)
+        default: return .white.opacity(0.25)
+        }
+    }
+
+    private func diffTextColor(_ kind: DiffLine.Kind) -> Color {
+        switch kind {
+        case .add: return Color(red: 0.69, green: 0.96, blue: 0.71)
+        case .del: return Color(red: 1.0, green: 0.81, blue: 0.80)
+        default: return .white.opacity(0.55)
+        }
+    }
+
+    private func diffRowBackground(_ kind: DiffLine.Kind) -> Color {
+        switch kind {
+        case .add: return Color.green.opacity(0.14)
+        case .del: return Color.red.opacity(0.14)
+        default: return .clear
+        }
+    }
+
+    private func fileBadge(_ kind: FileChange.Kind) -> some View {
+        let label: String
+        let color: Color
+        switch kind {
+        case .create: label = "CREATE"; color = .green
+        case .edit: label = "EDIT"; color = .yellow
+        case .delete: label = "DELETE"; color = .red
+        }
+        return Text(label)
+            .font(.system(size: 9 * s, weight: .bold))
+            .tracking(0.5)
+            .foregroundStyle(color.opacity(0.9))
+            .padding(.horizontal, 6 * s)
+            .padding(.vertical, 2 * s)
+            .background(RoundedRectangle(cornerRadius: 5 * s).fill(color.opacity(0.16)))
+    }
+
+    private func filePath(_ path: String) -> some View {
+        let ns = path as NSString
+        let dir = ns.deletingLastPathComponent
+        let name = ns.lastPathComponent
+        return (
+            Text(dir.isEmpty ? "" : dir + "/").foregroundStyle(.white.opacity(0.4))
+                + Text(name).foregroundStyle(.white.opacity(0.9))
+        )
+        .font(.system(size: 11 * s, design: .monospaced))
+        .lineLimit(1)
+        .truncationMode(.middle)
     }
 
     private var emptyState: some View {
@@ -2079,16 +2258,12 @@ struct ChatRootView: View {
                             ForEach(groups) { group in
                                 modelMenuGroup(group, provider: provider)
                             }
-                            let otherGroups = session.otherModelMenuGroups(for: provider)
-                            if !otherGroups.isEmpty {
-                                Menu("Other") {
-                                    ForEach(otherGroups) { group in
-                                        modelMenuGroup(group, provider: provider)
-                                    }
-                                }
-                            }
                         }
                     }
+                }
+                Divider()
+                Button("Refresh Models") {
+                    session.refreshModelCatalogs()
                 }
             }
             if session.provider.hasCLIOptions {

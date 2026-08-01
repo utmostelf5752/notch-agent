@@ -18,7 +18,19 @@ final class FirstMouseHostingView<Content: View>: NSHostingView<Content> {
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 }
 
-final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
+// A small filled dot overlaid on the status-bar icon when a background chat has
+// finished unseen. A subview (not a template-image composite) so the glyph
+// stays adaptive white while the dot keeps its own color.
+final class UnreadDotView: NSView {
+    override var isFlipped: Bool { false }
+    override func draw(_ dirtyRect: NSRect) {
+        NSColor.systemBlue.setFill()
+        NSBezierPath(ovalIn: bounds).fill()
+    }
+    override func hitTest(_ point: NSPoint) -> NSView? { nil } // clicks fall through to the button
+}
+
+final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuDelegate {
     private struct HotKeyID {
         static let toggle: UInt32 = 1
         static let screenshot: UInt32 = 2
@@ -29,6 +41,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private var statusItem: NSStatusItem?
     private var runningObserver: AnyCancellable?
     private var shortcutObserver: AnyCancellable?
+    private var unreadObserver: AnyCancellable?
+    private weak var unreadDot: UnreadDotView?
+    private weak var appState: AppState?
+    private static let unreadItemTag = 7701
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         // Our windows must never participate in window tabbing; also silences
@@ -260,10 +276,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     private func setUpStatusItem(state: AppState) {
+        appState = state
         let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
         Self.configureStatusButton(item.button, running: false)
 
+        if let button = item.button {
+            let dot = UnreadDotView(frame: .zero)
+            dot.isHidden = true
+            button.addSubview(dot)
+            unreadDot = dot
+        }
+
         let menu = NSMenu()
+        menu.delegate = self
         let toggle = NSMenuItem(title: "Toggle Panel", action: #selector(togglePanel), keyEquivalent: "")
         toggle.target = self
         menu.addItem(toggle)
@@ -302,6 +327,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             .sink { toggle in
                 hint.title = Self.menuHint(toggle: toggle)
             }
+        unreadObserver = state.$unreadChats
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] chats in
+                self?.updateUnreadDot(hasUnread: !chats.isEmpty)
+            }
     }
 
     private static func configureStatusButton(_ button: NSStatusBarButton?, running: Bool) {
@@ -316,7 +346,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             ? "Eave\(beta ? " Beta" : "") (working)"
             : "Eave\(beta ? " Beta" : "")"
         button.image = image
-        button.contentTintColor = beta ? .systemBlue : (running ? .controlAccentColor : nil)
+        // Keep the menu bar icon a plain template so it always renders white
+        // (adaptive) — never tinted to the accent color while running, which
+        // reads as black under a Graphite/dark accent. Running and beta state
+        // stay conveyed through the accessibility label and tooltip below.
+        button.contentTintColor = nil
         button.toolTip = running
             ? "Eave\(beta ? " Beta" : "") is working"
             : "Eave\(beta ? " Beta" : "")"
@@ -324,6 +358,49 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     private static func menuHint(toggle: GlobalShortcut) -> String {
         "Press \(toggle.displayName) or hover notch"
+    }
+
+    private func updateUnreadDot(hasUnread: Bool) {
+        guard let button = statusItem?.button, let dot = unreadDot else { return }
+        let size: CGFloat = 6
+        let bounds = button.bounds
+        // Top-right of the button, tucked just inside the edge (non-flipped, so
+        // maxY is the top).
+        dot.frame = NSRect(x: bounds.maxX - size - 1, y: bounds.maxY - size - 2,
+                           width: size, height: size)
+        dot.isHidden = !hasUnread
+    }
+
+    // Rebuild the unread shortcut rows each time the menu opens: prune expired
+    // entries, then insert up to four "open this finished chat" items on top.
+    func menuNeedsUpdate(_ menu: NSMenu) {
+        guard menu === statusItem?.menu, let state = appState else { return }
+        for item in menu.items where item.tag == Self.unreadItemTag {
+            menu.removeItem(item)
+        }
+        let unread = state.currentUnread()
+        guard !unread.isEmpty else { return }
+        var index = 0
+        let header = NSMenuItem(title: "Finished in the background", action: nil, keyEquivalent: "")
+        header.isEnabled = false
+        header.tag = Self.unreadItemTag
+        menu.insertItem(header, at: index); index += 1
+        for chat in unread {
+            let title = chat.title.isEmpty ? "Untitled chat" : chat.title
+            let it = NSMenuItem(title: title, action: #selector(openUnreadChat(_:)), keyEquivalent: "")
+            it.target = self
+            it.representedObject = chat.id
+            it.tag = Self.unreadItemTag
+            menu.insertItem(it, at: index); index += 1
+        }
+        let separator = NSMenuItem.separator()
+        separator.tag = Self.unreadItemTag
+        menu.insertItem(separator, at: index)
+    }
+
+    @objc private func openUnreadChat(_ sender: NSMenuItem) {
+        guard let id = sender.representedObject as? UUID else { return }
+        appState?.openUnreadChat(id)
     }
 
     // Full-screen screenshots fade the status button without removing its

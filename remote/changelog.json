@@ -1,6 +1,18 @@
 {
   "entries": [
     {
+      "version": "0.1.43",
+      "date": "2026-07-31",
+      "notes": [
+        "Tap a step to see it clearly: shell commands show just the command with its exit status, and file changes render as a red/green diff with line numbers instead of raw JSON.",
+        "A dot now appears on the menu bar icon when a chat finishes in the background, and the menu lists up to four recently finished chats so you can jump straight back to them.",
+        "The model picker lists the models your Codex and Cursor accounts can actually use — with each model's thinking levels — and a Refresh Models button to update the list.",
+        "Fixed image attachments failing with a \"JPEG renderer could not be created\" error; images attach again.",
+        "The menu bar icon now stays a steady white while a task runs instead of dimming toward the accent color.",
+        "The \"Done\" notch no longer replays when you close the panel after a reply finished while it was open."
+      ]
+    },
+    {
       "version": "0.1.42",
       "date": "2026-07-31",
       "notes": [

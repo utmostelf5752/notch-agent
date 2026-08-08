@@ -98,6 +98,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     //   provider:<claude|codex|cursor|chatgpt>   switch provider
     //   send:<text>                       send a message
     //   msgs                              write transcript to /tmp/eave-msgs.txt
+    //   paste                             attach the clipboard (the Cmd+V path)
     //   dump                              write ChatGPT web view state to /tmp/eave-dom.txt
     //   newchat                           archive current chat and start fresh
     //   chats                             write history list to /tmp/eave-chats.txt
@@ -146,6 +147,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                     .map { "[\($0.role)] \($0.text)" }
                     .joined(separator: "\n---\n")
                 try? out.write(toFile: "/tmp/eave-msgs.txt", atomically: true, encoding: .utf8)
+            } else if cmd == "paste" {
+                // Same entry point Cmd+V uses, so the attach path can be
+                // exercised without synthesizing a key event.
+                let attached = attachPasteboardFiles()
+                let out = "attached=\(attached)\n"
+                    + session.attachments.map(\.path).joined(separator: "\n")
+                try? out.write(toFile: "/tmp/eave-paste.txt", atomically: true, encoding: .utf8)
             } else if cmd == "dump" {
                 ChatGPTWeb.shared.dumpState(to: "/tmp/eave-dom.txt")
             } else if cmd == "newchat" {
@@ -160,6 +168,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                 fast=\(session.fastModeChoice[p].map(String.init) ?? "-")
                 plan=\(session.isPlanMode(p))
                 cwd=\(session.workingDirectory.path)
+                sessionTokens=\(session.sessionTokens)
+                contextTokens=\(session.contextTokens)
                 """
                 try? out.write(toFile: "/tmp/eave-settings.txt", atomically: true, encoding: .utf8)
             } else if cmd == "chats" {
@@ -562,6 +572,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                 }
                 if chars == "w", state.expanded {
                     state.collapse()
+                    return nil
+                }
+                // Images and copied files attach; anything else falls through to
+                // the field editor's normal text paste.
+                if chars == "v", state.expanded, state.panelIsKey,
+                   attachPasteboardFiles() {
                     return nil
                 }
             }

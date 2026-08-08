@@ -1,0 +1,710 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Eave — queued composer prototype</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --page: #09090a;
+      --canvas: #0d0d0f;
+      --shell: #121214;
+      --composer: #1a1a1d;
+      --hover: #1c1c1f;
+      --menu: #242428;
+      --line: rgba(255, 255, 255, 0.16);
+      --line-soft: rgba(255, 255, 255, 0.08);
+      --text: rgba(255, 255, 255, 0.9);
+      --muted: rgba(255, 255, 255, 0.53);
+      --faint: rgba(255, 255, 255, 0.3);
+      --warning: #e9ba70;
+      --danger: #ff8177;
+      font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", Inter, sans-serif;
+    }
+
+    * { box-sizing: border-box; }
+    body { min-height: 100vh; margin: 0; color: var(--text); background: var(--page); }
+    button, textarea, input, select { font: inherit; }
+    button { color: inherit; }
+
+    .page {
+      width: min(1120px, calc(100% - 30px));
+      margin: 0 auto;
+      padding: 38px 0 58px;
+    }
+
+    .intro { width: min(720px, 100%); margin-bottom: 28px; }
+    .eyebrow { margin: 0 0 8px; color: var(--faint); font-size: 11px; letter-spacing: .1em; text-transform: uppercase; }
+    h1 { margin: 0; font-size: clamp(28px, 4.5vw, 42px); font-weight: 650; letter-spacing: -.04em; }
+    .intro p:last-child { margin: 11px 0 0; color: var(--muted); font-size: 14px; line-height: 1.55; }
+
+    .stage { display: grid; grid-template-columns: minmax(0, 720px) minmax(270px, 1fr); gap: 22px; align-items: end; }
+
+    .workspace {
+      min-height: 690px;
+      padding: 24px;
+      display: flex;
+      align-items: flex-end;
+      justify-content: center;
+      border: 1px solid rgba(255, 255, 255, .05);
+      border-radius: 24px;
+      background: var(--canvas);
+    }
+
+    .eave-panel {
+      width: min(650px, 100%);
+      padding: 7px;
+      border: 1px solid var(--line);
+      border-radius: 44px;
+      background: var(--shell);
+      box-shadow: 0 28px 80px rgba(0, 0, 0, .55);
+    }
+
+    .panel-status {
+      min-height: 42px;
+      padding: 0 25px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      color: var(--faint);
+      font-size: 10px;
+    }
+
+    .panel-status strong { color: var(--muted); font-weight: 560; }
+    .panel-status span:last-child { font-variant-numeric: tabular-nums; }
+
+    .queue-stack { position: relative; padding: 0 14px; }
+
+    .queue-row {
+      position: relative;
+      min-height: 58px;
+      display: grid;
+      grid-template-columns: 34px minmax(0, 1fr) auto;
+      align-items: center;
+      gap: 9px;
+      border-top: 1px solid var(--line-soft);
+      color: var(--muted);
+      transition: color 120ms ease, background 120ms ease;
+    }
+
+    .queue-row:first-child { border-top: 0; }
+    .queue-row:hover,
+    .queue-row:focus-within,
+    .queue-row.dragging { color: rgba(255, 255, 255, .73); background: var(--hover); }
+    .queue-row.dragging { opacity: .55; }
+    .queue-row.drop-before::before,
+    .queue-row.drop-after::after {
+      content: "";
+      position: absolute;
+      left: 9px;
+      right: 9px;
+      height: 1px;
+      background: rgba(255, 255, 255, .72);
+    }
+    .queue-row.drop-before::before { top: -1px; }
+    .queue-row.drop-after::after { bottom: -1px; }
+
+    .drag-button,
+    .icon-button {
+      display: grid;
+      place-items: center;
+      border: 0;
+      border-radius: 8px;
+      color: currentColor;
+      background: transparent;
+      cursor: pointer;
+    }
+
+    .drag-button { width: 34px; height: 38px; cursor: grab; touch-action: none; }
+    .drag-button:active { cursor: grabbing; }
+    .drag-button .queue-icon { width: 23px; height: 23px; }
+    .drag-button .drag-mark { display: none; }
+    .queue-row:hover .drag-button .queue-mark,
+    .queue-row:focus-within .drag-button .queue-mark,
+    .queue-row.dragging .drag-button .queue-mark { display: none; }
+    .queue-row:hover .drag-button .drag-mark,
+    .queue-row:focus-within .drag-button .drag-mark,
+    .queue-row.dragging .drag-button .drag-mark { display: inline-block; }
+
+    .icon {
+      display: inline-block;
+      width: 19px;
+      height: 19px;
+      flex: 0 0 auto;
+      background: currentColor;
+      mask-position: center;
+      mask-repeat: no-repeat;
+      mask-size: contain;
+      -webkit-mask-position: center;
+      -webkit-mask-repeat: no-repeat;
+      -webkit-mask-size: contain;
+    }
+    .i-queue { mask-image: url("icons/queue/arrow-bend-up-left.svg"); -webkit-mask-image: url("icons/queue/arrow-bend-up-left.svg"); }
+    .i-drag { mask-image: url("icons/queue/dots-nine.svg"); -webkit-mask-image: url("icons/queue/dots-nine.svg"); }
+    .i-trash { mask-image: url("icons/queue/trash.svg"); -webkit-mask-image: url("icons/queue/trash.svg"); }
+    .i-more { mask-image: url("icons/queue/dots-three.svg"); -webkit-mask-image: url("icons/queue/dots-three.svg"); }
+    .i-paperclip { mask-image: url("icons/queue/paperclip.svg"); -webkit-mask-image: url("icons/queue/paperclip.svg"); }
+    .i-caret { mask-image: url("icons/queue/caret-down.svg"); -webkit-mask-image: url("icons/queue/caret-down.svg"); }
+    .i-eye { mask-image: url("icons/queue/eye-slash.svg"); -webkit-mask-image: url("icons/queue/eye-slash.svg"); }
+    .i-send { mask-image: url("icons/queue/arrow-up.svg"); -webkit-mask-image: url("icons/queue/arrow-up.svg"); }
+
+    .queue-copy { min-width: 0; }
+    .queue-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 16px; font-weight: 430; letter-spacing: -.01em; }
+    .queue-meta { margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--faint); font-size: 9px; }
+
+    .queue-actions { position: relative; display: flex; align-items: center; gap: 3px; padding-right: 4px; }
+    .icon-button { width: 34px; height: 34px; color: rgba(255, 255, 255, .42); }
+    .icon-button:hover,
+    .icon-button:focus-visible { color: rgba(255, 255, 255, .78); background: rgba(255, 255, 255, .06); }
+    .icon-button .icon { width: 20px; height: 20px; }
+
+    .row-menu {
+      position: absolute;
+      z-index: 5;
+      right: 2px;
+      top: 38px;
+      width: 154px;
+      padding: 5px;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      background: var(--menu);
+      box-shadow: 0 12px 35px rgba(0, 0, 0, .45);
+    }
+    .row-menu[hidden] { display: none; }
+    .row-menu button { width: 100%; min-height: 29px; padding: 0 9px; text-align: left; border: 0; border-radius: 6px; color: var(--muted); background: transparent; cursor: pointer; font-size: 10px; }
+    .row-menu button:hover,
+    .row-menu button:focus-visible { color: var(--text); background: rgba(255, 255, 255, .07); }
+    .row-menu button.danger { color: var(--danger); }
+    .row-menu button:disabled { opacity: .28; cursor: default; }
+
+    .queue-editor { grid-column: 2 / -1; padding: 0 4px 9px 0; display: grid; gap: 7px; }
+    .queue-editor textarea { width: 100%; min-height: 64px; resize: vertical; padding: 9px 10px; border: 1px solid var(--line); border-radius: 9px; outline: none; color: var(--text); background: #101012; font-size: 12px; line-height: 1.4; }
+    .edit-actions { display: flex; justify-content: flex-end; gap: 5px; }
+    .text-button { min-height: 27px; padding: 0 9px; border: 1px solid var(--line-soft); border-radius: 7px; color: var(--muted); background: transparent; cursor: pointer; font-size: 9.5px; }
+    .text-button:hover,
+    .text-button:focus-visible { color: var(--text); background: rgba(255, 255, 255, .06); }
+
+    .pause-banner {
+      margin: 5px 14px 9px;
+      padding: 9px 11px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      border: 1px solid color-mix(in srgb, var(--warning) 34%, transparent);
+      border-radius: 10px;
+      color: var(--warning);
+      background: color-mix(in srgb, var(--warning) 7%, transparent);
+      font-size: 10px;
+    }
+    .pause-banner.error { color: var(--danger); border-color: color-mix(in srgb, var(--danger) 34%, transparent); background: color-mix(in srgb, var(--danger) 7%, transparent); }
+    .pause-banner span { flex: 1; line-height: 1.35; }
+    .pause-banner button { min-height: 26px; padding: 0 8px; border: 1px solid currentColor; border-radius: 7px; color: currentColor; background: transparent; cursor: pointer; font-size: 9px; }
+
+    .composer-box {
+      min-height: 178px;
+      padding: 21px 22px 16px;
+      border: 1px solid rgba(255, 255, 255, .23);
+      border-radius: 31px;
+      background: var(--composer);
+      box-shadow: inset 0 1px 0 rgba(255, 255, 255, .025);
+    }
+    .attachment-row { display: flex; flex-wrap: wrap; gap: 5px; margin-bottom: 7px; }
+    .attachment-row:empty { display: none; }
+    .attachment-chip { display: inline-flex; align-items: center; gap: 5px; max-width: 195px; padding: 5px 8px; border: 1px solid var(--line-soft); border-radius: 999px; color: var(--muted); background: rgba(255, 255, 255, .045); font-size: 9px; }
+    .attachment-chip span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .attachment-chip button { padding: 0; border: 0; color: var(--faint); background: transparent; cursor: pointer; font-size: 9px; }
+
+    .composer-box textarea { width: 100%; min-height: 78px; max-height: 145px; padding: 0; resize: vertical; border: 0; outline: none; color: var(--text); background: transparent; font-size: 21px; line-height: 1.35; letter-spacing: -.025em; }
+    .composer-box textarea::placeholder { color: rgba(255, 255, 255, .34); }
+
+    .composer-footer { display: flex; align-items: center; gap: 11px; }
+    .composer-icon { width: 35px; height: 35px; padding: 0; display: grid; place-items: center; border: 0; border-radius: 9px; color: rgba(255, 255, 255, .72); background: transparent; cursor: pointer; }
+    .composer-icon:hover,
+    .composer-icon:focus-visible { color: var(--text); background: rgba(255, 255, 255, .06); }
+    .composer-icon .icon { width: 23px; height: 23px; }
+
+    .context-pill { min-width: 0; max-width: 180px; height: 35px; padding: 0 3px; display: inline-flex; align-items: center; gap: 7px; border: 0; color: rgba(255, 255, 255, .78); background: transparent; cursor: pointer; font-size: 15px; font-weight: 590; }
+    .context-pill .label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .context-pill .i-caret { width: 13px; height: 13px; color: var(--faint); }
+    .footer-spacer { flex: 1; }
+
+    .send-button { width: 48px; height: 48px; padding: 0; display: grid; place-items: center; border: 0; border-radius: 50%; color: #151517; background: rgba(255, 255, 255, .72); cursor: pointer; }
+    .send-button .icon { width: 24px; height: 24px; }
+    .send-button:disabled { color: rgba(255, 255, 255, .22); background: rgba(255, 255, 255, .11); cursor: default; }
+
+    .composer-popover {
+      margin-top: 10px;
+      padding: 9px;
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 7px;
+      border: 1px solid var(--line);
+      border-radius: 11px;
+      background: #111113;
+    }
+    .composer-popover[hidden] { display: none; }
+    .field { display: grid; gap: 4px; }
+    .field.wide { grid-column: 1 / -1; }
+    .field label { color: var(--faint); font-size: 9px; }
+    .field select,
+    .field input { width: 100%; height: 30px; padding: 0 8px; border: 1px solid var(--line-soft); border-radius: 7px; outline: none; color: var(--text); background: #202024; font-size: 10px; }
+
+    .review-panel { padding: 18px; border: 1px solid var(--line-soft); border-radius: 17px; background: #101012; }
+    .review-panel h2 { margin: 0; font-size: 14px; font-weight: 630; }
+    .review-panel > p { margin: 7px 0 15px; color: var(--faint); font-size: 10.5px; line-height: 1.45; }
+    .scenario-list { display: grid; gap: 7px; }
+    .scenario-list button { min-height: 40px; padding: 8px 10px; text-align: left; border: 1px solid var(--line-soft); border-radius: 9px; color: var(--muted); background: transparent; cursor: pointer; font-size: 10px; }
+    .scenario-list button:hover,
+    .scenario-list button:focus-visible { color: var(--text); background: rgba(255, 255, 255, .055); }
+    .scenario-list strong { display: block; color: var(--text); font-size: 10.5px; }
+    .scenario-list span { display: block; margin-top: 2px; color: var(--faint); line-height: 1.3; }
+    .event-log { margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--line-soft); }
+    .event-log strong { display: block; margin-bottom: 5px; font-size: 9.5px; }
+    .event-log p { min-height: 29px; margin: 0; color: var(--faint); font-size: 9.5px; line-height: 1.45; }
+
+    button:focus-visible,
+    textarea:focus-visible,
+    input:focus-visible,
+    select:focus-visible { outline: 2px solid rgba(255, 255, 255, .48); outline-offset: 2px; }
+
+    @media (max-width: 900px) {
+      .stage { grid-template-columns: 1fr; }
+      .review-panel { width: min(650px, 100%); justify-self: center; }
+    }
+    @media (max-width: 620px) {
+      .page { width: min(100% - 16px, 620px); padding-top: 24px; }
+      .workspace { min-height: 610px; padding: 6px; border-radius: 18px; }
+      .eave-panel { border-radius: 34px; }
+      .panel-status { padding: 0 18px; }
+      .queue-stack { padding: 0 7px; }
+      .queue-row { grid-template-columns: 30px minmax(0, 1fr) auto; gap: 6px; }
+      .queue-title { font-size: 13px; }
+      .icon-button { width: 29px; height: 32px; }
+      .composer-box { min-height: 165px; padding: 18px 15px 14px; border-radius: 26px; }
+      .composer-box textarea { min-height: 72px; font-size: 18px; }
+      .composer-footer { gap: 5px; }
+      .context-pill { max-width: 112px; font-size: 12px; }
+      .send-button { width: 42px; height: 42px; }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      *, *::before, *::after { transition: none !important; }
+    }
+  </style>
+</head>
+<body>
+  <main class="page">
+    <header class="intro">
+      <p class="eyebrow">Eave queue prototype · second pass</p>
+      <h1>Queued prompts become part of the composer.</h1>
+      <p>Hover a queued row to reveal its dotted drag handle, then drag it above or below another prompt. The same controls also support keyboard-friendly reordering.</p>
+    </header>
+
+    <section class="stage" aria-label="Queued composer prototype">
+      <div class="workspace">
+        <article class="eave-panel" aria-label="Eave queued composer">
+          <div class="panel-status"><strong id="working-label">Working · 4 queued</strong><span id="elapsed">00:38</span></div>
+          <div class="queue-stack" id="queue-stack"></div>
+          <div id="pause-slot"></div>
+
+          <section class="composer-box" aria-label="Message composer">
+            <div class="attachment-row" id="attachment-row"></div>
+            <textarea id="draft" rows="3" placeholder="Ask anything…" aria-label="Message"></textarea>
+            <div class="composer-footer">
+              <button class="composer-icon" id="attach-button" type="button" aria-label="Add an attachment"><span class="icon i-paperclip"></span></button>
+              <button class="context-pill" id="model-button" type="button" aria-expanded="false"><span class="label" id="model-label">5.6 Sol · High</span><span class="icon i-caret"></span></button>
+              <button class="context-pill" id="folder-button" type="button" aria-expanded="false"><span class="label" id="folder-label">notch-agent</span><span class="icon i-caret"></span></button>
+              <button class="composer-icon" id="stealth-button" type="button" aria-label="Toggle stealth mode" aria-pressed="false"><span class="icon i-eye"></span></button>
+              <span class="footer-spacer"></span>
+              <button class="send-button" id="submit-button" type="button" aria-label="Queue message"><span class="icon i-send"></span></button>
+            </div>
+
+            <div class="composer-popover" id="context-popover" hidden>
+              <div class="field">
+                <label for="provider-select">Provider</label>
+                <select id="provider-select"><option>Codex</option><option>Claude</option><option>Cursor</option><option>ChatGPT</option></select>
+              </div>
+              <div class="field">
+                <label for="model-select">Model</label>
+                <select id="model-select"><option>5.6 Sol</option><option>5.6 Terra</option><option>5.4</option></select>
+              </div>
+              <div class="field">
+                <label for="effort-select">Effort</label>
+                <select id="effort-select"><option>High</option><option>Medium</option><option>Max</option><option>Ultra</option></select>
+              </div>
+              <div class="field">
+                <label for="permission-select">Permissions</label>
+                <select id="permission-select"><option>Danger full access</option><option>Workspace write</option><option>Read only</option></select>
+              </div>
+            </div>
+
+            <div class="composer-popover" id="folder-popover" hidden>
+              <div class="field wide">
+                <label for="folder-input">Working folder</label>
+                <input id="folder-input" value="~/Documents/code/notch-agent">
+              </div>
+            </div>
+
+            <div class="composer-popover" id="attachment-popover" hidden>
+              <button class="text-button" type="button" data-add-attachment="window-layout.png">Add screenshot</button>
+              <button class="text-button" type="button" data-add-attachment="requirements.md">Add file</button>
+            </div>
+          </section>
+        </article>
+      </div>
+
+      <aside class="review-panel" aria-label="Prototype state controls">
+        <h2>Walk the complete behavior</h2>
+        <p>These review controls do not belong in Eave. They expose every state from the implementation plan.</p>
+        <div class="scenario-list">
+          <button type="button" data-scenario="success"><strong>Complete current turn</strong><span>Automatically starts the first queued prompt.</span></button>
+          <button type="button" data-scenario="stop"><strong>Stop and pause</strong><span>Preserves every waiting prompt.</span></button>
+          <button type="button" data-scenario="error"><strong>Provider error</strong><span>Pauses with retry and skip actions.</span></button>
+          <button type="button" data-scenario="limit"><strong>Usage limit</strong><span>Returns the unsent prompt to the composer.</span></button>
+          <button type="button" data-scenario="restore"><strong>Relaunch restoration</strong><span>Rebuilds this conversation and its queue.</span></button>
+          <button type="button" data-scenario="reset"><strong>Reset prototype</strong><span>Restores the reference starting state.</span></button>
+        </div>
+        <div class="event-log" aria-live="polite"><strong>Latest event</strong><p id="event-log">Hover a row: its queue arrow becomes the dotted reorder handle.</p></div>
+      </aside>
+    </section>
+  </main>
+
+  <script>
+    (() => {
+      const initialQueue = [
+        { id: 1, text: "add window resizing to editor panel", attachments: [], provider: "Codex", model: "5.6 Sol", effort: "High", folder: "~/Documents/code/notch-agent" },
+        { id: 2, text: "persist the resized width between launches", attachments: ["window-layout.png"], provider: "Codex", model: "5.6 Sol", effort: "High", folder: "~/Documents/code/notch-agent" },
+        { id: 3, text: "check compact and stealth layouts for clipping", attachments: [], provider: "Codex", model: "5.6 Sol", effort: "High", folder: "~/Documents/code/notch-agent" },
+        { id: 4, text: "summarize the change and remaining verification gaps", attachments: [], provider: "Codex", model: "5.6 Sol", effort: "High", folder: "~/Documents/code/notch-agent" }
+      ];
+
+      const state = {
+        queue: [],
+        active: { text: "Implement queued-message composer" },
+        running: true,
+        paused: false,
+        pauseKind: null,
+        pauseMessage: "",
+        draftAttachments: [],
+        editingId: null,
+        menuId: null,
+        draggedId: null,
+        nextId: 20,
+        stealth: false
+      };
+
+      const $ = id => document.getElementById(id);
+      const queueStack = $("queue-stack");
+      const pauseSlot = $("pause-slot");
+      const draft = $("draft");
+      const eventLog = $("event-log");
+
+      function escapeHTML(value) {
+        return String(value).replace(/[&<>"]/g, character => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "\"": "&quot;" })[character]);
+      }
+
+      function announce(message) { eventLog.textContent = message; }
+
+      function settingsSnapshot() {
+        return {
+          provider: $("provider-select").value,
+          model: $("model-select").value,
+          effort: $("effort-select").value,
+          folder: $("folder-input").value.trim() || "~/Documents/code/notch-agent"
+        };
+      }
+
+      function resetState() {
+        state.queue = initialQueue.map(item => ({ ...item, attachments: [...item.attachments] }));
+        state.active = { text: "Implement queued-message composer" };
+        state.running = true;
+        state.paused = false;
+        state.pauseKind = null;
+        state.pauseMessage = "";
+        state.draftAttachments = [];
+        state.editingId = null;
+        state.menuId = null;
+        state.draggedId = null;
+        state.stealth = false;
+        draft.value = "";
+        announce("Hover a row: its queue arrow becomes the dotted reorder handle.");
+        render();
+      }
+
+      function renderQueue() {
+        if (!state.queue.length) {
+          queueStack.innerHTML = "";
+          return;
+        }
+
+        queueStack.innerHTML = state.queue.map((item, index) => {
+          if (state.editingId === item.id) {
+            return `<div class="queue-row" data-id="${item.id}">
+              <button class="drag-button" type="button" aria-label="Reorder queued message"><span class="icon i-drag drag-mark"></span></button>
+              <div class="queue-editor"><textarea data-edit-value>${escapeHTML(item.text)}</textarea><div class="edit-actions"><button class="text-button" type="button" data-action="cancel-edit">Cancel</button><button class="text-button" type="button" data-action="save-edit">Save</button></div></div>
+            </div>`;
+          }
+
+          const attachmentText = item.attachments.length ? ` · ${item.attachments.length} file${item.attachments.length === 1 ? "" : "s"}` : "";
+          const menuOpen = state.menuId === item.id;
+          return `<div class="queue-row" data-id="${item.id}">
+            <button class="drag-button" type="button" draggable="true" aria-label="Drag to reorder message ${index + 1}" title="Drag to reorder">
+              <span class="icon i-queue queue-icon queue-mark"></span><span class="icon i-drag queue-icon drag-mark"></span>
+            </button>
+            <div class="queue-copy"><div class="queue-title">${escapeHTML(item.text)}</div><div class="queue-meta">${escapeHTML(item.model)} · ${escapeHTML(item.effort)} · ${escapeHTML(item.folder)}${attachmentText}</div></div>
+            <div class="queue-actions">
+              <button class="icon-button" type="button" data-action="remove" aria-label="Remove queued message"><span class="icon i-trash"></span></button>
+              <button class="icon-button" type="button" data-action="menu" aria-label="More actions" aria-expanded="${menuOpen}"><span class="icon i-more"></span></button>
+              <div class="row-menu" ${menuOpen ? "" : "hidden"}>
+                <button type="button" data-action="edit">Edit message</button>
+                <button type="button" data-action="earlier" ${index === 0 ? "disabled" : ""}>Move earlier</button>
+                <button type="button" data-action="later" ${index === state.queue.length - 1 ? "disabled" : ""}>Move later</button>
+                <button type="button" data-action="next">Run next</button>
+                <button class="danger" type="button" data-action="remove">Remove</button>
+              </div>
+            </div>
+          </div>`;
+        }).join("");
+      }
+
+      function renderPause() {
+        if (!state.paused) { pauseSlot.innerHTML = ""; return; }
+        const error = state.pauseKind === "error";
+        pauseSlot.innerHTML = `<div class="pause-banner${error ? " error" : ""}"><span><strong>Queue paused.</strong> ${escapeHTML(state.pauseMessage)}</span>${error ? '<button type="button" data-pause-action="skip">Skip</button>' : ""}<button type="button" data-pause-action="resume">${error ? "Retry" : "Resume"}</button></div>`;
+      }
+
+      function renderAttachments() {
+        $("attachment-row").innerHTML = state.draftAttachments.map((name, index) => `<span class="attachment-chip"><span>${escapeHTML(name)}</span><button type="button" data-remove-attachment="${index}">Remove</button></span>`).join("");
+      }
+
+      function renderStatus() {
+        const status = state.running ? "Working" : state.paused ? "Paused" : "Idle";
+        $("working-label").textContent = `${status} · ${state.queue.length} queued`;
+        $("submit-button").disabled = draft.value.trim().length === 0;
+        $("submit-button").setAttribute("aria-label", state.running || state.paused ? "Queue message" : "Send message");
+        $("model-label").textContent = `${$("model-select").value} · ${$("effort-select").value}`;
+        const folder = $("folder-input").value.trim().split("/").filter(Boolean).pop() || "Folder";
+        $("folder-label").textContent = folder;
+        $("stealth-button").setAttribute("aria-pressed", String(state.stealth));
+      }
+
+      function render() {
+        renderQueue();
+        renderPause();
+        renderAttachments();
+        renderStatus();
+      }
+
+      function queueDraft() {
+        const text = draft.value.trim();
+        if (!text) return;
+        const item = { id: state.nextId++, text, attachments: [...state.draftAttachments], ...settingsSnapshot() };
+        draft.value = "";
+        state.draftAttachments = [];
+        if (!state.running && !state.paused) {
+          state.active = item;
+          state.running = true;
+          announce(`Sent “${item.text}” immediately because Eave was idle.`);
+        } else {
+          state.queue.push(item);
+          announce(`Queued “${item.text}” with its current model, effort, folder, permissions, and files.`);
+        }
+        render();
+      }
+
+      function moveItem(index, offset) {
+        const destination = index + offset;
+        if (destination < 0 || destination >= state.queue.length) return;
+        const [item] = state.queue.splice(index, 1);
+        state.queue.splice(destination, 0, item);
+        state.menuId = null;
+        announce(`Moved “${item.text}” ${offset < 0 ? "earlier" : "later"} in the queue.`);
+        render();
+      }
+
+      function runNext(id) {
+        const index = state.queue.findIndex(item => item.id === id);
+        if (index < 0) return;
+        const [item] = state.queue.splice(index, 1);
+        if (state.active) state.queue.unshift({ ...state.active, id: state.nextId++, attachments: state.active.attachments || [] });
+        state.active = item;
+        state.running = true;
+        state.paused = false;
+        state.menuId = null;
+        announce(`Promoted “${item.text}” to run next.`);
+        render();
+      }
+
+      queueStack.addEventListener("click", event => {
+        const action = event.target.closest("[data-action]");
+        const row = event.target.closest("[data-id]");
+        if (!action || !row) return;
+        const id = Number(row.dataset.id);
+        const index = state.queue.findIndex(item => item.id === id);
+        if (index < 0) return;
+        const kind = action.dataset.action;
+        if (kind === "menu") state.menuId = state.menuId === id ? null : id;
+        if (kind === "remove") {
+          const [removed] = state.queue.splice(index, 1);
+          state.menuId = null;
+          announce(`Removed “${removed.text}” from the queue.`);
+        }
+        if (kind === "edit") { state.editingId = id; state.menuId = null; }
+        if (kind === "earlier") moveItem(index, -1);
+        if (kind === "later") moveItem(index, 1);
+        if (kind === "next") runNext(id);
+        if (kind === "cancel-edit") state.editingId = null;
+        if (kind === "save-edit") {
+          const value = row.querySelector("[data-edit-value]").value.trim();
+          if (value) state.queue[index].text = value;
+          state.editingId = null;
+          announce("Saved the queued prompt in place.");
+        }
+        render();
+      });
+
+      queueStack.addEventListener("dragstart", event => {
+        const row = event.target.closest("[data-id]");
+        if (!row) return;
+        state.draggedId = Number(row.dataset.id);
+        row.classList.add("dragging");
+        event.dataTransfer.effectAllowed = "move";
+      });
+
+      queueStack.addEventListener("dragover", event => {
+        const row = event.target.closest("[data-id]");
+        if (!row || Number(row.dataset.id) === state.draggedId) return;
+        event.preventDefault();
+        queueStack.querySelectorAll(".drop-before, .drop-after").forEach(item => item.classList.remove("drop-before", "drop-after"));
+        const bounds = row.getBoundingClientRect();
+        row.classList.add(event.clientY < bounds.top + bounds.height / 2 ? "drop-before" : "drop-after");
+      });
+
+      queueStack.addEventListener("drop", event => {
+        const row = event.target.closest("[data-id]");
+        if (!row || state.draggedId == null) return;
+        event.preventDefault();
+        const from = state.queue.findIndex(item => item.id === state.draggedId);
+        let to = state.queue.findIndex(item => item.id === Number(row.dataset.id));
+        const bounds = row.getBoundingClientRect();
+        const after = event.clientY >= bounds.top + bounds.height / 2;
+        const [item] = state.queue.splice(from, 1);
+        if (from < to) to -= 1;
+        state.queue.splice(to + (after ? 1 : 0), 0, item);
+        state.draggedId = null;
+        announce(`Dragged “${item.text}” to position ${state.queue.indexOf(item) + 1}.`);
+        render();
+      });
+
+      queueStack.addEventListener("dragend", () => { state.draggedId = null; render(); });
+
+      pauseSlot.addEventListener("click", event => {
+        const action = event.target.closest("[data-pause-action]")?.dataset.pauseAction;
+        if (action === "resume") {
+          state.paused = false;
+          state.running = true;
+          state.pauseKind = null;
+          announce("Resumed the paused turn. Waiting prompts remain in their chosen order.");
+        }
+        if (action === "skip") {
+          state.active = state.queue.shift() || null;
+          state.paused = false;
+          state.running = Boolean(state.active);
+          state.pauseKind = null;
+          announce(state.active ? `Skipped the failed turn and started “${state.active.text}”.` : "Skipped the failed turn. Eave is idle.");
+        }
+        render();
+      });
+
+      $("attachment-row").addEventListener("click", event => {
+        const button = event.target.closest("[data-remove-attachment]");
+        if (!button) return;
+        state.draftAttachments.splice(Number(button.dataset.removeAttachment), 1);
+        announce("Removed the attachment from this draft.");
+        render();
+      });
+
+      $("attachment-popover").addEventListener("click", event => {
+        const button = event.target.closest("[data-add-attachment]");
+        if (!button) return;
+        if (!state.draftAttachments.includes(button.dataset.addAttachment)) state.draftAttachments.push(button.dataset.addAttachment);
+        announce(`${button.dataset.addAttachment} will travel with this queued prompt.`);
+        render();
+      });
+
+      function closePopovers(except) {
+        ["context-popover", "folder-popover", "attachment-popover"].forEach(id => { if (id !== except) $(id).hidden = true; });
+      }
+
+      function togglePopover(id) {
+        const popover = $(id);
+        const open = popover.hidden;
+        closePopovers(open ? id : null);
+        popover.hidden = !open;
+      }
+
+      $("attach-button").addEventListener("click", () => togglePopover("attachment-popover"));
+      $("model-button").addEventListener("click", () => togglePopover("context-popover"));
+      $("folder-button").addEventListener("click", () => togglePopover("folder-popover"));
+      $("stealth-button").addEventListener("click", () => { state.stealth = !state.stealth; announce(`Stealth mode ${state.stealth ? "enabled" : "disabled"}.`); render(); });
+      $("submit-button").addEventListener("click", queueDraft);
+      draft.addEventListener("input", renderStatus);
+      draft.addEventListener("keydown", event => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); queueDraft(); } });
+      ["provider-select", "model-select", "effort-select", "permission-select", "folder-input"].forEach(id => $(id).addEventListener("change", () => { announce("Updated the draft context. Existing queued prompts retain their snapshots."); render(); }));
+
+      document.addEventListener("click", event => {
+        if (!event.target.closest(".queue-actions")) { state.menuId = null; renderQueue(); }
+      });
+
+      document.querySelector(".scenario-list").addEventListener("click", event => {
+        const scenario = event.target.closest("[data-scenario]")?.dataset.scenario;
+        if (!scenario) return;
+        if (scenario === "success") {
+          state.active = state.queue.shift() || null;
+          state.running = Boolean(state.active);
+          state.paused = false;
+          announce(state.active ? `Completed the turn and automatically started “${state.active.text}”.` : "Completed the turn. The queue is empty.");
+        }
+        if (scenario === "stop") {
+          state.running = false;
+          state.paused = true;
+          state.pauseKind = "stopped";
+          state.pauseMessage = "The active turn stopped. Waiting prompts will not start until you resume.";
+          announce("Stopped the active turn and paused automatic draining.");
+        }
+        if (scenario === "error") {
+          state.running = false;
+          state.paused = true;
+          state.pauseKind = "error";
+          state.pauseMessage = "The provider disconnected. Retry this turn or skip to the next queued prompt.";
+          announce("A provider error paused the queue without sending later prompts.");
+        }
+        if (scenario === "limit") {
+          if (state.active?.text) draft.value = state.active.text;
+          state.active = null;
+          state.running = false;
+          state.paused = true;
+          state.pauseKind = "limit";
+          state.pauseMessage = "Usage limit reached. The unsent prompt is back in the composer.";
+          announce("Restored the unsent prompt to the composer; later queued prompts remain untouched.");
+        }
+        if (scenario === "restore") {
+          const snapshot = JSON.parse(JSON.stringify({ queue: state.queue, active: state.active, running: state.running, paused: state.paused, pauseKind: state.pauseKind, pauseMessage: state.pauseMessage, draft: draft.value, attachments: state.draftAttachments }));
+          state.queue = snapshot.queue;
+          state.active = snapshot.active;
+          state.running = snapshot.running;
+          state.paused = snapshot.paused;
+          state.pauseKind = snapshot.pauseKind;
+          state.pauseMessage = snapshot.pauseMessage;
+          state.draftAttachments = snapshot.attachments;
+          draft.value = snapshot.draft;
+          announce(`Relaunched and restored this conversation with ${state.queue.length} queued prompt${state.queue.length === 1 ? "" : "s"}.`);
+        }
+        if (scenario === "reset") resetState(); else render();
+      });
+
+      resetState();
+    })();
+  </script>
+</body>
+</html>

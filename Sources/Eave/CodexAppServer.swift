@@ -5,8 +5,9 @@ import Foundation
 // thread per conversation and starts a turn per user message. Approval
 // requests arrive as server->client requests and are answered with
 // {"decision": "accept" | "acceptForSession" | "decline" | "cancel"}.
-// Protocol shapes cross-referenced from t3code's codex adapter and verified
-// against codex 0.144 live. Main-thread only.
+// Protocol shapes cross-referenced from T3 Code's MIT-licensed Codex adapter
+// (pingdotgg/t3code at daf8ee0b) and verified against the installed Codex
+// app-server schema. See Support/ThirdPartyNotices.txt. Main-thread only.
 final class CodexAppServer {
     typealias JSON = [String: Any]
 
@@ -16,10 +17,7 @@ final class CodexAppServer {
         case approvalRequest(kind: ApprovalKind, payload: JSON, respond: (String) -> Void)
         case turnStarted(String)                 // turn id
         case turnCompleted(turnID: String?, failureMessage: String?)
-        // cumulativeTotal is thread-cumulative; lastTurnTotal is the latest
-        // turn's request size (the current context fill); contextWindow is
-        // the model's capacity when the server reports one.
-        case tokenUsage(cumulativeTotal: Int, lastTurnTotal: Int?, contextWindow: Int?)
+        case tokenUsage(ReportedTokenUsage)
         // Sparse rolling plan-usage update; merge, don't replace.
         case rateLimits(JSON)
         case serverError(String)
@@ -303,16 +301,9 @@ final class CodexAppServer {
             let failure = (turn?["error"] as? JSON)?["message"] as? String
             onEvent?(.turnCompleted(turnID: turn?["id"] as? String, failureMessage: failure))
         case "thread/tokenUsage/updated":
-            // `total` is cumulative for the whole thread and survives resume
-            // (the app-server replays prior turns' usage), so we set rather
-            // than add. `last` is this turn only — which, because every turn
-            // resends the whole conversation, is also the context fill.
-            let usage = params["tokenUsage"] as? JSON
-            if let total = (usage?["total"] as? JSON)?["totalTokens"] as? Int {
-                let last = (usage?["last"] as? JSON)?["totalTokens"] as? Int
-                let window = (usage?["modelContextWindow"] as? Int)
-                    ?? (params["modelContextWindow"] as? Int)
-                onEvent?(.tokenUsage(cumulativeTotal: total, lastTurnTotal: last, contextWindow: window))
+            if let usage = params["tokenUsage"] as? JSON,
+               let report = ProviderTokenUsageParser.codex(tokenUsage: usage) {
+                onEvent?(.tokenUsage(report))
             }
         case "account/rateLimits/updated":
             if let limits = params["rateLimits"] as? JSON { onEvent?(.rateLimits(limits)) }

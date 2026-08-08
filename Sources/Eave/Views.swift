@@ -9,6 +9,9 @@ func acceptDroppedFiles(_ providers: [NSItemProvider]) -> Bool {
     var accepted = false
     for provider in providers where provider.hasItemConformingToTypeIdentifier(UTType.fileURL.identifier) {
         accepted = true
+        // Tells AppState the in-flight drag landed on us, so a panel it reopened
+        // to catch the drag stays open instead of collapsing again.
+        AppState.shared.dropAcceptedDuringDrag = true
         provider.loadItem(forTypeIdentifier: UTType.fileURL.identifier, options: nil) { item, _ in
             let url: URL?
             if let data = item as? Data {
@@ -23,6 +26,36 @@ func acceptDroppedFiles(_ providers: [NSItemProvider]) -> Bool {
         }
     }
     return accepted
+}
+
+// Cmd+V in the composer. Copied files attach as-is; raw image data (the usual
+// shape of a Cmd+Shift+Ctrl+4 screenshot) is written to a temp file first, since
+// attachments are URLs. Returns false when the clipboard holds neither, so the
+// key monitor can let the normal text paste through.
+@discardableResult
+func attachPasteboardFiles(_ pasteboard: NSPasteboard = .general) -> Bool {
+    let urls = pasteboard.readObjects(
+        forClasses: [NSURL.self],
+        options: [.urlReadingFileURLsOnly: true]
+    ) as? [URL] ?? []
+    if !urls.isEmpty {
+        AppState.shared.session.addAttachments(urls)
+        return true
+    }
+
+    // Original bytes, not a re-render through NSImage: addAttachments already
+    // normalizes to JPEG and re-encoding twice only costs quality.
+    let candidates: [(NSPasteboard.PasteboardType, String)] = [(.png, "png"), (.tiff, "tiff")]
+    for (type, ext) in candidates {
+        guard let data = pasteboard.data(forType: type) else { continue }
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("eave-paste-\(UUID().uuidString.prefix(8)).\(ext)")
+        guard (try? data.write(to: url)) != nil else { continue }
+        AppState.shared.session.addAttachments([url])
+        Telemetry.record("attachment_pasted", ["kind": ext])
+        return true
+    }
+    return false
 }
 
 enum ScreenshotTarget: Equatable {
@@ -580,7 +613,7 @@ struct NotchTargetView: View {
 
             HStack(spacing: 6) {
                 LiveDot(color: accent)
-                if session.provider != .chatgpt {
+                if session.provider != .chatgpt, let tokenText {
                     Text(tokenText)
                         .font(.system(size: 11, design: .monospaced))
                         .foregroundStyle(.white.opacity(0.8))
@@ -612,10 +645,12 @@ struct NotchTargetView: View {
                 Color.clear.frame(width: state.notchWidth)
 
                 HStack(spacing: 6) {
-                    Text(tokenText)
-                        .font(.system(size: 11, design: .monospaced))
-                        .foregroundStyle(.white.opacity(0.7))
-                    Text("·").foregroundStyle(.white.opacity(0.3))
+                    if let tokenText {
+                        Text(tokenText)
+                            .font(.system(size: 11, design: .monospaced))
+                            .foregroundStyle(.white.opacity(0.7))
+                        Text("·").foregroundStyle(.white.opacity(0.3))
+                    }
                     Text(completedTimeText)
                         .font(.system(size: 11, design: .monospaced))
                         .foregroundStyle(.white.opacity(0.55))
@@ -748,12 +783,20 @@ struct NotchTargetView: View {
         }
     }
 
-    private var tokenText: String {
-        // Real cumulative usage once a turn has reported it; the chars/4
-        // estimate is only a placeholder until then (and all ChatGPT ever has).
-        let toks = session.sessionTokens > 0 ? session.sessionTokens : session.turnChars / 4
-        if toks < 1000 { return "\(toks) tok" }
-        return String(format: "%.1fk tok", Double(toks) / 1000)
+    private var tokenText: String? {
+        if session.sessionTokens > 0 {
+            return Self.compactTokenLabel(session.sessionTokens) + " tok"
+        }
+        // ChatGPT's embedded web UI exposes no usage payload. Keep its legacy
+        // visible-output fallback, but label it as an estimate instead of
+        // presenting guessed tokens as provider-reported fact.
+        guard session.provider == .chatgpt, session.turnChars > 0 else { return nil }
+        return "~" + Self.compactTokenLabel(session.turnChars / 4) + " tok"
+    }
+
+    private static func compactTokenLabel(_ tokens: Int) -> String {
+        if tokens < 1000 { return "\(tokens)" }
+        return String(format: "%.1fk", Double(tokens) / 1000)
     }
 
     private var elapsedText: String {
@@ -857,6 +900,7 @@ struct ChatRootView: View {
     @ObservedObject private var chatStore = ChatArchiveStore.shared
     @ObservedObject private var chatgptWeb = ChatGPTWeb.shared
     @ObservedObject private var usageStore = ProviderUsageStore.shared
+    @ObservedObject private var recentFolders = RecentFolders.shared
     @FocusState private var inputFocused: Bool
     @State private var inspectedStep: ChatMessage?
     @State private var followsLatestMessage = true
@@ -870,9 +914,10 @@ struct ChatRootView: View {
     private let cornerRadius: CGFloat = 24
     private let accent = Color(red: 10/255, green: 132/255, blue: 1)
 
-    // Stealth shrinks the whole panel UI: the panel is locked to the notch's
-    // width there, so smaller text and controls buy back real room.
-    private var s: CGFloat { state.stealthMode ? 0.85 : 1 }
+    // A narrow panel shrinks the whole UI: smaller text and controls buy back
+    // real room. Driven by the actual width, not by stealth — any style can be
+    // dragged down to the notch's width now.
+    private var s: CGFloat { state.usesCompactLayout ? 0.85 : 1 }
 
     var body: some View {
         Group {
@@ -902,7 +947,7 @@ struct ChatRootView: View {
             .opacity(state.stealthMode ? 0.45 : 1)
             .background(panelBackdrop)
             .clipShape(NotchShape(radius: cornerRadius, topRadius: state.notchTopRadius))
-            .overlay(alignment: .top) { topStrip.opacity(state.stealthMode ? 0.4 : 1) }
+            .overlay(alignment: .top) { topStrip }
             .overlay {
                 if state.dropTargeted {
                     NotchShape(radius: cornerRadius, topRadius: state.notchTopRadius)
@@ -938,13 +983,12 @@ struct ChatRootView: View {
             }
             // Resize handles sit AFTER the mask so they aren't clipped to the panel
             // shape — they intentionally straddle the visible edge, extending out
-            // into the window's transparent margin. Width is locked to the notch in
-            // stealth, so the side/corner handles only exist when not stealth.
-            .overlay(alignment: .leading) { if !state.stealthMode { sideResizeHandle(sign: -1) } }
-            .overlay(alignment: .trailing) { if !state.stealthMode { sideResizeHandle(sign: 1) } }
+            // into the window's transparent margin.
+            .overlay(alignment: .leading) { sideResizeHandle(sign: -1) }
+            .overlay(alignment: .trailing) { sideResizeHandle(sign: 1) }
             .overlay(alignment: .bottom) { bottomResizeHandle }
-            .overlay(alignment: .bottomLeading) { if !state.stealthMode { cornerResizeHandle(sign: -1) } }
-            .overlay(alignment: .bottomTrailing) { if !state.stealthMode { cornerResizeHandle(sign: 1) } }
+            .overlay(alignment: .bottomLeading) { cornerResizeHandle(sign: -1) }
+            .overlay(alignment: .bottomTrailing) { cornerResizeHandle(sign: 1) }
             .padding(.horizontal, AppState.panelMargin)
             .padding(.bottom, AppState.panelBottomMargin)
             // Install the drop target after every overlay and outer margin so
@@ -1149,16 +1193,25 @@ struct ChatRootView: View {
 
     // Buttons live in the black strip flanking the physical notch cutout:
     // history + settings on the left; pin + new chat on the right.
+    // The icon clusters straddle the camera cutout, so they only exist when the
+    // panel is wide enough to place them outside it — below that they'd sit
+    // invisible behind the notch glass but still take clicks. Stealth drops
+    // them at every width: no chrome is the whole point, and the composer's eye
+    // is the way back out.
+    private var showsTopStripIcons: Bool { !state.stealthMode && !state.usesCompactLayout }
+
     private var topStrip: some View {
         HStack(spacing: 0) {
-            HStack(spacing: 12) {
-                historyButton
-                settingsButton
-            }
-            Spacer()
-            HStack(spacing: 12) {
-                pinButton
-                newChatButton
+            if showsTopStripIcons {
+                HStack(spacing: 12) {
+                    historyButton
+                    settingsButton
+                }
+                Spacer()
+                HStack(spacing: 12) {
+                    pinButton
+                    newChatButton
+                }
             }
         }
         .padding(.horizontal, 14)
@@ -1542,7 +1595,10 @@ struct ChatRootView: View {
     }
 
     private func fileDiffView(_ file: FileChange) -> some View {
-        let lines = file.diff.map { DiffParser.lines($0) } ?? []
+        let lines = file.diff.map { DiffParser.lines($0, startLine: file.startLine) } ?? []
+        // Backends that report find/replace without a resolvable location leave
+        // every row unnumbered; drop the gutter rather than indent past nothing.
+        let showsNumbers = lines.contains { $0.oldNumber != nil || $0.newNumber != nil }
         let added = lines.filter { $0.kind == .add }.count
         let removed = lines.filter { $0.kind == .del }.count
         return VStack(alignment: .leading, spacing: 6 * s) {
@@ -1560,7 +1616,7 @@ struct ChatRootView: View {
             if !lines.isEmpty {
                 VStack(spacing: 0) {
                     ForEach(Array(lines.enumerated()), id: \.offset) { _, line in
-                        diffRow(line)
+                        diffRow(line, showsNumbers: showsNumbers)
                     }
                 }
                 .clipShape(RoundedRectangle(cornerRadius: 8 * s))
@@ -1569,7 +1625,10 @@ struct ChatRootView: View {
         }
     }
 
-    private func diffRow(_ line: DiffLine) -> some View {
+    // One number per row (the line it has in the file after the change, or the
+    // line it had before for deletions), not two columns half full: the gutter
+    // stays narrow and the code keeps the width.
+    private func diffRow(_ line: DiffLine, showsNumbers: Bool) -> some View {
         Group {
             if line.kind == .hunk {
                 Text(line.text)
@@ -1580,21 +1639,27 @@ struct ChatRootView: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .background(Color.blue.opacity(0.09))
             } else {
-                HStack(spacing: 0) {
-                    Text(line.oldNumber.map(String.init) ?? "")
-                        .frame(width: 26 * s, alignment: .trailing)
-                    Text(line.newNumber.map(String.init) ?? "")
-                        .frame(width: 26 * s, alignment: .trailing)
-                        .padding(.trailing, 8 * s)
+                // .top: a long line wraps, and the number and sign belong to its
+                // first visual line, not floating in the middle of the block.
+                HStack(alignment: .top, spacing: 0) {
+                    if showsNumbers {
+                        Text((line.newNumber ?? line.oldNumber).map(String.init) ?? "")
+                            .foregroundStyle(.white.opacity(0.3))
+                            .frame(width: 30 * s, alignment: .trailing)
+                            .padding(.trailing, 8 * s)
+                    }
                     Text(diffSign(line.kind))
                         .frame(width: 10 * s, alignment: .leading)
                         .foregroundStyle(diffSignColor(line.kind))
                     Text(line.text.isEmpty ? " " : line.text)
                         .foregroundStyle(diffTextColor(line.kind))
+                        // Wrapped continuations hang under the code column
+                        // instead of running back under the gutter.
+                        .fixedSize(horizontal: false, vertical: true)
                         .frame(maxWidth: .infinity, alignment: .leading)
+                        .textSelection(.enabled)
                 }
                 .font(.system(size: 10.5 * s, design: .monospaced))
-                .foregroundStyle(.white.opacity(0.25))
                 .padding(.horizontal, 8 * s)
                 .padding(.vertical, 1 * s)
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -1657,8 +1722,8 @@ struct ChatRootView: View {
         let dir = ns.deletingLastPathComponent
         let name = ns.lastPathComponent
         return (
-            Text(dir.isEmpty ? "" : dir + "/").foregroundStyle(.white.opacity(0.4))
-                + Text(name).foregroundStyle(.white.opacity(0.9))
+            Text(dir.isEmpty ? "" : dir + "/").foregroundColor(.white.opacity(0.4))
+                + Text(name).foregroundColor(.white.opacity(0.9))
         )
         .font(.system(size: 11 * s, design: .monospaced))
         .lineLimit(1)
@@ -1860,6 +1925,7 @@ struct ChatRootView: View {
                 attachButton
                 contextMenus
                 contextRing
+                stealthExitButton
                 Spacer(minLength: 4)
                 sendButton
             }
@@ -2032,9 +2098,23 @@ struct ChatRootView: View {
     }
 
     // Context-fill ring next to the model chip: how much of the model's
-    // context window the last request consumed. Replaced the stealth eye
-    // (stealth is toggled in Settings). Hidden for ChatGPT, which never
-    // reports usage.
+    // context window the last request consumed. Hidden for ChatGPT, which
+    // never reports usage.
+    // The way out of stealth. It only exists while stealth is on — stealth is
+    // entered from Settings, and the top-strip icons are gone there, so this
+    // composer row is the only always-reachable control.
+    @ViewBuilder private var stealthExitButton: some View {
+        if state.stealthMode {
+            Button { state.toggleStealth() } label: {
+                Image(systemName: "eye")
+                    .font(.system(size: 11 * s, weight: .medium))
+                    .foregroundStyle(.white.opacity(0.55))
+            }
+            .buttonStyle(.plain)
+            .help("Exit stealth mode")
+        }
+    }
+
     @ViewBuilder private var contextRing: some View {
         if let window = session.contextWindowTokens, window > 0 {
             let fraction = min(1, Double(session.contextTokens) / Double(window))
@@ -2054,8 +2134,8 @@ struct ChatRootView: View {
                 .frame(width: 10 * s, height: 10 * s)
                 .animation(.easeOut(duration: 0.3), value: fraction)
                 // The ring alone says "somewhat full"; the figures say how much
-                // room is actually left. Stealth keeps the bare ring.
-                if !state.stealthMode {
+                // room is actually left. A narrow panel keeps the bare ring.
+                if !state.usesCompactLayout {
                     Text(session.contextTokens > 0
                          ? "\(Self.tokenLabel(session.contextTokens))/\(Self.tokenLabel(window))"
                          : Self.tokenLabel(window))
@@ -2409,12 +2489,12 @@ struct ChatRootView: View {
     // row width. Picking a model also switches provider; the ChatGPT provider
     // exposes a single Web entry and has no CLI options, so the folder
     // dropdown hides.
-    // Stealth locks the panel to notch width, so the folder pill hides and
-    // the folder submenu moves inside the session menu instead.
+    // A narrow panel has no room for a second pill, so the folder pill hides
+    // and the folder submenu moves inside the session menu instead.
     @ViewBuilder
     private var contextMenus: some View {
         sessionMenu
-        if session.provider.hasCLIOptions && !state.stealthMode {
+        if session.provider.hasCLIOptions && !state.usesCompactLayout {
             folderMenu
         }
     }
@@ -2542,19 +2622,15 @@ struct ChatRootView: View {
                         }
                     }
                 }
-                if state.stealthMode {
-                    Menu("Folder") {
-                        Button("Choose Folder…", action: pickFolder)
-                        Divider()
-                        Text(session.workingDirectory.path)
-                    }
+                if state.usesCompactLayout {
+                    Menu("Folder") { folderMenuContent }
                 }
             }
         } label: {
             // Usage rides on the model pill as one more segment after effort,
             // because it describes the same choice: this model, on this plan,
             // has this much headroom left.
-            menuPill(sessionPillText, usage: state.stealthMode ? nil : currentUsageWindow)
+            menuPill(sessionPillText, usage: state.usesCompactLayout ? nil : currentUsageWindow)
         }
     }
 
@@ -2617,12 +2693,12 @@ struct ChatRootView: View {
     }
 
     // "Sonnet 5 · High"; just "ChatGPT" for the web provider. Permissions
-    // only show inside the menu (and the tooltip), not on the pill. Stealth
-    // collapses the pill to the bare model name — the row has no room for
-    // more there.
+    // only show inside the menu (and the tooltip), not on the pill. A narrow
+    // panel collapses the pill to the bare model name — the row has no room
+    // for more there.
     private var sessionPillText: String {
         guard session.provider.hasCLIOptions else { return session.provider.label }
-        guard !state.stealthMode else { return modelPillText }
+        guard !state.usesCompactLayout else { return modelPillText }
         var parts = [modelPillText]
         if let effort = currentEffort { parts.append(effort.short) }
         if let version = currentVersion { parts.append(version.short) }
@@ -2644,12 +2720,45 @@ struct ChatRootView: View {
 
     private var folderMenu: some View {
         contextMenu(help: "Folder: \(session.workingDirectory.path)") {
-            Button("Choose Folder…", action: pickFolder)
-            Divider()
-            Text(session.workingDirectory.path)
+            folderMenuContent
         } label: {
             menuPill(session.workingDirectory.lastPathComponent)
         }
+    }
+
+    // The current folder sits checked at the top, then the folders worked in
+    // before it — switching back is the common case, and it costs one click
+    // instead of a trip through the open panel.
+    @ViewBuilder private var folderMenuContent: some View {
+        let current = session.workingDirectory.standardizedFileURL
+        menuItem(Self.folderTitle(current), checked: true) {}
+        let others = recentFolders.folders.filter { $0.path != current.path }
+        if !others.isEmpty {
+            Divider()
+            ForEach(others, id: \.path) { folder in
+                menuItem(Self.folderTitle(folder), checked: false) {
+                    session.workingDirectory = folder
+                }
+            }
+        }
+        Divider()
+        Button("Choose Folder…", action: pickFolder)
+    }
+
+    // "notch-agent · ~/Documents/code" — the folder name is what you scan for,
+    // the parent is what tells two same-named folders apart.
+    private static func folderTitle(_ url: URL) -> String {
+        let name = url.lastPathComponent
+        let parent = abbreviatedPath(url.deletingLastPathComponent())
+        return parent.isEmpty ? name : "\(name) · \(parent)"
+    }
+
+    private static func abbreviatedPath(_ url: URL) -> String {
+        let path = url.standardizedFileURL.path
+        let home = FileManager.default.homeDirectoryForCurrentUser.standardizedFileURL.path
+        if path == home { return "~" }
+        if path.hasPrefix(home + "/") { return "~" + path.dropFirst(home.count) }
+        return path
     }
 
     // Shared dropdown chrome: plain-styled system Menu, hidden indicator,
@@ -3241,7 +3350,7 @@ struct SettingsView: View {
             Toggle(isOn: $state.usageStatsEnabled) {
                 VStack(alignment: .leading, spacing: 1) {
                     Text("Show plan usage").font(.system(size: 12.5))
-                    Text("How much of each plan is left, on the model pill and here. Claude and Cursor read the credentials their CLIs store in your login keychain, so macOS may ask you to allow access the first time. Codex reports over the app-server Eave already runs. ChatGPT's web app reports nothing.")
+                    Text("Basic plan limits on the model pill and here, without reading login credentials. Claude reports through its own /usage screen and Codex through its app-server. Cursor and ChatGPT do not expose credential-free plan limits.")
                         .font(.system(size: 10.5))
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)

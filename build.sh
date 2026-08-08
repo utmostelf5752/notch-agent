@@ -13,13 +13,14 @@ rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources" "$APP/Contents/Frameworks"
 cp Support/AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"
 cp Support/MenuBarIcon.png "$APP/Contents/Resources/MenuBarIcon.png"
+cp Support/ThirdPartyNotices.txt "$APP/Contents/Resources/ThirdPartyNotices.txt"
 cp Support/Info.plist "$APP/Contents/Info.plist"
 
 # Sparkle compares CFBundleVersion between the installed app and the appcast,
 # so it must increase monotonically with every build; the commit count does
 # exactly that. Falls back to 1 outside a git checkout (release tarballs).
 BUILD_NUMBER=$(git rev-list --count HEAD 2>/dev/null || echo 1)
-MARKETING_VERSION="0.1.43"
+MARKETING_VERSION="0.1.44"
 if [ "${EAVE_RELEASE_BUILD:-0}" = "1" ]; then
     BUILD_CHANNEL="release"
 else
@@ -59,6 +60,7 @@ swiftc -O -o "$APP/Contents/MacOS/Eave" \
     Sources/Eave/Updater.swift \
     Sources/Eave/CursorApprovals.swift \
     Sources/Eave/CodexAppServer.swift \
+    Sources/Eave/TokenUsage.swift \
     Sources/Eave/ProviderUsage.swift \
     Sources/Eave/ChatGPTWeb.swift \
     Sources/Eave/MarkdownText.swift \

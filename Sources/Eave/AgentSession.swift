@@ -309,6 +309,11 @@ struct FileChange: Equatable, Codable {
     // and Cursor edits are synthesized as a plain replace block with no line
     // numbers. Nil when the backend gave us no content to diff.
     var diff: String?
+    // First line of the file the synthesized block covers, resolved by finding
+    // the replaced text on disk. Lets those diffs be numbered like real hunks
+    // without inventing an @@ header. Nil when it could not be resolved (and on
+    // chats archived before this existed).
+    var startLine: Int?
 }
 
 // One rendered line of a unified diff. oldNumber/newNumber are nil for
@@ -322,10 +327,12 @@ struct DiffLine {
 }
 
 enum DiffParser {
-    static func lines(_ diff: String) -> [DiffLine] {
+    // startLine numbers a synthesized replace block that has no @@ header; a
+    // diff carrying real hunks numbers itself and ignores it.
+    static func lines(_ diff: String, startLine: Int? = nil) -> [DiffLine] {
         var result: [DiffLine] = []
-        var oldN = 0, newN = 0
-        var numbered = false
+        var oldN = startLine ?? 0, newN = startLine ?? 0
+        var numbered = startLine != nil
         for raw in diff.components(separatedBy: "\n") {
             if raw.hasPrefix("@@") {
                 numbered = true
@@ -370,6 +377,40 @@ enum DiffParser {
         if !new.isEmpty { parts += new.components(separatedBy: "\n").map { "+" + $0 } }
         return parts.joined(separator: "\n")
     }
+
+    // Claude and Cursor describe an edit as find/replace, so the line numbers
+    // have to be recovered: the tool call is reported before the edit lands, so
+    // the file on disk still contains `old` and its offset is the first line.
+    // Empty `old` is a whole-file write, which starts at 1.
+    static func startLine(ofReplaced old: String, inFileAt path: String) -> Int? {
+        guard !old.isEmpty else { return 1 }
+        guard let contents = try? String(contentsOfFile: path, encoding: .utf8) else { return nil }
+        return startLine(ofReplaced: old, in: contents)
+    }
+
+    static func startLine(ofReplaced old: String, in contents: String) -> Int? {
+        guard !old.isEmpty else { return 1 }
+        guard let range = contents.range(of: old) else { return nil }
+        return contents[contents.startIndex..<range.lowerBound]
+            .reduce(1) { $1 == "\n" ? $0 + 1 : $0 }
+    }
+
+    // Several replacements in one call are separate regions of the file, so
+    // they get real @@ headers rather than one continuously numbered block.
+    static func multiEditDiff(_ edits: [(old: String, new: String)], path: String) -> String {
+        let contents = try? String(contentsOfFile: path, encoding: .utf8)
+        return edits.map { edit in
+            let body = replaceDiff(old: edit.old, new: edit.new)
+            guard let contents,
+                  let start = startLine(ofReplaced: edit.old, in: contents)
+            else { return body }
+            return "@@ -\(start),\(lineCount(edit.old)) +\(start),\(lineCount(edit.new)) @@\n" + body
+        }.joined(separator: "\n")
+    }
+
+    private static func lineCount(_ text: String) -> Int {
+        text.isEmpty ? 0 : text.components(separatedBy: "\n").count
+    }
 }
 
 // A persisted conversation, restorable with its provider session ids so it
@@ -406,6 +447,10 @@ struct ChatArchive: Identifiable, Codable {
     // Cumulative real token usage for the chat. Optional so archives written
     // before this field decode (nil -> starts at 0 on restore).
     var sessionTokens: Int?
+    // Which counting rule produced sessionTokens. Totals written before rule 2
+    // summed cache reads, so a long chat could report several times its own
+    // context window; they are dropped on restore rather than continued.
+    var usageSchema: Int?
     // Context-window fill after the last completed turn (the input+output
     // size of the most recent request). Optional for the same reason.
     var contextTokens: Int?
@@ -1040,6 +1085,40 @@ final class ChatArchiveStore: ObservableObject {
     }
 }
 
+// Working folders the user has been in, newest first, shared across chats so
+// the folder menu can offer one-click switching back. Only a handful is kept:
+// the list is a shortcut, not a history.
+final class RecentFolders: ObservableObject {
+    static let shared = RecentFolders()
+    // The current folder occupies the first slot, so this keeps four others.
+    static let limit = 5
+    private static let defaultsKey = "Eave.recentFolders"
+
+    @Published private(set) var folders: [URL] = []
+
+    private init() {
+        let paths = UserDefaults.standard.stringArray(forKey: Self.defaultsKey) ?? []
+        folders = paths
+            .map { URL(fileURLWithPath: $0, isDirectory: true).standardizedFileURL }
+            .filter(Self.isDirectory)
+    }
+
+    func record(_ url: URL) {
+        let folder = url.standardizedFileURL
+        guard Self.isDirectory(folder) else { return }
+        var next = folders.filter { $0.path != folder.path }
+        next.insert(folder, at: 0)
+        folders = Array(next.prefix(Self.limit))
+        UserDefaults.standard.set(folders.map(\.path), forKey: Self.defaultsKey)
+    }
+
+    private static func isDirectory(_ url: URL) -> Bool {
+        var isDirectory: ObjCBool = false
+        let exists = FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory)
+        return exists && isDirectory.boolValue
+    }
+}
+
 // Drives a coding-agent CLI in headless mode. CLI providers speak JSONL over
 // stdout and thread the conversation with a session/thread id:
 //   claude -p <prompt> --output-format stream-json --verbose [--resume <id>]
@@ -1070,12 +1149,13 @@ final class AgentSession: ObservableObject {
     @Published var turnStartedAt: Date?
     @Published var turnChars = 0
     @Published var lastTurnDuration: TimeInterval = 0
-    // Cumulative real token usage for this chat (input + output + cache),
-    // summed across turns from each provider's own usage reporting. The pill
-    // shows this once it's non-zero and falls back to the turnChars/4 estimate
-    // until the first turn reports usage. Persisted per chat, reset with the
-    // conversation. ChatGPT (web) never reports usage, so it stays on the
-    // estimate.
+    // Cumulative provider-reported token usage for this chat (input + output +
+    // cache/reasoning where supplied). Persisted per chat and reset with the
+    // conversation. We never mix the visible-text estimate into this value.
+    // 2: cache reads are excluded from the running total (they are history the
+    // chat already counted once). 1 and earlier summed them every turn.
+    static let usageSchemaVersion = 2
+
     @Published var sessionTokens = 0
     // Current context-window fill: the token size of the most recent request
     // (prompt + history + cache reads + output). Unlike sessionTokens this is
@@ -1083,9 +1163,13 @@ final class AgentSession: ObservableObject {
     // size, since every request resends the whole conversation. Drops when
     // the provider compacts. ChatGPT reports nothing, so it stays 0 there.
     @Published var contextTokens = 0
-    // Codex may report the model's context window alongside token usage;
-    // preferred over the built-in fallback constant when present.
-    private var codexReportedContextWindow: Int?
+    // Provider-reported context capacities are model-scoped. Keeping the model
+    // with the value prevents a report from the previous picker selection from
+    // becoming the denominator for a newly selected model.
+    private var reportedContextWindows: [AgentProvider: (model: String?, tokens: Int)] = [:]
+    // Claude/Cursor terminal result events can be duplicated by a final flush.
+    // Their usage is per launched process, so add it at most once per Eave turn.
+    private var recordedAdditiveUsageThisTurn = false
     var silentTurn = false
     var multipleChoiceTurn = false
     @Published var usageLimit: ProviderLimitNotice?
@@ -1093,6 +1177,7 @@ final class AgentSession: ObservableObject {
         didSet {
             UserDefaults.standard.set(provider.rawValue, forKey: Self.providerDefaultsKey)
             if usageLimit?.provider != provider { usageLimit = nil }
+            if oldValue != provider, !isRestoringChat { contextTokens = 0 }
             // Restores set provider as a side effect and already report
             // chat_restored; counting them would pollute provider_switched.
             if oldValue != provider, !isRestoringChat {
@@ -1109,7 +1194,12 @@ final class AgentSession: ObservableObject {
         .codex: "gpt-5.6-terra",
         .cursor: "composer-2.5",
     ] {
-        didSet { persist(modelChoice, key: Self.modelChoiceDefaultsKey) }
+        didSet {
+            persist(modelChoice, key: Self.modelChoiceDefaultsKey)
+            if oldValue[provider] != modelChoice[provider], !isRestoringChat {
+                contextTokens = 0
+            }
+        }
     }
     @Published var modeChoice: [AgentProvider: String] = [
         .claude: "auto",
@@ -1216,6 +1306,10 @@ final class AgentSession: ObservableObject {
                 UserDefaults.standard.set(migrated, forKey: Self.cursorContextDefaultsKey)
             }
         }
+        // Property observers don't fire during init, so seed the recents with
+        // the folder this session starts in — otherwise the folder you switch
+        // away from would never make the list.
+        RecentFolders.shared.record(workingDirectory)
         refreshModelCatalogs()
     }
 
@@ -1523,6 +1617,9 @@ final class AgentSession: ObservableObject {
                     workingDirectory.standardizedFileURL.path,
                     forKey: Self.workingDirectoryDefaultsKey
                 )
+                // Every way the folder changes (picker, menu, restoring a chat)
+                // lands here, so the recents list is maintained in one place.
+                RecentFolders.shared.record(workingDirectory)
             }
         }
 
@@ -1723,6 +1820,7 @@ final class AgentSession: ObservableObject {
         usageLimit = nil
         turnStartedAt = Date()
         turnChars = 0
+        recordedAdditiveUsageThisTurn = false
         Telemetry.record("message_sent", ["provider": provider.rawValue, "attachments": String(files.count)])
 
         if echo {
@@ -2365,8 +2463,8 @@ final class AgentSession: ObservableObject {
             )
         case "result":
             if let id = event["session_id"] as? String { cursorSessionID = id }
-            if let usage = event["usage"] as? [String: Any] {
-                addTokenUsage(Self.cursorUsageTotal(usage))
+            if let usage = ProviderTokenUsageParser.cursor(result: event) {
+                applyReportedTokenUsage(usage, provider: .cursor)
             }
             if event["is_error"] as? Bool == true,
                let result = event["result"] as? String,
@@ -2512,10 +2610,8 @@ final class AgentSession: ObservableObject {
             codexActiveTurnID = nil
             pendingPermission = nil
             if let failureMessage { presentProviderFailure(failureMessage, provider: .codex) }
-        case .tokenUsage(let cumulativeTotal, let lastTurnTotal, let contextWindow):
-            setCumulativeTokenUsage(cumulativeTotal)
-            if let lastTurnTotal, lastTurnTotal > 0 { contextTokens = lastTurnTotal }
-            if let contextWindow, contextWindow > 0 { codexReportedContextWindow = contextWindow }
+        case .tokenUsage(let usage):
+            applyReportedTokenUsage(usage, provider: .codex)
         case .rateLimits(let snapshot):
             ProviderUsageStore.shared.applyCodexSnapshot(snapshot)
         case .serverError(let message):
@@ -2732,8 +2828,12 @@ final class AgentSession: ObservableObject {
         queuedMessageBeingEditedID = nil
         queuePaused = !queuedMessages.isEmpty
         queueDrainSuspended = !queuedMessages.isEmpty
-        sessionTokens = chat.sessionTokens ?? 0
-        contextTokens = chat.contextTokens ?? 0
+        // Both numbers were computed by summing every API call in a turn before
+        // schema 2, so old chats restore without them rather than carrying a
+        // total that is several times the context window.
+        let currentUsageRules = (chat.usageSchema ?? 0) >= AgentSession.usageSchemaVersion
+        sessionTokens = currentUsageRules ? (chat.sessionTokens ?? 0) : 0
+        contextTokens = currentUsageRules ? (chat.contextTokens ?? 0) : 0
         provider = chat.provider
         usageLimit = nil
         claudeSessionID = chat.claudeSessionID
@@ -2812,6 +2912,7 @@ final class AgentSession: ObservableObject {
             pendingAttachmentPaths: attachments.isEmpty ? nil : attachments.map(\.path),
             queuedMessages: queuedMessages.isEmpty ? nil : queuedMessages,
             sessionTokens: sessionTokens > 0 ? sessionTokens : nil,
+            usageSchema: AgentSession.usageSchemaVersion,
             contextTokens: contextTokens > 0 ? contextTokens : nil,
             date: lastTouchedAt
         )
@@ -2888,8 +2989,13 @@ final class AgentSession: ObservableObject {
                   let t = delta["text"] as? String else { return }
             appendAssistantDelta(t)
         case "assistant":
-            guard let message = event["message"] as? [String: Any],
-                  let content = message["content"] as? [[String: Any]] else { return }
+            guard let message = event["message"] as? [String: Any] else { return }
+            // Per-response usage: the only place Claude reports how full the
+            // context actually is right now.
+            if let usage = ProviderTokenUsageParser.claudeMessage(message) {
+                applyReportedTokenUsage(usage, provider: .claude)
+            }
+            guard let content = message["content"] as? [[String: Any]] else { return }
             let texts = content.compactMap { block -> String? in
                 guard block["type"] as? String == "text",
                       let t = block["text"] as? String,
@@ -2919,8 +3025,8 @@ final class AgentSession: ObservableObject {
         case "result":
             // Resumed runs get a fresh session id; always track the latest.
             if let id = event["session_id"] as? String { claudeSessionID = id }
-            if let usage = event["usage"] as? [String: Any] {
-                addTokenUsage(Self.claudeUsageTotal(usage))
+            if let usage = ProviderTokenUsageParser.claude(result: event) {
+                applyReportedTokenUsage(usage, provider: .claude)
             }
             if event["is_error"] as? Bool == true,
                let result = event["result"] as? String,
@@ -3084,14 +3190,26 @@ final class AgentSession: ObservableObject {
 
     // MARK: - Token usage
 
-    // Providers that run one process per turn (Claude, Cursor) report
-    // per-invocation usage; we sum it into the chat total. The same
-    // per-invocation total is also the size of the request that produced it,
-    // i.e. the current context fill.
-    private func addTokenUsage(_ tokens: Int) {
-        guard tokens > 0 else { return }
-        sessionTokens += tokens
-        contextTokens = tokens
+    private func applyReportedTokenUsage(
+        _ usage: ReportedTokenUsage, provider reportingProvider: AgentProvider
+    ) {
+        if let cumulative = usage.cumulativeTokens, cumulative > sessionTokens {
+            // Codex totals survive resume and may be replayed. Set/max, never add.
+            sessionTokens = cumulative
+        }
+        if let turn = usage.turnTokens, turn > 0, !recordedAdditiveUsageThisTurn {
+            // Claude/Cursor launch one process per turn and report that process.
+            sessionTokens += turn
+            recordedAdditiveUsageThisTurn = true
+        }
+        if let context = usage.contextTokens, context > 0 {
+            contextTokens = context
+        }
+        if let window = usage.contextWindow, window > 0 {
+            reportedContextWindows[reportingProvider] = (
+                model: modelChoice[reportingProvider], tokens: window
+            )
+        }
     }
 
     // Approximate context-window capacity for the provider's selected model,
@@ -3099,38 +3217,21 @@ final class AgentSession: ObservableObject {
     // never reports usage). Claude and Codex windows are fixed per model;
     // Cursor's is whichever size the user picked for the family.
     var contextWindowTokens: Int? {
+        if let reported = reportedContextWindows[provider],
+           reported.model == modelChoice[provider] {
+            return reported.tokens
+        }
         switch provider {
         case .claude:
             let model = modelChoice[.claude] ?? ""
             return model.contains("haiku") ? 200_000 : 1_000_000
         case .codex:
-            return codexReportedContextWindow ?? 272_000
+            return 272_000
         case .cursor:
             return effectiveContextVersion(for: .cursor) == "1m" ? 1_000_000 : 250_000
         case .chatgpt:
             return nil
         }
-    }
-
-    // Codex reports a thread-cumulative total on every update, so we take the
-    // max rather than adding (guards against the transient lower value the
-    // app-server emits while replaying a resumed thread's history).
-    private func setCumulativeTokenUsage(_ total: Int) {
-        if total > sessionTokens { sessionTokens = total }
-    }
-
-    // Claude's result usage keeps cache tokens in separate fields from
-    // input_tokens, so all four must be summed for the true tokens processed.
-    private static func claudeUsageTotal(_ usage: [String: Any]) -> Int {
-        let keys = ["input_tokens", "output_tokens",
-                    "cache_read_input_tokens", "cache_creation_input_tokens"]
-        return keys.reduce(0) { $0 + ((usage[$1] as? Int) ?? 0) }
-    }
-
-    // Cursor's result usage, same shape with camelCase keys.
-    private static func cursorUsageTotal(_ usage: [String: Any]) -> Int {
-        let keys = ["inputTokens", "outputTokens", "cacheReadTokens", "cacheWriteTokens"]
-        return keys.reduce(0) { $0 + ((usage[$1] as? Int) ?? 0) }
     }
 
     // Streaming: replace the trailing assistant bubble with the full text.
@@ -3163,6 +3264,14 @@ final class AgentSession: ObservableObject {
         return full.hasPrefix(prefix) ? String(full.dropFirst(prefix.count)) : path
     }
 
+    // Backends report file paths either absolute (Claude) or relative to the
+    // working directory (Cursor); line-number lookup needs the real file.
+    private func absolutePath(_ path: String) -> String {
+        path.hasPrefix("/")
+            ? path
+            : workingDirectory.appendingPathComponent(path).path
+    }
+
     private static func fileKind(_ raw: String?) -> FileChange.Kind {
         switch raw?.lowercased() {
         case "add", "added", "create", "created", "new": return .create
@@ -3188,22 +3297,25 @@ final class AgentSession: ObservableObject {
             return .command(text: cmd, cwd: workingDirectory.path, exitCode: nil)
         case "Edit":
             guard let path = input["file_path"] as? String else { return nil }
-            let diff = DiffParser.replaceDiff(
-                old: input["old_string"] as? String ?? "",
-                new: input["new_string"] as? String ?? ""
-            )
-            return .fileChange(files: [FileChange(path: relativeToWorkingDir(path), kind: .edit, diff: diff)])
+            let old = input["old_string"] as? String ?? ""
+            let diff = DiffParser.replaceDiff(old: old, new: input["new_string"] as? String ?? "")
+            return .fileChange(files: [FileChange(
+                path: relativeToWorkingDir(path), kind: .edit, diff: diff,
+                startLine: DiffParser.startLine(ofReplaced: old, inFileAt: absolutePath(path))
+            )])
         case "MultiEdit":
             guard let path = input["file_path"] as? String else { return nil }
-            let diff = ((input["edits"] as? [[String: Any]]) ?? []).map {
-                DiffParser.replaceDiff(old: $0["old_string"] as? String ?? "",
-                                       new: $0["new_string"] as? String ?? "")
-            }.joined(separator: "\n")
+            let edits = ((input["edits"] as? [[String: Any]]) ?? []).map {
+                (old: $0["old_string"] as? String ?? "", new: $0["new_string"] as? String ?? "")
+            }
+            let diff = DiffParser.multiEditDiff(edits, path: absolutePath(path))
             return .fileChange(files: [FileChange(path: relativeToWorkingDir(path), kind: .edit, diff: diff)])
         case "Write":
             guard let path = input["file_path"] as? String else { return nil }
             let diff = DiffParser.replaceDiff(old: "", new: input["content"] as? String ?? "")
-            return .fileChange(files: [FileChange(path: relativeToWorkingDir(path), kind: .create, diff: diff)])
+            return .fileChange(files: [FileChange(
+                path: relativeToWorkingDir(path), kind: .create, diff: diff, startLine: 1
+            )])
         default:
             return nil
         }
@@ -3220,8 +3332,10 @@ final class AgentSession: ObservableObject {
            let args = write["args"] as? [String: Any],
            let path = args["path"] as? String ?? args["file_path"] as? String {
             let content = args["contents"] as? String ?? args["content"] as? String ?? ""
-            return .fileChange(files: [FileChange(path: relativeToWorkingDir(path), kind: .create,
-                                                  diff: DiffParser.replaceDiff(old: "", new: content))])
+            return .fileChange(files: [FileChange(
+                path: relativeToWorkingDir(path), kind: .create,
+                diff: DiffParser.replaceDiff(old: "", new: content), startLine: 1
+            )])
         }
         if let edit = (toolCall["editToolCall"] ?? toolCall["searchReplaceToolCall"]) as? [String: Any],
            let args = edit["args"] as? [String: Any],
@@ -3229,7 +3343,10 @@ final class AgentSession: ObservableObject {
             let old = args["old_string"] as? String ?? args["oldString"] as? String ?? ""
             let new = args["new_string"] as? String ?? args["newString"] as? String ?? ""
             let diff = old.isEmpty && new.isEmpty ? nil : DiffParser.replaceDiff(old: old, new: new)
-            return .fileChange(files: [FileChange(path: relativeToWorkingDir(path), kind: .edit, diff: diff)])
+            return .fileChange(files: [FileChange(
+                path: relativeToWorkingDir(path), kind: .edit, diff: diff,
+                startLine: diff == nil ? nil : DiffParser.startLine(ofReplaced: old, inFileAt: absolutePath(path))
+            )])
         }
         return nil
     }

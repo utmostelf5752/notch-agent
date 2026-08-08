@@ -27,6 +27,21 @@ struct Changelog: Codable, Equatable {
     // an exact copy of this. Newest release first.
     static let builtin = Changelog(entries: [
         Entry(
+            version: "0.1.44",
+            date: "2026-08-07",
+            notes: [
+                "Plan usage: see how much of each plan is left on the model pill and in Settings. It is off by default — turn on Show plan usage in Settings > General. Claude and Cursor read the credentials their CLIs store in your login keychain, so macOS may ask for access the first time; Codex reports over the app-server Eave already runs; the ChatGPT web app reports nothing.",
+                "The model menu lists each provider's remaining plan windows above its models, so you can see the headroom before switching.",
+                "Token counts in the notch now come from the provider's own usage report instead of a character estimate, and a ring beside the model pill shows how much of the model's context window the last request used.",
+                "Mode (fast and plan) and Context (Cursor's 250K/1M) now have their own entries in the session menu alongside Model and Permissions.",
+                "Cmd+V attaches images and files from the clipboard straight to the composer.",
+                "Stealth mode no longer locks the panel to the notch's width. It resizes like every other style and removes the panel icons instead, and an eye button in the composer leaves stealth without a trip to Settings.",
+                "Any panel can now be dragged all the way down to the width of the notch itself; the pills, text, and icons shrink or drop away as it narrows.",
+                "The folder menu lists the current folder and the last four you worked in, so switching back takes one click.",
+                "The compact notch style traces a 1pt line around the notch while working and pulses it green three times when a turn finishes.",
+            ]
+        ),
+        Entry(
             version: "0.1.43",
             date: "2026-07-31",
             notes: [

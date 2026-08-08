@@ -1,21 +1,18 @@
 import Foundation
-import Security
 
 // Plan-usage ("how much of my quota is gone") for each provider, which is a
 // different thing from the per-chat token counts AgentSession already tracks.
 // Each provider reports it its own way:
 //
-//   Claude — GET api.anthropic.com/api/oauth/usage with the OAuth token Claude
-//            Code stores in the login keychain. Returns a normalized `limits`
-//            array: session, weekly, and a per-model weekly.
+//   Claude — launches the already-authenticated Claude CLI in a short-lived
+//            terminal, asks its built-in `/usage` screen, and parses the basic
+//            session, weekly, and model-scoped percentages it renders.
 //   Codex  — `account/rateLimits/read` on the app-server we already speak, plus
 //            an `account/rateLimits/updated` push during turns. Returns one
 //            bucket per metered limit id (the shared one, and one per model
 //            that meters separately, e.g. Codex Spark).
-//   Cursor — DashboardService/GetCurrentPeriodUsage with the token in the
-//            keychain. Splits the billing cycle into a Cursor-model bucket and
-//            an everything-else bucket; the response names which models fall in
-//            the first one.
+//   Cursor — no credential-free status surface. Eave deliberately does not
+//            read Cursor's Keychain token or browser session just for a meter.
 //   ChatGPT — nothing. The web app exposes no usage figure.
 
 // MARK: - Model
@@ -59,8 +56,7 @@ struct ProviderUsage: Equatable {
     // models between buckets.
     var cursorAutoModels: Set<String> = []
     var fetchedAt: Date?
-    // Set when the provider could not be read: signed out, no CLI, keychain
-    // denied. Rendered in Settings instead of bars.
+    // Set when the provider could not be read. Rendered in Settings instead of bars.
     var failure: String?
 
     var isEmpty: Bool { windows.isEmpty && scoped.isEmpty }
@@ -177,8 +173,7 @@ final class ProviderUsageStore: ObservableObject {
         }
     }
 
-    // Turning the setting off drops what we already read, so nothing sourced
-    // from the CLIs' credentials lingers in the UI.
+    // Turning the setting off drops the cached snapshots from the UI.
     func clear() {
         usage.removeAll()
     }
@@ -234,107 +229,26 @@ final class ProviderUsageStore: ObservableObject {
     private func fetchClaude() {
         DispatchQueue.global(qos: .utility).async {
             var entry = ProviderUsage()
-            guard let raw = Keychain.readString(service: "Claude Code-credentials") else {
-                entry.failure = "Sign in to Claude Code"
+            guard let executable = Self.findExecutable("claude") else {
+                entry.failure = "Claude CLI not found"
                 DispatchQueue.main.async { self.finish(.claude, entry) }
                 return
             }
-            let credentials = (try? JSONSerialization.jsonObject(with: Data(raw.utf8))) as? [String: Any]
-            let oauth = credentials?["claudeAiOauth"] as? [String: Any]
-            guard let token = oauth?["accessToken"] as? String else {
-                entry.failure = "Sign in to Claude Code"
-                DispatchQueue.main.async { self.finish(.claude, entry) }
-                return
+            do {
+                let parsed = try ClaudeUsageProbe.fetch(
+                    executable: executable,
+                    environment: Self.cliEnvironment()
+                )
+                entry.plan = parsed.plan
+                entry.windows = parsed.windows
+                entry.scoped = parsed.scoped
+            } catch let error as ClaudeUsageProbe.ProbeError {
+                entry.failure = error.message
+            } catch {
+                entry.failure = "Claude usage unavailable"
             }
-            entry.plan = (oauth?["subscriptionType"] as? String).map(Self.planLabel)
-
-            var request = URLRequest(url: URL(string: "https://api.anthropic.com/api/oauth/usage")!)
-            request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
-            request.setValue("oauth-2025-04-20", forHTTPHeaderField: "anthropic-beta")
-            request.timeoutInterval = 15
-
-            URLSession.shared.dataTask(with: request) { data, response, error in
-                var entry = entry
-                let status = (response as? HTTPURLResponse)?.statusCode ?? 0
-                if error != nil {
-                    entry.failure = "Usage unavailable"
-                } else if status == 401 || status == 403 {
-                    entry.failure = "Sign in to Claude Code"
-                } else if let data,
-                          let json = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] {
-                    let parsed = Self.parseClaude(json)
-                    entry.windows = parsed.windows
-                    entry.scoped = parsed.scoped
-                    if entry.windows.isEmpty && entry.scoped.isEmpty {
-                        entry.failure = "Usage unavailable"
-                    }
-                } else {
-                    entry.failure = "Usage unavailable"
-                }
-                DispatchQueue.main.async { self.finish(.claude, entry) }
-            }.resume()
+            DispatchQueue.main.async { self.finish(.claude, entry) }
         }
-    }
-
-    // `limits` is the current, already-normalized view; the older top-level
-    // five_hour/seven_day fields are the fallback if it ever disappears.
-    private static func parseClaude(
-        _ json: [String: Any]
-    ) -> (windows: [UsageWindow], scoped: [String: UsageWindow]) {
-        var windows: [UsageWindow] = []
-        var scoped: [String: UsageWindow] = [:]
-
-        if let limits = json["limits"] as? [[String: Any]] {
-            for limit in limits {
-                guard let kind = limit["kind"] as? String,
-                      let percent = (limit["percent"] as? NSNumber)?.intValue
-                else { continue }
-                let resetsAt = (limit["resets_at"] as? String).flatMap(Self.parseISODate)
-                let isSession = kind.contains("session")
-                let key = isSession ? "5hr" : "7d"
-                let minutes = isSession ? 300 : 10080
-
-                let scopeModel = ((limit["scope"] as? [String: Any])?["model"] as? [String: Any])?["display_name"] as? String
-                if let scopeModel {
-                    scoped[normalize(scopeModel)] = UsageWindow(
-                        key: key,
-                        name: (isSession ? "Session · " : "Weekly · ") + scopeModel,
-                        percent: percent,
-                        resetsAt: resetsAt,
-                        windowMinutes: minutes
-                    )
-                } else {
-                    windows.append(UsageWindow(
-                        key: key,
-                        name: isSession ? "Session" : "Weekly · all models",
-                        percent: percent,
-                        resetsAt: resetsAt,
-                        windowMinutes: minutes
-                    ))
-                }
-            }
-        }
-
-        if windows.isEmpty {
-            for (field, name, key, minutes) in [
-                ("five_hour", "Session", "5hr", 300),
-                ("seven_day", "Weekly · all models", "7d", 10080),
-            ] {
-                guard let bucket = json[field] as? [String: Any],
-                      let utilization = (bucket["utilization"] as? NSNumber)?.doubleValue
-                else { continue }
-                windows.append(UsageWindow(
-                    key: key,
-                    name: name,
-                    percent: Int(utilization.rounded()),
-                    resetsAt: (bucket["resets_at"] as? String).flatMap(Self.parseISODate),
-                    windowMinutes: minutes
-                ))
-            }
-        }
-
-        windows.sort { ($0.windowMinutes ?? .max) < ($1.windowMinutes ?? .max) }
-        return (windows, scoped)
     }
 
     // MARK: Codex
@@ -440,69 +354,9 @@ final class ProviderUsageStore: ObservableObject {
     // MARK: Cursor
 
     private func fetchCursor() {
-        DispatchQueue.global(qos: .utility).async {
-            var entry = ProviderUsage(plan: nil)
-            guard let token = Keychain.readString(service: "cursor-access-token") else {
-                entry.failure = "Sign in to Cursor"
-                DispatchQueue.main.async { self.finish(.cursor, entry) }
-                return
-            }
-            var request = URLRequest(
-                url: URL(string: "https://api2.cursor.sh/aiserver.v1.DashboardService/GetCurrentPeriodUsage")!
-            )
-            request.httpMethod = "POST"
-            request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
-            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-            request.setValue("1", forHTTPHeaderField: "connect-protocol-version")
-            request.httpBody = Data("{}".utf8)
-            request.timeoutInterval = 15
-
-            URLSession.shared.dataTask(with: request) { data, response, error in
-                var entry = entry
-                let status = (response as? HTTPURLResponse)?.statusCode ?? 0
-                if error != nil {
-                    entry.failure = "Usage unavailable"
-                } else if status == 401 || status == 403 {
-                    entry.failure = "Sign in to Cursor"
-                } else if let data,
-                          let json = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
-                          let parsed = Self.parseCursor(json) {
-                    entry.windows = parsed.windows
-                    entry.cursorAutoModels = parsed.autoModels
-                } else {
-                    entry.failure = "Usage unavailable"
-                }
-                DispatchQueue.main.async { self.finish(.cursor, entry) }
-            }.resume()
-        }
-    }
-
-    private static func parseCursor(
-        _ json: [String: Any]
-    ) -> (windows: [UsageWindow], autoModels: Set<String>)? {
-        guard let plan = json["planUsage"] as? [String: Any] else { return nil }
-        // Both buckets run to the end of the billing cycle, so neither is
-        // "shorter" — the selected model decides which one the badge shows.
-        let resetsAt = (json["billingCycleEnd"] as? String)
-            .flatMap(Double.init)
-            .map { Date(timeIntervalSince1970: $0 / 1000) }
-        func window(_ field: String, key: String, name: String) -> UsageWindow? {
-            guard let percent = (plan[field] as? NSNumber)?.doubleValue else { return nil }
-            return UsageWindow(
-                key: key,
-                name: name,
-                percent: Int(percent.rounded()),
-                resetsAt: resetsAt,
-                windowMinutes: nil
-            )
-        }
-        let windows = [
-            window("autoPercentUsed", key: "cursor", name: "Cursor models"),
-            window("apiPercentUsed", key: "other", name: "Other models"),
-        ].compactMap { $0 }
-        guard !windows.isEmpty else { return nil }
-        let autoModels = Set((json["autoBucketModels"] as? [String]) ?? [])
-        return (windows, autoModels)
+        var entry = ProviderUsage()
+        entry.failure = "Cursor does not report usage without account access."
+        finish(.cursor, entry)
     }
 
     // MARK: Shared helpers
@@ -533,13 +387,6 @@ final class ProviderUsageStore: ObservableObject {
         }
     }
 
-    private static func parseISODate(_ text: String) -> Date? {
-        let withFraction = ISO8601DateFormatter()
-        withFraction.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        if let date = withFraction.date(from: text) { return date }
-        return ISO8601DateFormatter().date(from: text)
-    }
-
     private static func findExecutable(_ name: String) -> String? {
         let p = Process()
         p.executableURL = URL(fileURLWithPath: "/bin/zsh")
@@ -562,24 +409,271 @@ final class ProviderUsageStore: ObservableObject {
     }
 }
 
-// MARK: - Keychain
+// MARK: - Claude CLI usage
 
-// Both tokens live in generic-password items owned by another app, so the
-// first read shows the system's "Eave wants to use …" prompt. Denying it is a
-// normal outcome, not an error worth surfacing twice — the caller renders it
-// as a sign-in hint. Blocking call: never run this on the main thread.
-enum Keychain {
-    static func readString(service: String) -> String? {
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
-            kSecMatchLimit as String: kSecMatchLimitOne,
-            kSecReturnData as String: true,
+// CodexBar demonstrated the privacy-friendly provider strategy this probe uses:
+// ask the provider's own authenticated CLI for its rendered status instead of
+// reading its OAuth token. This is a deliberately small, Eave-specific process
+// runner and parser; see Support/ThirdPartyNotices.txt for attribution.
+private enum ClaudeUsageProbe {
+    struct Result {
+        let plan: String?
+        let windows: [UsageWindow]
+        let scoped: [String: UsageWindow]
+    }
+
+    struct ProbeError: Error {
+        let message: String
+    }
+
+    static func fetch(executable: String, environment: [String: String]) throws -> Result {
+        let directory = AppPaths.supportDirectory.appendingPathComponent(
+            "ClaudeUsageProbe", isDirectory: true
+        )
+        try? FileManager.default.createDirectory(
+            at: directory,
+            withIntermediateDirectories: true,
+            attributes: [.posixPermissions: 0o700]
+        )
+
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/script")
+        process.arguments = [
+            "-q", "/dev/null", executable,
+            "--allowed-tools", "",
+            "--strict-mcp-config",
+            "--session-id", "e5a7c92d-30ca-4d95-9827-b0c199be5ae1",
         ]
-        var item: CFTypeRef?
-        guard SecItemCopyMatching(query as CFDictionary, &item) == errSecSuccess,
-              let data = item as? Data
+        process.currentDirectoryURL = directory
+        var cleanEnvironment = environment
+        cleanEnvironment.removeValue(forKey: "CLAUDECODE")
+        cleanEnvironment.removeValue(forKey: "ANTHROPIC_API_KEY")
+        cleanEnvironment["DISABLE_AUTOUPDATER"] = "1"
+        process.environment = cleanEnvironment
+
+        let input = Pipe()
+        let output = Pipe()
+        process.standardInput = input
+        process.standardOutput = output
+        process.standardError = output
+
+        do {
+            try process.run()
+        } catch {
+            throw ProbeError(message: "Claude usage unavailable")
+        }
+
+        let writer = input.fileHandleForWriting
+        func send(_ text: String, after delay: TimeInterval) {
+            DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + delay) {
+                try? writer.write(contentsOf: Data(text.utf8))
+            }
+        }
+        // Claude's slash-command picker occasionally needs the second Enter;
+        // the extra retry is harmless once the usage panel is already open.
+        send("/usage\r", after: 2.0)
+        send("\r", after: 3.2)
+        send("\r", after: 4.2)
+        send("\u{1b}", after: 12.0)
+        send("/exit\r", after: 12.7)
+        DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 14.0) {
+            try? writer.close()
+        }
+        DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 18.0) {
+            if process.isRunning { process.terminate() }
+        }
+
+        process.waitUntilExit()
+        let data = output.fileHandleForReading.readDataToEndOfFile()
+        guard let raw = String(data: data, encoding: .utf8), !raw.isEmpty else {
+            throw ProbeError(message: "Claude usage unavailable")
+        }
+        return try parse(raw)
+    }
+
+    static func parse(_ raw: String) throws -> Result {
+        let clean = stripTerminalCodes(raw).replacingOccurrences(of: "\r", with: "\n")
+        // Cursor-positioning escape codes often sit between words in the TUI
+        // ("Current<move>session"). The label patterns below therefore allow
+        // zero whitespace rather than relying on a visually spaced string.
+        let panel = clean
+
+        guard let session = window(
+            labelPattern: #"Current\s*session"#,
+            key: "5hr",
+            name: "Session",
+            minutes: 300,
+            in: panel
+        ) else {
+            let lower = clean.lowercased()
+            if lower.contains("login") || lower.contains("sign in") || lower.contains("authentication") {
+                throw ProbeError(message: "Sign in to Claude Code")
+            }
+            throw ProbeError(message: "Claude usage unavailable")
+        }
+
+        var windows = [session]
+        if let weekly = window(
+            labelPattern: #"Current\s*week\s*\(all\s*models\)"#,
+            key: "7d",
+            name: "Weekly · all models",
+            minutes: 10080,
+            in: panel
+        ) {
+            windows.append(weekly)
+        }
+
+        var scoped: [String: UsageWindow] = [:]
+        let scopedPattern = #"Current\s*week\s*\((?!all\s*models\))([^\)]+)\)"#
+        if let regex = try? NSRegularExpression(
+            pattern: scopedPattern,
+            options: [.caseInsensitive]
+        ) {
+            let matches = regex.matches(
+                in: panel,
+                range: NSRange(panel.startIndex..<panel.endIndex, in: panel)
+            )
+            for match in matches {
+                guard let fullRange = Range(match.range(at: 0), in: panel),
+                      let modelRange = Range(match.range(at: 1), in: panel)
+                else { continue }
+                let model = String(panel[modelRange]).trimmingCharacters(in: .whitespacesAndNewlines)
+                let tail = String(panel[fullRange.lowerBound...].prefix(500))
+                if let modelWindow = window(
+                    labelPattern: NSRegularExpression.escapedPattern(for: String(panel[fullRange])),
+                    key: "7d",
+                    name: "Weekly · \(model)",
+                    minutes: 10080,
+                    in: tail
+                ) {
+                    scoped[ProviderUsageStore.normalize(model)] = modelWindow
+                }
+            }
+        }
+
+        let plan = firstCapture(
+            pattern: #"Claude\s*(Max|Pro|Team|Enterprise|Free)\b"#,
+            in: clean
+        )
+        return Result(plan: plan, windows: windows, scoped: scoped)
+    }
+
+    private static func window(
+        labelPattern: String,
+        key: String,
+        name: String,
+        minutes: Int,
+        in text: String
+    ) -> UsageWindow? {
+        let pattern = labelPattern + #"[\s\S]{0,500}?([0-9]{1,3}(?:\.[0-9]+)?)\s*%\s*(used|left|remaining|available)"#
+        guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]),
+              let match = regex.firstMatch(
+                  in: text,
+                  range: NSRange(text.startIndex..<text.endIndex, in: text)
+              ),
+              let percentRange = Range(match.range(at: 1), in: text),
+              let directionRange = Range(match.range(at: 2), in: text),
+              let rawPercent = Double(text[percentRange])
         else { return nil }
-        return String(data: data, encoding: .utf8)
+
+        let direction = text[directionRange].lowercased()
+        let used = direction == "used" ? rawPercent : 100 - rawPercent
+        let resetText: String = {
+            guard let matchRange = Range(match.range(at: 0), in: text) else { return "" }
+            return String(text[matchRange.lowerBound...].prefix(700))
+        }()
+        let reset = firstCapture(pattern: #"Resets\s*([^\n]+)"#, in: resetText)
+        return UsageWindow(
+            key: key,
+            name: name,
+            percent: max(0, min(100, Int(used.rounded()))),
+            resetsAt: reset.flatMap { parseReset($0, windowMinutes: minutes) },
+            windowMinutes: minutes
+        )
+    }
+
+    private static func parseReset(_ description: String, windowMinutes: Int) -> Date? {
+        var text = description.trimmingCharacters(in: .whitespacesAndNewlines)
+        var timeZone = TimeZone.current
+        if let zoneRange = text.range(of: #"\(([^\)]+)\)"#, options: .regularExpression) {
+            let zone = text[zoneRange].dropFirst().dropLast()
+            timeZone = TimeZone(identifier: String(zone)) ?? timeZone
+            text.removeSubrange(zoneRange)
+            text = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+
+        let calendar = Calendar(identifier: .gregorian)
+        let now = Date()
+        for format in ["h:mma", "h:mm a"] {
+            let formatter = DateFormatter()
+            formatter.locale = Locale(identifier: "en_US_POSIX")
+            formatter.timeZone = timeZone
+            formatter.dateFormat = format
+            if let parsed = formatter.date(from: text.replacingOccurrences(of: " ", with: "")) {
+                let time = calendar.dateComponents(in: timeZone, from: parsed)
+                var today = calendar.dateComponents(in: timeZone, from: now)
+                today.hour = time.hour
+                today.minute = time.minute
+                today.second = 0
+                if let candidate = calendar.date(from: today) {
+                    return candidate > now ? candidate : calendar.date(byAdding: .day, value: 1, to: candidate)
+                }
+            }
+        }
+
+        for format in ["MMM d 'at' ha", "MMM d 'at' h:mma"] {
+            let formatter = DateFormatter()
+            formatter.locale = Locale(identifier: "en_US_POSIX")
+            formatter.timeZone = timeZone
+            formatter.dateFormat = format
+            if let parsed = formatter.date(from: text) {
+                let parts = calendar.dateComponents(in: timeZone, from: parsed)
+                var candidateParts = DateComponents()
+                candidateParts.timeZone = timeZone
+                candidateParts.year = calendar.component(.year, from: now)
+                candidateParts.month = parts.month
+                candidateParts.day = parts.day
+                candidateParts.hour = parts.hour
+                candidateParts.minute = parts.minute
+                if let candidate = calendar.date(from: candidateParts) {
+                    let grace = TimeInterval(windowMinutes * 60)
+                    return candidate.timeIntervalSince(now) > -grace
+                        ? candidate
+                        : calendar.date(byAdding: .year, value: 1, to: candidate)
+                }
+            }
+        }
+        return nil
+    }
+
+    private static func firstCapture(pattern: String, in text: String) -> String? {
+        guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]),
+              let match = regex.firstMatch(
+                  in: text,
+                  range: NSRange(text.startIndex..<text.endIndex, in: text)
+              ),
+              match.numberOfRanges > 1,
+              let range = Range(match.range(at: 1), in: text)
+        else { return nil }
+        return String(text[range]).trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private static func stripTerminalCodes(_ text: String) -> String {
+        var clean = text
+        let patterns = [
+            "\u{001B}\\][^\u{0007}]*(?:\u{0007}|\u{001B}\\\\)",
+            "\u{001B}\\[[0-?]*[ -/]*[@-~]",
+            "\u{001B}[()][A-Z0-9]",
+            "\u{001B}[@-_]",
+        ]
+        for pattern in patterns {
+            guard let regex = try? NSRegularExpression(pattern: pattern) else { continue }
+            clean = regex.stringByReplacingMatches(
+                in: clean,
+                range: NSRange(clean.startIndex..<clean.endIndex, in: clean),
+                withTemplate: ""
+            )
+        }
+        return clean
     }
 }

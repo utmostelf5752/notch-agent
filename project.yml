@@ -10,8 +10,8 @@ settings:
   base:
     SWIFT_VERSION: "5.9"
     MACOSX_DEPLOYMENT_TARGET: "13.0"
-    MARKETING_VERSION: "0.1.42"
-    CURRENT_PROJECT_VERSION: "43"
+    MARKETING_VERSION: "0.1.44"
+    CURRENT_PROJECT_VERSION: "46"
     CODE_SIGN_STYLE: Manual
     CODE_SIGN_IDENTITY: "Apple Development"
     DEVELOPMENT_TEAM: WJZ957T3P9
@@ -30,6 +30,8 @@ targets:
       - path: Support/AppIcon.icns
         buildPhase: resources
       - path: Support/MenuBarIcon.png
+        buildPhase: resources
+      - path: Support/ThirdPartyNotices.txt
         buildPhase: resources
     dependencies:
       # Vendored binary framework (fetched by Support/fetch-sparkle.sh) so

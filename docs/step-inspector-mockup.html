@@ -1,0 +1,502 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Step inspector — mockup</title>
+<style>
+  :root {
+    --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace;
+    --sans: -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif;
+    --add: #3fb950;
+    --add-bg: rgba(63, 185, 80, 0.14);
+    --del: #f85149;
+    --del-bg: rgba(248, 81, 73, 0.14);
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; }
+  body {
+    margin: 0;
+    font-family: var(--sans);
+    background:
+      radial-gradient(1200px 700px at 50% -10%, #2a2a2e 0%, #161618 55%, #0d0d0f 100%);
+    color: #fff;
+    min-height: 100%;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 40px 20px 80px;
+    gap: 26px;
+  }
+  .controls {
+    display: flex;
+    gap: 18px;
+    align-items: center;
+    flex-wrap: wrap;
+    justify-content: center;
+  }
+  .seg {
+    display: inline-flex;
+    background: rgba(255,255,255,0.06);
+    border: 1px solid rgba(255,255,255,0.12);
+    border-radius: 10px;
+    padding: 3px;
+  }
+  .seg button {
+    font-family: var(--sans);
+    font-size: 12.5px;
+    font-weight: 550;
+    color: rgba(255,255,255,0.6);
+    background: transparent;
+    border: 0;
+    padding: 6px 14px;
+    border-radius: 7px;
+    cursor: pointer;
+    transition: all 0.14s ease;
+  }
+  .seg button.active {
+    background: rgba(255,255,255,0.14);
+    color: #fff;
+  }
+  .seg-label {
+    font-size: 11px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: rgba(255,255,255,0.35);
+    margin-right: 8px;
+    align-self: center;
+  }
+
+  /* The notch panel scaffolding (static context) */
+  .panel {
+    width: 520px;
+    max-width: 100%;
+    background: rgba(20,20,22,0.9);
+    border: 1px solid rgba(255,255,255,0.10);
+    border-radius: 22px;
+    padding: 16px;
+    box-shadow: 0 24px 60px rgba(0,0,0,0.55);
+  }
+  .panel-title {
+    font-size: 11px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: rgba(255,255,255,0.32);
+    margin: 2px 4px 12px;
+  }
+  .steps-group {
+    border: 1px solid rgba(255,255,255,0.08);
+    border-radius: 12px;
+    overflow: hidden;
+    background: rgba(255,255,255,0.02);
+  }
+  .steps-head {
+    font-size: 11.5px;
+    color: rgba(255,255,255,0.5);
+    padding: 9px 12px;
+    border-bottom: 1px solid rgba(255,255,255,0.06);
+    display: flex;
+    align-items: center;
+    gap: 7px;
+  }
+  .step-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 12px;
+    font-size: 12px;
+    color: rgba(255,255,255,0.5);
+    cursor: pointer;
+    border: 0;
+    background: transparent;
+    width: 100%;
+    text-align: left;
+    font-family: var(--sans);
+    transition: background 0.12s ease;
+  }
+  .step-row:hover { background: rgba(255,255,255,0.05); color: rgba(255,255,255,0.72); }
+  .step-row .ic { width: 15px; text-align: center; opacity: 0.8; }
+  .step-row .txt { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .step-row .chev { margin-left: auto; opacity: 0.3; font-size: 10px; }
+
+  /* The inspector card (the thing under discussion) */
+  .stage {
+    width: 520px;
+    max-width: 100%;
+    min-height: 340px;
+    display: flex;
+    align-items: flex-start;
+    justify-content: center;
+    position: relative;
+  }
+  .caption {
+    position: absolute;
+    top: -22px;
+    left: 0;
+    font-size: 11px;
+    color: rgba(255,255,255,0.4);
+  }
+  .card {
+    width: 480px;
+    max-width: 100%;
+    background: rgba(12,12,13,0.92);
+    border: 1px solid rgba(255,255,255,0.12);
+    border-radius: 14px;
+    box-shadow: 0 18px 50px rgba(0,0,0,0.55);
+    padding: 12px;
+    display: flex;
+    flex-direction: column;
+    gap: 9px;
+  }
+  .card-head {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    color: rgba(255,255,255,0.72);
+    font-size: 12px;
+    font-weight: 550;
+  }
+  .card-head .ic { opacity: 0.85; }
+  .card-head .spacer { margin-left: auto; }
+  .card-head .btn {
+    color: rgba(255,255,255,0.5);
+    font-size: 12px;
+    cursor: pointer;
+    padding: 2px 5px;
+    border-radius: 5px;
+  }
+  .card-head .btn:hover { background: rgba(255,255,255,0.08); color: #fff; }
+  .card-body {
+    font-family: var(--mono);
+    font-size: 11.5px;
+    line-height: 1.55;
+    color: rgba(255,255,255,0.85);
+    max-height: 260px;
+    overflow: auto;
+  }
+
+  /* Current: raw JSON blob */
+  .raw {
+    white-space: pre;
+    color: rgba(255,255,255,0.8);
+    tab-size: 2;
+  }
+  .raw .k { color: #79c0ff; }
+  .raw .s { color: #a5d6ff; }
+
+  /* Proposed: clean command */
+  .cmd-block {
+    background: rgba(255,255,255,0.04);
+    border: 1px solid rgba(255,255,255,0.08);
+    border-radius: 8px;
+    padding: 10px 12px;
+    display: flex;
+    gap: 9px;
+    align-items: flex-start;
+  }
+  .cmd-block .dollar { color: rgba(255,255,255,0.35); user-select: none; }
+  .cmd-block .cmd { color: #e6edf3; white-space: pre-wrap; word-break: break-word; }
+  .meta-row {
+    display: flex;
+    gap: 14px;
+    font-family: var(--sans);
+    font-size: 11px;
+    color: rgba(255,255,255,0.4);
+    padding: 0 2px;
+  }
+  .out-block {
+    margin-top: 2px;
+    padding: 8px 12px;
+    border-left: 2px solid rgba(255,255,255,0.12);
+    color: rgba(255,255,255,0.55);
+    white-space: pre-wrap;
+  }
+
+  /* Proposed: file-change diff */
+  .file-head {
+    display: flex;
+    align-items: center;
+    gap: 9px;
+    font-family: var(--sans);
+    font-size: 12px;
+    padding: 2px 2px 4px;
+  }
+  .file-head .path { color: #e6edf3; font-family: var(--mono); font-size: 11.5px; }
+  .file-head .path .dir { color: rgba(255,255,255,0.4); }
+  .file-head .path .name { color: #e6edf3; }
+  .file-head .counts { margin-left: auto; display: flex; gap: 8px; font-size: 11px; font-weight: 600; }
+  .file-head .plus { color: var(--add); }
+  .file-head .minus { color: var(--del); }
+  .badge {
+    font-size: 9.5px;
+    font-weight: 700;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+    padding: 2px 6px;
+    border-radius: 5px;
+  }
+  .badge.mod { background: rgba(210,153,34,0.18); color: #e3b341; }
+  .badge.new { background: var(--add-bg); color: var(--add); }
+  .badge.del { background: var(--del-bg); color: var(--del); }
+  .diff {
+    border: 1px solid rgba(255,255,255,0.08);
+    border-radius: 8px;
+    overflow: hidden;
+  }
+  .hunk-head {
+    background: rgba(88,166,255,0.08);
+    color: rgba(139,148,158,0.9);
+    padding: 3px 12px;
+    font-size: 10.5px;
+    border-top: 1px solid rgba(255,255,255,0.05);
+  }
+  .diff-line {
+    display: flex;
+    padding: 0 12px 0 0;
+    white-space: pre;
+  }
+  .diff-line .ln {
+    width: 34px;
+    flex: none;
+    text-align: right;
+    padding-right: 8px;
+    color: rgba(255,255,255,0.28);
+    user-select: none;
+    border-right: 1px solid rgba(255,255,255,0.06);
+  }
+  .diff-line .ln.old { width: 30px; }
+  .diff-line .sign {
+    width: 18px;
+    flex: none;
+    text-align: center;
+    color: rgba(255,255,255,0.3);
+    user-select: none;
+  }
+  .diff-line.add { background: var(--add-bg); }
+  .diff-line.add .sign { color: var(--add); }
+  .diff-line.add .code { color: #aff5b4; }
+  .diff-line.del { background: var(--del-bg); }
+  .diff-line.del .sign { color: var(--del); }
+  .diff-line.del .code { color: #ffcfcb; }
+  .diff-line.ctx .code { color: rgba(255,255,255,0.55); }
+
+  .note {
+    font-size: 11.5px;
+    color: rgba(255,255,255,0.4);
+    max-width: 520px;
+    text-align: center;
+    line-height: 1.6;
+  }
+</style>
+</head>
+<body>
+
+  <div class="controls">
+    <div>
+      <span class="seg-label">Step</span>
+      <div class="seg" id="stepSeg">
+        <button data-step="cmd" class="active">Command</button>
+        <button data-step="edit">Edit</button>
+        <button data-step="new">Create</button>
+      </div>
+    </div>
+    <div>
+      <span class="seg-label">View</span>
+      <div class="seg" id="viewSeg">
+        <button data-view="current">Current (raw JSON)</button>
+        <button data-view="proposed" class="active">Proposed</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Static context: the steps list inside the notch panel -->
+  <div class="panel">
+    <div class="panel-title">Panel — steps list (context)</div>
+    <div class="steps-group">
+      <div class="steps-head">▾ &nbsp;3 steps</div>
+      <button class="step-row" data-step="cmd"><span class="ic">⌘</span><span class="txt">Running npm run build --workspace=web</span><span class="chev">›</span></button>
+      <button class="step-row" data-step="edit"><span class="ic">✎</span><span class="txt">Editing AppState.swift</span><span class="chev">›</span></button>
+      <button class="step-row" data-step="new"><span class="ic">✎</span><span class="txt">Editing Changelog.swift</span><span class="chev">›</span></button>
+    </div>
+  </div>
+
+  <!-- The thing under discussion: the inspector card -->
+  <div class="stage">
+    <div class="caption" id="caption"></div>
+    <div class="card" id="card"></div>
+  </div>
+
+  <div class="note">
+    Click a step above to inspect it. Toggle <b>Current</b> vs <b>Proposed</b> to compare
+    today's raw-JSON dump against the structured render. Command steps show just the command
+    (plus exit status); file-change steps show a red/green diff with +/- counts.
+  </div>
+
+<script>
+  let step = "cmd";
+  let view = "proposed";
+
+  const data = {
+    cmd: {
+      title: "Running npm run build",
+      icon: "⌘",
+      current:
+`Shell
+
+$ npm run build --workspace=web
+
+{
+  "command" : "npm run build --workspace=web",
+  "cwd" : "/Users/j/code/app",
+  "type" : "commandExecution",
+  "exitCode" : 0,
+  "durationMs" : 4213
+}`,
+      proposed: `cmd`
+    },
+    edit: {
+      title: "Editing AppState.swift",
+      icon: "✎",
+      current:
+`Edit
+
+{
+  "type" : "fileChange",
+  "changes" : [
+    {
+      "path" : "Sources/Eave/AppState.swift",
+      "kind" : "update",
+      "diff" : "@@ -698,6 +698,9 @@\\n         performFeedback()\\n-        enqueueAttention(...)\\n+        guard !expanded else { return }\\n+        enqueueAttention(...)"
+    }
+  ]
+}`,
+      proposed: `edit`
+    },
+    new: {
+      title: "Editing Changelog.swift",
+      icon: "✎",
+      current:
+`Edit
+
+{
+  "type" : "fileChange",
+  "changes" : [
+    {
+      "path" : "docs/notes.md",
+      "kind" : "add",
+      "diff" : "@@ -0,0 +1,3 @@\\n+# Notes\\n+\\n+First entry."
+    }
+  ]
+}`,
+      proposed: `new`
+    }
+  };
+
+  function esc(s){return s.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");}
+
+  function cmdProposed() {
+    return `
+      <div class="cmd-block">
+        <span class="dollar">$</span>
+        <span class="cmd">npm run build --workspace=web</span>
+      </div>
+      <div class="meta-row">
+        <span>✓ exit 0</span>
+        <span>4.2s</span>
+        <span>~/code/app</span>
+      </div>
+      <div class="out-block">> web@0.1.0 build
+vite build … ✓ built in 3.9s</div>`;
+  }
+
+  function splitPath(p) {
+    const i = p.lastIndexOf("/");
+    return i < 0
+      ? `<span class="name">${esc(p)}</span>`
+      : `<span class="dir">${esc(p.slice(0, i + 1))}</span><span class="name">${esc(p.slice(i + 1))}</span>`;
+  }
+
+  function diffProposed(opts) {
+    let oldN = opts.oldStart, newN = opts.newStart;
+    const lines = opts.lines.map(l => {
+      const sign = l.t === 'add' ? '+' : l.t === 'del' ? '-' : ' ';
+      const oldCol = l.t === 'add' ? '' : oldN++;
+      const newCol = l.t === 'del' ? '' : newN++;
+      return `<div class="diff-line ${l.t}"><span class="ln old">${oldCol}</span><span class="ln">${newCol}</span><span class="sign">${sign}</span><span class="code">${esc(l.c)}</span></div>`;
+    }).join("");
+    return `
+      <div class="file-head">
+        <span class="badge ${opts.badgeClass}">${opts.badge}</span>
+        <span class="path">${splitPath(opts.path)}</span>
+        <span class="counts"><span class="plus">+${opts.add}</span><span class="minus">-${opts.del}</span></span>
+      </div>
+      <div class="diff">
+        <div class="hunk-head">${opts.hunk}</div>
+        ${lines}
+      </div>`;
+  }
+
+  const proposedRenderers = {
+    cmd: cmdProposed,
+    edit: () => diffProposed({
+      badge: "Edit", badgeClass: "mod",
+      path: "Sources/Eave/AppState.swift",
+      add: 2, del: 0, oldStart: 698, newStart: 698,
+      hunk: "@@ -698,6 +698,8 @@ handleCompletedTurn",
+      lines: [
+        { t: "ctx", c: "        performFeedback()" },
+        { t: "ctx", c: "        guard candidate.pendingPermission == nil else { return }" },
+        { t: "add", c: "        // Skip the Done pill when the panel is already open." },
+        { t: "add", c: "        guard !expanded else { return }" },
+        { t: "ctx", c: "        enqueueAttention(for: candidate, kind: .completed)" },
+      ]
+    }),
+    new: () => diffProposed({
+      badge: "Create", badgeClass: "new",
+      path: "docs/notes.md",
+      add: 3, del: 0, oldStart: 0, newStart: 1,
+      hunk: "@@ -0,0 +1,3 @@",
+      lines: [
+        { t: "add", c: "# Notes" },
+        { t: "add", c: "" },
+        { t: "add", c: "First entry." },
+      ]
+    })
+  };
+
+  function render() {
+    const d = data[step];
+    document.getElementById("caption").textContent =
+      view === "current" ? "Inspector — current" : "Inspector — proposed";
+    const body = view === "current"
+      ? `<div class="raw">${esc(d.current)}</div>`
+      : proposedRenderers[step]();
+    document.getElementById("card").innerHTML = `
+      <div class="card-head">
+        <span class="ic">${d.icon}</span>
+        <span>${d.title}</span>
+        <span class="spacer"></span>
+        <span class="btn">⧉</span>
+        <span class="btn">✕</span>
+      </div>
+      <div class="card-body">${body}</div>`;
+
+    document.querySelectorAll('#stepSeg button').forEach(b =>
+      b.classList.toggle('active', b.dataset.step === step));
+    document.querySelectorAll('#viewSeg button').forEach(b =>
+      b.classList.toggle('active', b.dataset.view === view));
+  }
+
+  document.getElementById("stepSeg").addEventListener("click", e => {
+    if (e.target.dataset.step) { step = e.target.dataset.step; render(); }
+  });
+  document.getElementById("viewSeg").addEventListener("click", e => {
+    if (e.target.dataset.view) { view = e.target.dataset.view; render(); }
+  });
+  document.querySelectorAll('.step-row').forEach(r =>
+    r.addEventListener("click", () => { step = r.dataset.step; render(); }));
+
+  render();
+</script>
+</body>
+</html>

@@ -157,6 +157,12 @@ final class AppState: ObservableObject {
     @Published var panelIsKey = false
     @Published var pinned = false
     @Published var dropTargeted = false
+    // A file drag is in flight somewhere in the system (see pollFileDrag).
+    // While it is, nothing may auto-collapse the panel out from under it.
+    @Published private(set) var fileDragInFlight = false
+    // Set by the drop handlers so a panel reopened purely to catch a drag knows
+    // whether the file actually landed on us.
+    var dropAcceptedDuringDrag = false
     // Step groups (collapsed tool activity) the user has expanded.
     @Published var expandedGroups: Set<UUID> = []
     // Popovers are child windows; while one is up the panel resigns key,
@@ -185,8 +191,8 @@ final class AppState: ObservableObject {
     //              alerting; completion pulses that contour green 3 times.
     //   stealth  — silent while working; a permission/question announces
     //              itself with a brief 2-sweep dark sliver and then hides;
-    //              the panel becomes a near-black overlay at the notch's
-    //              width.
+    //              the panel becomes a near-black, chrome-less overlay at
+    //              whatever size it was resized to.
     enum NotchStyle: String, CaseIterable { case standard, compact, stealth }
 
     @Published var notchStyle: NotchStyle {
@@ -489,6 +495,12 @@ final class AppState: ObservableObject {
 
     var suspendCollapse = false
     var lastExpandAt = Date.distantPast
+
+    // File-drag watch state. AppKit has no system-wide "a drag started" hook, so
+    // this is a poll of the drag pasteboard (see pollFileDrag).
+    private var dragPasteboardCount = NSPasteboard(name: .drag).changeCount
+    private var lastOutsideCollapseAt = Date.distantPast
+    private var reopenedForDrag = false
 
     // Push-to-close: while the panel is open, shoving the cursor into the top
     // edge between the flanking icons closes it. Armed only once the cursor has
@@ -1399,19 +1411,26 @@ final class AppState: ObservableObject {
         }
     }
 
-    // Resize limits: minimum width is the original default width; height has
-    // no practical floor — the panel can shrink to barely more than the notch
-    // row, with the history scrolling inside whatever room is left.
-    var minPanelWidth: CGFloat { max(notchSize.width + 120, 300) }
+    // Resize limits: the panel can be dragged all the way down to the notch's
+    // own width — at that size it reads as the notch being taller rather than
+    // as a floating app. Height has no practical floor either; the history
+    // scrolls inside whatever room is left.
+    var minPanelWidth: CGFloat { notchSize.width }
     var minPanelHeight: CGFloat { notchHeight + 6 }
     var maxPanelWidth: CGFloat { screen.frame.width - 80 }
     var maxPanelHeight: CGFloat { screen.frame.height * 0.85 }
 
+    // The width the composer row needs to hold its full-size pills, labels and
+    // handles. Below it the panel switches to abbreviated chrome. This is a
+    // room question, not a style one: any style can now be dragged this narrow,
+    // so it isn't tied to stealth.
+    var comfortablePanelWidth: CGFloat { max(notchSize.width + 120, 300) }
+    var usesCompactLayout: Bool { panelWidth < comfortablePanelWidth }
+
+    // Default width when the user has never resized: the comfortable size, not
+    // the floor.
     var panelWidth: CGFloat {
-        // Stealth locks the panel to the notch's width so it reads as the
-        // notch being taller, not as a floating app.
-        if stealthMode { return notchWidth }
-        return min(max(panelWidthOverride ?? minPanelWidth, minPanelWidth), maxPanelWidth)
+        min(max(panelWidthOverride ?? comfortablePanelWidth, minPanelWidth), maxPanelWidth)
     }
     var panelHeight: CGFloat {
         min(max(panelHeightOverride ?? 292, minPanelHeight), maxPanelHeight)
@@ -1571,6 +1590,7 @@ final class AppState: ObservableObject {
     func installOutsideClickMonitors() {
         let check: () -> Void = { [weak self] in
             guard let self, self.expanded, !self.pinned, !self.suspendCollapse else { return }
+            guard !self.fileDragInFlight else { return }
             // Absorb the click that opened the panel.
             guard Date().timeIntervalSince(self.lastExpandAt) > 0.3 else { return }
             let location = NSEvent.mouseLocation
@@ -1579,7 +1599,13 @@ final class AppState: ObservableObject {
                     && window !== self.targetWindow
                     && window.frame.insetBy(dx: -4, dy: -4).contains(location)
             }
-            if !insideOurs { self.collapse() }
+            if !insideOurs {
+                // Picking up a file in another app is a mouse-down outside, so
+                // this collapse may be the opening move of a drag toward us.
+                // pollFileDrag uses the timestamp to decide whether to reopen.
+                self.lastOutsideCollapseAt = Date()
+                self.collapse()
+            }
         }
         NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { _ in
             DispatchQueue.main.async(execute: check)
@@ -1587,6 +1613,62 @@ final class AppState: ObservableObject {
         NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { event in
             DispatchQueue.main.async(execute: check)
             return event
+        }
+    }
+
+    // AppKit exposes no system-wide drag notification, so the drag is inferred:
+    // the drag pasteboard's changeCount bumps exactly once when any app starts a
+    // drag session, and a held mouse button means it is still in flight. Polled
+    // from startNotchWatch's timer; no permissions needed.
+    private func pollFileDrag() {
+        let pasteboard = NSPasteboard(name: .drag)
+        let count = pasteboard.changeCount
+        let mouseDown = NSEvent.pressedMouseButtons & 1 != 0
+        if count != dragPasteboardCount {
+            dragPasteboardCount = count
+            if mouseDown, !fileDragInFlight, Self.carriesFiles(pasteboard) {
+                beginFileDrag()
+            }
+        }
+        if fileDragInFlight, !mouseDown { endFileDrag() }
+    }
+
+    // Promised files (Photos, Mail, browsers) declare only a promise type at
+    // drag start, so match those too — the real URL arrives on drop.
+    private static func carriesFiles(_ pasteboard: NSPasteboard) -> Bool {
+        guard let types = pasteboard.types else { return false }
+        return types.contains { type in
+            switch type {
+            case .fileURL, .tiff, .png, .fileContents: return true
+            default:
+                return type.rawValue.hasPrefix("com.apple.pasteboard.promised-file")
+                    || type.rawValue == "public.image"
+                    || type.rawValue == "NSFilenamesPboardType"
+            }
+        }
+    }
+
+    private func beginFileDrag() {
+        fileDragInFlight = true
+        dropAcceptedDuringDrag = false
+        // The mouse-down that picked the file up read as a click outside and
+        // collapsed us a moment ago. Reopening gives the drag somewhere to land.
+        // takeKeyboard: false — stealing focus mid-drag cancels it in some apps.
+        guard !expanded, Date().timeIntervalSince(lastOutsideCollapseAt) < 2 else { return }
+        reopenedForDrag = true
+        expand(takeKeyboard: false)
+    }
+
+    private func endFileDrag() {
+        fileDragInFlight = false
+        guard reopenedForDrag else { return }
+        reopenedForDrag = false
+        // The drop handler runs on mouse-up, which this poll can observe first;
+        // give it a beat to claim the drag before undoing the reopen.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { [weak self] in
+            guard let self, !self.dropAcceptedDuringDrag, !self.panelIsKey else { return }
+            // The file went somewhere else, so put the panel back as it was.
+            self.collapse()
         }
     }
 
@@ -1606,6 +1688,7 @@ final class AppState: ObservableObject {
         notchWatchTimer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in
             guard let self, self.targetWindow != nil else { return }
             let mouse = NSEvent.mouseLocation
+            self.pollFileDrag()
 
             // Follow the cursor onto another notched display (or recover after
             // a screen arrangement change the notification missed).
@@ -1617,7 +1700,10 @@ final class AppState: ObservableObject {
             // leaves the cursor sitting in the zone, would slam it shut again.
             if self.expanded {
                 if self.topCloseZone.contains(mouse) {
-                    if self.topCloseArmed, !self.pinned, !self.suspendCollapse {
+                    // Dragging a file up to the notch crosses this zone; closing
+                    // there would take the drop target away mid-drag.
+                    if self.topCloseArmed, !self.pinned, !self.suspendCollapse,
+                       !self.fileDragInFlight {
                         // Mark as hovering so the collapse doesn't instantly
                         // hover-expand: the transition guard below only fires on
                         // a fresh outside->inside move.

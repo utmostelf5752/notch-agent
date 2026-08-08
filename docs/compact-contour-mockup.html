@@ -1,0 +1,266 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Eave — compact notch contour line</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --page: #09090a;
+      --canvas: #0d0d0f;
+      --line: rgba(255, 255, 255, 0.16);
+      --text: rgba(255, 255, 255, 0.9);
+      --muted: rgba(255, 255, 255, 0.53);
+      --faint: rgba(255, 255, 255, 0.3);
+      --accent: #e9ba70;
+      font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", Inter, sans-serif;
+    }
+
+    * { box-sizing: border-box; }
+    body { min-height: 100vh; margin: 0; color: var(--text); background: var(--page); }
+    button { font: inherit; color: inherit; }
+
+    .page { width: min(1020px, calc(100% - 30px)); margin: 0 auto; padding: 38px 0 58px; }
+
+    .eyebrow { margin: 0 0 8px; color: var(--faint); font-size: 11px; letter-spacing: .1em; text-transform: uppercase; }
+    h1 { margin: 0 0 10px; font-size: clamp(26px, 4vw, 38px); font-weight: 650; letter-spacing: -.04em; }
+    .intro p { margin: 0 0 26px; color: var(--muted); font-size: 14px; line-height: 1.55; max-width: 680px; }
+
+    .controls { display: flex; flex-wrap: wrap; gap: 22px 34px; margin-bottom: 22px; }
+    .group label { display: block; margin-bottom: 7px; color: var(--faint); font-size: 10.5px; letter-spacing: .09em; text-transform: uppercase; }
+    .seg { display: inline-flex; gap: 5px; }
+    .seg button {
+      padding: 6px 13px;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      background: transparent;
+      color: var(--muted);
+      font-size: 12.5px;
+      cursor: pointer;
+    }
+    .seg button:hover { color: var(--text); }
+    .seg button.on { border-color: var(--accent); color: var(--accent); }
+    .slider-row { display: flex; align-items: center; gap: 12px; height: 31px; }
+    .slider-row input { width: 170px; accent-color: var(--accent); }
+    .slider-row span { color: var(--muted); font-size: 12.5px; font-variant-numeric: tabular-nums; }
+
+    .panel { border: 1px solid rgba(255,255,255,.05); border-radius: 18px; background: var(--canvas); overflow: hidden; margin-bottom: 18px; }
+    .panel h2 { margin: 0; padding: 13px 18px 11px; font-size: 11px; font-weight: 560; letter-spacing: .09em; text-transform: uppercase; color: var(--faint); border-bottom: 1px solid rgba(255,255,255,.05); }
+
+    /* The recreated screen-top strip: wallpaper, menu bar, notch overlay. */
+    .strip { position: relative; height: 130px; overflow: hidden;
+      background:
+        radial-gradient(120% 190% at 18% 118%, #2c2350 0%, #1a1f3d 42%, #101528 72%, #0b0e1c 100%);
+    }
+    .menubar {
+      position: absolute; inset: 0 0 auto 0; height: 32px;
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 0 16px;
+      background: rgba(9, 10, 18, .48);
+      -webkit-backdrop-filter: blur(6px); backdrop-filter: blur(6px);
+      font-size: 12.5px; color: rgba(255,255,255,.86);
+    }
+    .menubar .apple { font-size: 14px; margin-right: 2px; }
+    .menubar span { display: inline-flex; gap: 17px; align-items: center; }
+    .menubar .app { font-weight: 640; }
+    .menubar .dim { color: rgba(255,255,255,.62); }
+    .notch-host { position: absolute; top: 0; left: 50%; transform: translateX(-50%); width: 320px; height: 60px; }
+    .notch-host svg { display: block; }
+
+    /* Magnified copy of the same strip. */
+    .zoomclip { position: relative; height: 190px; overflow: hidden; }
+    .zoomclip .strip { transform: scale(3.4); transform-origin: 50% 0; }
+    .zoom-tag { position: absolute; right: 12px; bottom: 10px; z-index: 2; color: var(--faint); font-size: 10.5px; letter-spacing: .08em; }
+
+    .notes { color: var(--muted); font-size: 13.5px; line-height: 1.6; max-width: 720px; }
+    .notes strong { color: var(--text); font-weight: 600; }
+    .notes ul { margin: 8px 0 0; padding-left: 19px; }
+    .notes li { margin-bottom: 5px; }
+
+    .sweep { animation: sweep 1s linear infinite; }
+    @keyframes sweep { from { stroke-dashoffset: 40; } to { stroke-dashoffset: -100; } }
+    .pulse { animation: pulse 2.2s ease-in-out infinite; }
+    @keyframes pulse { 0%, 100% { opacity: .08; } 50% { opacity: 1; } }
+  </style>
+</head>
+<body>
+  <div class="page">
+    <div class="intro">
+      <p class="eyebrow">Eave · notch styles</p>
+      <h1>Compact: contour line</h1>
+      <p>The compact hairline today is a straight 2pt capsule floating under the notch, which reads as a separate object in the menu bar. The proposal grows the notch outline slightly and runs the line along the notch's own silhouette — flare, side, rounded corners, bottom — so the activity cue hugs hardware you already ignore. Working sweeps in a muted grey with a slow-fast-slow curve: it creeps at the edges, whips through the middle. Permission and question no longer sweep at all; they hold a static line, brightest at the center and fading toward the edges, that breathes on and off.</p>
+    </div>
+
+    <div class="controls">
+      <div class="group">
+        <label>Variant</label>
+        <div class="seg" id="variantSeg">
+          <button data-variant="current">Current — horizontal</button>
+          <button data-variant="contour">Contour, with flares</button>
+          <button data-variant="bottom">Contour, sides + bottom</button>
+        </div>
+      </div>
+      <div class="group">
+        <label>State</label>
+        <div class="seg" id="stateSeg">
+          <button data-state="working">Working</button>
+          <button data-state="permission">Permission</button>
+          <button data-state="question">Question</button>
+        </div>
+      </div>
+      <div class="group">
+        <label>Working brightness (0 black · 255 white)</label>
+        <div class="slider-row">
+          <input type="range" id="greySlider" min="0" max="255" value="96">
+          <span id="greyVal">96 · #606060</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="panel">
+      <h2>Actual size</h2>
+      <div class="strip" id="realStrip"></div>
+    </div>
+
+    <div class="panel">
+      <h2>Magnified</h2>
+      <div class="zoomclip"><div class="strip" id="zoomStrip"></div><span class="zoom-tag">3.4×</span></div>
+    </div>
+
+    <div class="notes">
+      <strong>What changes in implementation</strong>
+      <ul>
+        <li>Window: compact working/alert grows 1px on left, right, and bottom (today it grows +3pt below only); the line is that 1px ring.</li>
+        <li>Working: <code>compactSliver</code>'s capsule becomes a stroked notch-contour <code>Shape</code> in a dark grey (slider above). A short soft-edged band sweeps through a slow-fast-slow curve (<code>cubic-bezier(0.85,&nbsp;0,&nbsp;0.15,&nbsp;1)</code>, 1.8s) then rests 0.25s before the next pass, and the whole line fades out near the notch's outer edges like the pulse does.</li>
+        <li>Permission / question: no trim animation — the full contour stroked through a center-out fade (in SwiftUI, a horizontal <code>LinearGradient</code> mask), with the layer's opacity breathing on a ~2.2s ease-in-out loop.</li>
+        <li>The stroke sits on the ring the growth creates, so it never overlaps the cutout (which can't display pixels).</li>
+      </ul>
+    </div>
+  </div>
+
+  <script>
+    // Geometry mirrors AppState: cutout 200×32 centered in a 320-wide overlay
+    // (x 60..260), bottom radius 10, top flare radius 10 (notchTopRadius).
+    const BACKING = {
+      // Current window: cutout width, +3pt below for the hairline strip.
+      current: "M 50 0 A 10 10 0 0 1 60 10 L 60 25 A 10 10 0 0 0 70 35 L 250 35 A 10 10 0 0 0 260 25 L 260 10 A 10 10 0 0 1 270 0 Z",
+      // Proposed window: cutout grown ~1px on left, right, bottom.
+      grown:   "M 49 0 A 10 10 0 0 1 59 10 L 59 23 A 10 10 0 0 0 69 33 L 251 33 A 10 10 0 0 0 261 23 L 261 10 A 10 10 0 0 1 271 0 Z",
+    };
+
+    // Line paths. Contour lines run on the centerline of the grown ring
+    // (0.5px outside the cutout edge) so the stroke stays on real pixels.
+    const LINES = {
+      current: "M 82 34 L 238 34",
+      contour: "M 50 0 A 9.5 9.5 0 0 1 59.5 9.5 L 59.5 22 A 10.5 10.5 0 0 0 70 32.5 L 250 32.5 A 10.5 10.5 0 0 0 260.5 22 L 260.5 9.5 A 9.5 9.5 0 0 1 270 0",
+      bottom:  "M 59.5 0 L 59.5 22 A 10.5 10.5 0 0 0 70 32.5 L 250 32.5 A 10.5 10.5 0 0 0 260.5 22 L 260.5 0",
+    };
+
+    // Current variant keeps today's shipped look: white working, sweep for
+    // every state, 2pt hairline. Proposed: 1px line, grey eased sweep for
+    // working, breathing center-out pulse for alerts.
+    const CURRENT_COLORS = { working: "#ffffff", permission: "#f2b95c", question: "#6fb0ff" };
+    const COLORS = { working: "#606060", permission: "#f2b95c", question: "#6fb0ff" };
+    const LINE_W = 1;
+
+    let variant = "contour", state = "working";
+
+    function svg(idSuffix) {
+      const isCurrent = variant === "current";
+      const backing = isCurrent ? BACKING.current : BACKING.grown;
+      const line = LINES[variant];
+      const color = (isCurrent ? CURRENT_COLORS : COLORS)[state];
+
+      if (isCurrent) {
+        return `<svg viewBox="0 0 320 60" width="320" height="60">
+          <path d="${backing}" fill="#000"/>
+          <path d="${line}" pathLength="100" fill="none" stroke="${color}" stroke-opacity="0.22" stroke-width="2" stroke-linecap="round"/>
+          <path d="${line}" pathLength="100" fill="none" stroke="${color}" stroke-opacity="0.92" stroke-width="2" stroke-linecap="round" stroke-dasharray="40 100" class="sweep"/>
+        </svg>`;
+      }
+
+      if (state === "permission" || state === "question") {
+        // Static from the middle outward, fading toward the edges; the whole
+        // line breathes on and off instead of sweeping.
+        const gid = `fade-${idSuffix}`;
+        return `<svg viewBox="0 0 320 60" width="320" height="60">
+          <defs><linearGradient id="${gid}" x1="0" y1="0" x2="1" y2="0">
+            <stop offset="0" stop-color="${color}" stop-opacity="0"/>
+            <stop offset="0.35" stop-color="${color}" stop-opacity="0.85"/>
+            <stop offset="0.5" stop-color="${color}" stop-opacity="1"/>
+            <stop offset="0.65" stop-color="${color}" stop-opacity="0.85"/>
+            <stop offset="1" stop-color="${color}" stop-opacity="0"/>
+          </linearGradient></defs>
+          <path d="${backing}" fill="#000"/>
+          <path d="${line}" fill="none" stroke="url(#${gid})" stroke-width="${LINE_W}" stroke-linecap="round" class="pulse"/>
+        </svg>`;
+      }
+
+      // Working: a short soft-edged band (a 70px gradient window sliding in x)
+      // sweeps slow-fast-slow across 1.8s, then rests 0.25s off-screen before
+      // the next pass. The whole group is masked so the line fades out near
+      // the notch's outer edges, matching the pulse's falloff.
+      const band = `band-${idSuffix}`, mask = `edge-${idSuffix}`, edge = `edgeFade-${idSuffix}`;
+      return `<svg viewBox="0 0 320 60" width="320" height="60">
+        <defs>
+          <linearGradient id="${edge}" gradientUnits="userSpaceOnUse" x1="40" y1="0" x2="280" y2="0">
+            <stop offset="0" stop-color="#000"/>
+            <stop offset="0.06" stop-color="#fff"/>
+            <stop offset="0.94" stop-color="#fff"/>
+            <stop offset="1" stop-color="#000"/>
+          </linearGradient>
+          <mask id="${mask}" maskUnits="userSpaceOnUse" x="0" y="0" width="320" height="60">
+            <rect x="0" y="0" width="320" height="60" fill="url(#${edge})"/>
+          </mask>
+          <linearGradient id="${band}" gradientUnits="userSpaceOnUse" x1="-70" y1="0" x2="0" y2="0">
+            <stop class="grey-stop" offset="0" stop-color="${color}" stop-opacity="0"/>
+            <stop class="grey-stop" offset="0.5" stop-color="${color}" stop-opacity="0.95"/>
+            <stop class="grey-stop" offset="1" stop-color="${color}" stop-opacity="0"/>
+            <animateTransform attributeName="gradientTransform" type="translate"
+              values="0 0;340 0;340 0" keyTimes="0;0.878;1"
+              calcMode="spline" keySplines="1 0 0.05 1;0 0 1 1"
+              dur="2.05s" repeatCount="indefinite"/>
+          </linearGradient>
+        </defs>
+        <path d="${backing}" fill="#000"/>
+        <g mask="url(#${mask})">
+          <path d="${line}" fill="none" stroke="${color}" class="grey-line" stroke-opacity="0.22" stroke-width="${LINE_W}" stroke-linecap="round"/>
+          <path d="${line}" fill="none" stroke="url(#${band})" stroke-width="${LINE_W}" stroke-linecap="round"/>
+        </g>
+      </svg>`;
+    }
+
+    function stripHTML(idSuffix) {
+      return `
+        <div class="menubar">
+          <span><span class="apple">&#63743;</span><span class="app">Eave</span><span class="dim">File</span><span class="dim">Edit</span><span class="dim">View</span><span class="dim">Window</span></span>
+          <span class="dim">100% &nbsp; Wed Jul 29 &nbsp; 9:41 AM</span>
+        </div>
+        <div class="notch-host">${svg(idSuffix)}</div>`;
+    }
+
+    function render() {
+      document.getElementById("realStrip").innerHTML = stripHTML("real");
+      document.getElementById("zoomStrip").innerHTML = stripHTML("zoom");
+      for (const b of document.querySelectorAll("#variantSeg button")) b.classList.toggle("on", b.dataset.variant === variant);
+      for (const b of document.querySelectorAll("#stateSeg button")) b.classList.toggle("on", b.dataset.state === state);
+    }
+
+    document.getElementById("variantSeg").addEventListener("click", e => { if (e.target.dataset.variant) { variant = e.target.dataset.variant; render(); } });
+    document.getElementById("stateSeg").addEventListener("click", e => { if (e.target.dataset.state) { state = e.target.dataset.state; render(); } });
+
+    // Live-update the working grey in place so dragging doesn't restart the
+    // sweep animation on every input event.
+    document.getElementById("greySlider").addEventListener("input", e => {
+      const v = Number(e.target.value);
+      const hex = "#" + v.toString(16).padStart(2, "0").repeat(3);
+      COLORS.working = hex;
+      document.getElementById("greyVal").textContent = `${v} · ${hex}`;
+      for (const s of document.querySelectorAll(".grey-stop")) s.setAttribute("stop-color", hex);
+      for (const p of document.querySelectorAll(".grey-line")) p.setAttribute("stroke", hex);
+    });
+    render();
+  </script>
+</body>
+</html>

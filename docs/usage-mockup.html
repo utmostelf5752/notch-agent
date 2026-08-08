@@ -1,0 +1,456 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Eave — provider usage</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --page: #09090a;
+      --canvas: #0d0d0f;
+      --shell: #121214;
+      --composer: #1a1a1d;
+      --menu: #2c2c2e;
+      --menu-hi: #b23f3a;
+      --line: rgba(255, 255, 255, 0.16);
+      --line-soft: rgba(255, 255, 255, 0.08);
+      --text: rgba(255, 255, 255, 0.9);
+      --muted: rgba(255, 255, 255, 0.53);
+      --faint: rgba(255, 255, 255, 0.3);
+      --warning: #e9ba70;
+      --danger: #ff8177;
+      font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", Inter, sans-serif;
+    }
+
+    * { box-sizing: border-box; }
+    body { min-height: 100vh; margin: 0; color: var(--text); background: var(--page); }
+    button, select { font: inherit; }
+    button { color: inherit; }
+
+    .page { width: min(1180px, calc(100% - 30px)); margin: 0 auto; padding: 34px 0 60px; }
+
+    .intro { width: min(760px, 100%); margin-bottom: 20px; }
+    .eyebrow { margin: 0 0 8px; color: var(--faint); font-size: 11px; letter-spacing: .1em; text-transform: uppercase; }
+    h1 { margin: 0; font-size: clamp(26px, 4vw, 38px); font-weight: 650; letter-spacing: -.04em; }
+    .intro p:last-child { margin: 11px 0 0; color: var(--muted); font-size: 14px; line-height: 1.55; }
+
+    /* ---- controls (mockup chrome, not product) ---- */
+    .controls { display: grid; gap: 9px; margin-bottom: 20px; }
+    .control-row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+    .control-row > .caption { width: 74px; flex: 0 0 auto; color: var(--faint); font-size: 10px; letter-spacing: .08em; text-transform: uppercase; }
+    .control-row button {
+      min-height: 32px; padding: 0 12px; display: inline-flex; align-items: center; gap: 7px;
+      border: 1px solid var(--line-soft); border-radius: 9px;
+      color: var(--muted); background: transparent; cursor: pointer; font-size: 12px;
+    }
+    .control-row button:hover { color: var(--text); background: rgba(255,255,255,.05); }
+    .control-row button[aria-pressed="true"] { color: var(--text); border-color: rgba(255,255,255,.4); background: rgba(255,255,255,.09); }
+    .control-row button .tag { color: var(--faint); font-size: 10px; font-variant-numeric: tabular-nums; }
+
+    .stage { display: grid; grid-template-columns: minmax(0, 1fr) minmax(280px, 344px); gap: 22px; align-items: start; }
+
+    .workspace {
+      position: relative; min-height: 580px; padding: 24px;
+      display: flex; align-items: flex-end; justify-content: center;
+      border: 1px solid rgba(255,255,255,.05); border-radius: 24px; background: var(--canvas);
+      overflow: hidden;
+    }
+    .workspace.dimmed .eave-panel { opacity: .28; filter: saturate(.5); }
+
+    /* ---- Eave panel (static scaffolding) ---- */
+    .eave-panel {
+      width: min(620px, 100%); padding: 7px;
+      border: 1px solid var(--line); border-radius: 44px; background: var(--shell);
+      box-shadow: 0 28px 80px rgba(0,0,0,.55); transition: opacity 140ms ease;
+    }
+    .panel-status { min-height: 42px; padding: 0 25px; display: flex; align-items: center; justify-content: space-between; color: var(--faint); font-size: 10px; }
+    .panel-status strong { color: var(--muted); font-weight: 560; }
+    .panel-status span:last-child { font-variant-numeric: tabular-nums; }
+
+    .transcript { padding: 2px 25px 10px; display: grid; gap: 9px; }
+    .bubble-user { justify-self: end; max-width: 78%; padding: 8px 13px; border-radius: 16px; background: rgba(255,255,255,.07); font-size: 13px; }
+    .bubble-agent { color: var(--muted); font-size: 13px; line-height: 1.45; }
+
+    .composer-box { min-height: 148px; padding: 20px 22px 15px; border: 1px solid rgba(255,255,255,.23); border-radius: 31px; background: var(--composer); }
+    .composer-box .draft { min-height: 56px; color: rgba(255,255,255,.34); font-size: 20px; letter-spacing: -.025em; }
+    .composer-footer { display: flex; align-items: center; gap: 10px; }
+    .composer-icon { width: 35px; height: 35px; display: grid; place-items: center; border: 0; border-radius: 9px; color: rgba(255,255,255,.72); background: transparent; cursor: default; }
+    .icon {
+      display: inline-block; width: 19px; height: 19px; flex: 0 0 auto; background: currentColor;
+      mask-position: center; mask-repeat: no-repeat; mask-size: contain;
+      -webkit-mask-position: center; -webkit-mask-repeat: no-repeat; -webkit-mask-size: contain;
+    }
+    .i-paperclip { mask-image: url("icons/queue/paperclip.svg"); -webkit-mask-image: url("icons/queue/paperclip.svg"); }
+    .i-caret { mask-image: url("icons/queue/caret-down.svg"); -webkit-mask-image: url("icons/queue/caret-down.svg"); }
+    .i-eye { mask-image: url("icons/queue/eye-slash.svg"); -webkit-mask-image: url("icons/queue/eye-slash.svg"); }
+    .i-send { mask-image: url("icons/queue/arrow-up.svg"); -webkit-mask-image: url("icons/queue/arrow-up.svg"); }
+    .composer-icon .icon { width: 23px; height: 23px; }
+
+    .context-pill {
+      position: relative; min-width: 0; max-width: 220px; height: 35px; padding: 0 3px;
+      display: inline-flex; align-items: center; gap: 7px;
+      border: 0; border-radius: 9px; color: rgba(255,255,255,.78); background: transparent;
+      cursor: pointer; font-size: 15px; font-weight: 590;
+    }
+    .context-pill .label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .context-pill .i-caret { width: 13px; height: 13px; color: var(--faint); }
+    #model-pill.armed { background: rgba(255,255,255,.07); }
+    .footer-spacer { flex: 1; }
+    .send-button { width: 46px; height: 46px; display: grid; place-items: center; border: 0; border-radius: 50%; color: rgba(255,255,255,.22); background: rgba(255,255,255,.11); cursor: default; }
+    .send-button .icon { width: 23px; height: 23px; }
+
+    /* ---- THE BADGE ---- */
+    .usage-badge {
+      height: 30px; padding: 0 9px; display: inline-flex; align-items: baseline; gap: 5px;
+      border: 0; border-radius: 8px; background: transparent;
+      color: var(--muted); cursor: pointer; white-space: nowrap;
+      font-size: 13px; font-weight: 500; font-variant-numeric: tabular-nums;
+      transition: color 120ms ease, background 120ms ease;
+    }
+    .usage-badge[hidden] { display: none; }
+    .usage-badge:hover { color: var(--text); background: rgba(255,255,255,.06); }
+    .usage-badge .pct { color: rgba(255,255,255,.72); font-weight: 590; }
+    .usage-badge .win { color: var(--faint); font-size: 11.5px; }
+    .usage-badge.warn .pct { color: var(--warning); }
+    .usage-badge.hot .pct { color: var(--danger); }
+
+    /* ---- model menu (matches the real NSMenu) ---- */
+    .menu-layer { position: absolute; inset: 0; z-index: 7; display: none; }
+    .menu-layer.on { display: block; }
+    .ns-menu {
+      position: absolute; padding: 5px; border-radius: 8px; background: var(--menu);
+      border: .5px solid rgba(255,255,255,.14); box-shadow: 0 16px 44px rgba(0,0,0,.6);
+      font-size: 13.5px; color: rgba(255,255,255,.92);
+    }
+    #provider-menu { left: 92px; bottom: 96px; width: 178px; }
+    #model-submenu { left: 268px; bottom: 22px; width: 244px; }
+    .ns-item { display: flex; align-items: center; gap: 8px; min-height: 25px; padding: 0 9px 0 26px; border-radius: 5px; position: relative; }
+    .ns-item.parent::after { content: "›"; margin-left: auto; color: rgba(255,255,255,.6); font-size: 15px; }
+    .ns-item.on { background: var(--menu-hi); }
+    .ns-item .check { position: absolute; left: 9px; font-size: 12px; }
+    .ns-sep { height: .5px; margin: 5px 9px; background: rgba(255,255,255,.16); }
+    /* the non-clickable usage rows */
+    .ns-usage {
+      display: flex; align-items: baseline; gap: 6px; min-height: 22px; padding: 0 9px 0 26px;
+      color: rgba(255,255,255,.42); font-size: 12px; font-variant-numeric: tabular-nums; cursor: default;
+    }
+    .ns-usage .pct { color: rgba(255,255,255,.6); font-weight: 590; }
+    .ns-usage.warn .pct { color: var(--warning); }
+    .ns-usage.scoped { padding-left: 40px; font-size: 11.5px; }
+    .ns-usage .reset { margin-left: auto; color: rgba(255,255,255,.28); font-size: 11px; }
+
+    /* ---- settings window ---- */
+    .settings-window {
+      position: absolute; z-index: 8; top: 50%; left: 50%; transform: translate(-50%, -50%);
+      width: 380px; height: 430px; display: flex; flex-direction: column;
+      border: 1px solid var(--line); border-radius: 12px; background: #161618;
+      box-shadow: 0 30px 90px rgba(0,0,0,.7); overflow: hidden;
+    }
+    .settings-window[hidden] { display: none; }
+    .settings-titlebar { height: 28px; display: flex; align-items: center; gap: 7px; padding: 0 11px; border-bottom: 1px solid var(--line-soft); background: rgba(255,255,255,.04); }
+    .dot { width: 11px; height: 11px; border-radius: 50%; }
+    .settings-tabs { display: flex; gap: 3px; padding: 9px 10px 0; }
+    .settings-tabs span { padding: 5px 10px; border-radius: 7px; color: var(--faint); font-size: 11px; }
+    .settings-tabs span.on { color: var(--text); background: rgba(255,255,255,.1); }
+    .settings-body { flex: 1; padding: 15px 20px; display: grid; gap: 12px; align-content: start; overflow: auto; }
+    .settings-head { color: var(--faint); font-size: 10.5px; font-weight: 600; letter-spacing: .05em; text-transform: uppercase; }
+    .settings-group { display: grid; gap: 7px; padding-bottom: 11px; border-bottom: 1px solid var(--line-soft); }
+    .settings-group:last-of-type { border-bottom: 0; padding-bottom: 0; }
+    .prov { display: flex; align-items: baseline; gap: 7px; color: var(--text); font-size: 12px; font-weight: 560; }
+    .prov .plan { margin-left: auto; color: var(--faint); font-size: 9.5px; font-weight: 400; }
+    .u-row { display: grid; gap: 4px; color: var(--muted); font-size: 11.5px; }
+    .u-head { display: flex; align-items: baseline; gap: 8px; }
+    .u-head .name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .u-head .pct { color: var(--text); font-variant-numeric: tabular-nums; font-weight: 590; }
+    .track { height: 4px; border-radius: 999px; background: rgba(255,255,255,.1); overflow: hidden; }
+    .fill { height: 100%; border-radius: 999px; background: rgba(255,255,255,.62); }
+    .fill.warn { background: var(--warning); }
+    .fill.hot { background: var(--danger); }
+    .fill.idle { background: rgba(255,255,255,.28); }
+    .u-sub { color: var(--faint); font-size: 10px; font-variant-numeric: tabular-nums; }
+    .settings-foot { display: flex; align-items: center; justify-content: space-between; padding: 10px 20px; border-top: 1px solid var(--line-soft); color: var(--faint); font-size: 10.5px; }
+    .settings-foot button { min-height: 24px; padding: 0 9px; border: 1px solid var(--line-soft); border-radius: 6px; background: transparent; color: var(--muted); cursor: pointer; font-size: 10.5px; }
+
+    /* ---- notes ---- */
+    .notes { padding: 18px; border: 1px solid var(--line-soft); border-radius: 17px; background: #101012; position: sticky; top: 20px; }
+    .notes h2 { margin: 0 0 10px; font-size: 14px; font-weight: 630; }
+    .notes p { margin: 0 0 10px; color: var(--muted); font-size: 11.5px; line-height: 1.5; }
+    .notes code { color: rgba(255,255,255,.75); font-size: 10.5px; }
+    .notes .rule { display: grid; grid-template-columns: 62px 1fr; gap: 8px; margin-bottom: 7px; font-size: 11px; line-height: 1.45; }
+    .notes .rule b { color: var(--text); font-weight: 590; font-variant-numeric: tabular-nums; }
+    .notes .rule span { color: var(--muted); }
+    .notes .flag { margin-top: 13px; padding: 10px 11px; border: 1px solid color-mix(in srgb, var(--warning) 30%, transparent); border-radius: 10px; background: color-mix(in srgb, var(--warning) 6%, transparent); color: var(--warning); font-size: 11px; line-height: 1.5; }
+    .notes .src { margin-top: 13px; padding-top: 11px; border-top: 1px solid var(--line-soft); color: var(--faint); font-size: 10px; line-height: 1.55; }
+
+    button:focus-visible { outline: 2px solid rgba(255,255,255,.48); outline-offset: 2px; }
+
+    @media (max-width: 980px) {
+      .stage { grid-template-columns: 1fr; }
+      .notes { position: static; }
+    }
+  </style>
+</head>
+<body>
+  <main class="page">
+    <header class="intro">
+      <p class="eyebrow">Eave · provider usage · v2</p>
+      <h1>One number in the footer, the full picture behind it.</h1>
+      <p>All values are real, pulled live on 2026-07-31 from <code>account/rateLimits/read</code>,
+         Anthropic's <code>/api/oauth/usage</code>, and Cursor's <code>GetCurrentPeriodUsage</code>.
+         Switch the selected model to see the footer badge follow it.</p>
+    </header>
+
+    <div class="controls">
+      <div class="control-row" id="surface-row">
+        <span class="caption">Surface</span>
+        <button type="button" data-surface="composer" aria-pressed="true">Composer badge</button>
+        <button type="button" data-surface="menu" aria-pressed="false">Model menu</button>
+        <button type="button" data-surface="settings" aria-pressed="false">Settings</button>
+      </div>
+      <div class="control-row" id="model-row">
+        <span class="caption">Selected</span>
+      </div>
+    </div>
+
+    <section class="stage">
+      <div class="workspace" id="workspace">
+        <article class="eave-panel" aria-label="Eave panel">
+          <div class="panel-status"><strong id="status-line">Idle · notch-agent</strong><span>18k ctx</span></div>
+
+          <div class="transcript">
+            <div class="bubble-user">how much of my weekly limit is left?</div>
+            <div class="bubble-agent">You're at 25% of the weekly window, resetting Monday at 21:59. The 5-hour session window is the tighter one right now.</div>
+          </div>
+
+          <section class="composer-box">
+            <div class="draft">Ask anything…</div>
+            <div class="composer-footer">
+              <span class="composer-icon"><span class="icon i-paperclip"></span></span>
+              <button class="context-pill" id="model-pill" type="button">
+                <span class="label" id="pill-label">GPT-5.6-Luna · High</span>
+                <span class="icon i-caret"></span>
+              </button>
+              <button class="context-pill" type="button"><span class="label">notch-agent</span><span class="icon i-caret"></span></button>
+              <span class="composer-icon"><span class="icon i-eye"></span></span>
+              <span class="footer-spacer"></span>
+              <button class="usage-badge" id="usage-badge" type="button" title="Open usage settings">
+                <span class="pct">49%</span><span class="win">5hr</span>
+              </button>
+              <span class="send-button"><span class="icon i-send"></span></span>
+            </div>
+          </section>
+        </article>
+
+        <!-- model menu -->
+        <div class="menu-layer" id="menu-layer">
+          <div class="ns-menu" id="provider-menu"></div>
+          <div class="ns-menu" id="model-submenu"></div>
+        </div>
+
+        <!-- settings -->
+        <div class="settings-window" id="settings-window" hidden>
+          <div class="settings-titlebar">
+            <span class="dot" style="background:#ff5f57"></span>
+            <span class="dot" style="background:#febc2e"></span>
+            <span class="dot" style="background:#28c840"></span>
+          </div>
+          <div class="settings-tabs"><span>General</span><span>Privacy</span><span class="on">Agents</span><span>About</span></div>
+          <div class="settings-body" id="settings-body"></div>
+          <div class="settings-foot"><span>Updated 1m ago</span><button type="button">Refresh</button></div>
+        </div>
+      </div>
+
+      <aside class="notes" id="notes"></aside>
+    </section>
+  </main>
+
+  <script>
+    // ---- live data, 2026-07-31 ----------------------------------------
+    // Claude: GET api.anthropic.com/api/oauth/usage -> limits[]
+    // Codex:  app-server account/rateLimits/read -> rateLimitsByLimitId
+    // Cursor: DashboardService/GetCurrentPeriodUsage -> planUsage
+    const DATA = {
+      claude: {
+        label: "Claude", plan: "Max 20×",
+        windows: [
+          { key: "5hr", name: "Session",           pct: 49, mins: 300,   reset: "resets in 3h 19m" },
+          { key: "7d",  name: "Weekly · all",      pct: 25, mins: 10080, reset: "resets Mon 21:59" },
+        ],
+        scoped: { fable: { key: "7d", name: "Weekly · Fable", pct: 11, reset: "resets Mon 22:00" } },
+      },
+      codex: {
+        label: "Codex", plan: "Pro Lite",
+        windows: [
+          { key: "7d", name: "Weekly", pct: 0, mins: 10080, reset: "resets Fri 21:58" },
+        ],
+        scoped: { spark: { key: "7d", name: "Weekly · Codex Spark", pct: 0, reset: "resets Fri 23:00" } },
+      },
+      cursor: {
+        label: "Cursor", plan: "Pro",
+        windows: [
+          { key: "cursor", name: "Cursor models", pct: 12, mins: 43200, reset: "cycle ends Fri" },
+          { key: "other",  name: "Other models",  pct: 44, mins: 43200, reset: "cycle ends Fri" },
+        ],
+      },
+      chatgpt: { label: "ChatGPT", plan: null, windows: [], note: "Not reported by the web app." },
+    };
+
+    // Selected model -> which provider, and which window the badge shows.
+    const SELECTIONS = [
+      { id: "claude-fable",  provider: "claude",  pill: "Fable · High",          badge: "5hr",    scoped: "fable" },
+      { id: "codex-luna",    provider: "codex",   pill: "GPT-5.6-Luna · High",   badge: "7d" },
+      { id: "codex-spark",   provider: "codex",   pill: "Codex Spark",           badge: "7d",     scoped: "spark" },
+      { id: "cursor-composer", provider: "cursor", pill: "Composer 2.5",         badge: "cursor" },
+      { id: "cursor-opus",   provider: "cursor",  pill: "Opus 5 · High",         badge: "other" },
+      { id: "chatgpt",       provider: "chatgpt", pill: "ChatGPT",               badge: null },
+    ];
+
+    const MODELS = {
+      claude:  ["Fable (Latest)", "Opus (Latest)", "Sonnet (Latest)", "Haiku (Latest)"],
+      codex:   ["GPT-5.6-Sol", "GPT-5.6-Terra", "GPT-5.6-Luna", "GPT-5.5", "GPT-5.4", "GPT-5.4-Mini", "GPT-5.3-Codex-Spark"],
+      cursor:  ["Composer 2.5", "Composer Fast", "Opus 5", "Fable 5", "GPT-5.6-Sol"],
+      chatgpt: [],
+    };
+
+    const SCOPED_FOR_MODEL = {
+      "Fable (Latest)": ["claude", "fable"],
+      "GPT-5.3-Codex-Spark": ["codex", "spark"],
+    };
+
+    const severity = (p) => (p >= 80 ? "hot" : p >= 45 ? "warn" : p === 0 ? "idle" : "");
+
+    let current = SELECTIONS[1];   // Codex · Luna, matching the screenshot
+    let surface = "composer";
+
+    // ---- badge --------------------------------------------------------
+    function renderBadge() {
+      const badge = document.getElementById("usage-badge");
+      if (!current.badge) { badge.hidden = true; return; }
+      const prov = DATA[current.provider];
+      // A model with its own metered bucket reports that bucket, not the
+      // provider-wide one (Codex Spark, Claude's model-scoped weekly).
+      const scoped = current.scoped && prov.scoped && prov.scoped[current.scoped];
+      const win = scoped || prov.windows.find(w => w.key === current.badge);
+      if (!win) { badge.hidden = true; return; }
+      badge.hidden = false;
+      badge.className = "usage-badge " + severity(win.pct);
+      badge.innerHTML = `<span class="pct">${win.pct}%</span><span class="win">${win.key}</span>`;
+      badge.title = `${prov.label} · ${win.name} · ${win.reset}`;
+    }
+
+    // ---- model menu ---------------------------------------------------
+    function usageRow(w, scopedClass) {
+      return `<div class="ns-usage ${scopedClass || ""} ${severity(w.pct) === "warn" || severity(w.pct) === "hot" ? "warn" : ""}">
+                <span class="pct">${w.pct}%</span><span>${w.key}</span>
+                <span class="reset">${w.reset}</span>
+              </div>`;
+    }
+
+    function renderMenu() {
+      const providers = ["claude", "codex", "cursor", "chatgpt"];
+      document.getElementById("provider-menu").innerHTML =
+        providers.map(p => `<div class="ns-item parent ${p === current.provider ? "on" : ""}">${DATA[p].label}</div>`).join("") +
+        `<div class="ns-sep"></div><div class="ns-item">Refresh Models</div>`;
+
+      const prov = DATA[current.provider];
+      let html = "";
+      if (prov.windows.length) {
+        html += prov.windows.map(w => usageRow(w)).join("") + `<div class="ns-sep"></div>`;
+      } else if (prov.note) {
+        html += `<div class="ns-usage"><span>${prov.note}</span></div><div class="ns-sep"></div>`;
+      }
+      html += MODELS[current.provider].map(m => {
+        const checked = current.pill.startsWith(m.split(" (")[0].replace("Codex Spark", "GPT-5.3-Codex-Spark"));
+        let row = `<div class="ns-item">${checked ? '<span class="check">✓</span>' : ""}${m}</div>`;
+        const sc = SCOPED_FOR_MODEL[m];
+        if (sc && sc[0] === current.provider) row += usageRow(DATA[sc[0]].scoped[sc[1]], "scoped");
+        return row;
+      }).join("");
+      document.getElementById("model-submenu").innerHTML = html || `<div class="ns-usage">Model set in the web UI</div>`;
+    }
+
+    // ---- settings -----------------------------------------------------
+    function bar(w) {
+      const sev = severity(w.pct);
+      return `<div class="u-row">
+        <div class="u-head"><span class="name">${w.name}</span><span class="pct">${w.pct}%</span></div>
+        <div class="track"><span class="fill ${sev}" style="width:${Math.max(w.pct, 1)}%"></span></div>
+        <div class="u-sub">${w.reset}</div>
+      </div>`;
+    }
+
+    function renderSettings() {
+      const order = ["claude", "codex", "cursor", "chatgpt"];
+      document.getElementById("settings-body").innerHTML =
+        `<div class="settings-head">Usage</div>` +
+        order.map(key => {
+          const p = DATA[key];
+          const scoped = p.scoped ? Object.values(p.scoped) : [];
+          const rows = [...p.windows, ...scoped].map(bar).join("");
+          return `<div class="settings-group">
+            <div class="prov">${p.label}${p.plan ? `<span class="plan">${p.plan}</span>` : ""}</div>
+            ${rows || `<div class="u-sub">${p.note} Last limit hit: never.</div>`}
+          </div>`;
+        }).join("");
+    }
+
+    // ---- notes --------------------------------------------------------
+    function renderNotes() {
+      document.getElementById("notes").innerHTML = `
+        <h2>Which window the badge picks</h2>
+        <p>One value only, chosen as the <b style="color:var(--text)">shortest window the provider reports</b>. Everything else lives in the menu and Settings.</p>
+        <div class="rule"><b>49% 5hr</b><span>Claude — session beats the 7-day window</span></div>
+        <div class="rule"><b>0% 7d</b><span>Codex — no 5-hour window today, so weekly stands in</span></div>
+        <div class="rule"><b>12% cursor</b><span>Cursor with a Composer model selected</span></div>
+        <div class="rule"><b>44% other</b><span>Cursor with Opus 5 / GPT selected — the API bucket</span></div>
+        <div class="rule"><b>—</b><span>ChatGPT reports nothing, so the badge is hidden entirely</span></div>
+        <p style="margin-top:12px">Codex Spark and Claude's Fable weekly are separately metered, so selecting them swaps the badge to that bucket rather than the provider-wide one.</p>
+        <div class="flag"><b>Check this:</b> you said "the smallest amount", which I read as the shortest window, not the lowest percentage — otherwise Claude would show its calmest number (11%) instead of its tightest (49%). Say the word if you meant "whichever is closest to its limit" instead.</div>
+        <div class="src">
+          Claude 49% / 25% / 11% Fable · Codex 0% weekly + 0% Spark (plan prolite) ·
+          Cursor 12% auto + 44% API of a $20 included cycle · ChatGPT has no usage endpoint.
+        </div>`;
+    }
+
+    // ---- wiring -------------------------------------------------------
+    function apply() {
+      document.getElementById("pill-label").textContent = current.pill;
+      document.getElementById("status-line").textContent = `Idle · ${DATA[current.provider].label} · notch-agent`;
+      renderBadge();
+      renderMenu();
+      renderSettings();
+      document.getElementById("menu-layer").classList.toggle("on", surface === "menu");
+      document.getElementById("model-pill").classList.toggle("armed", surface === "menu");
+      document.getElementById("settings-window").hidden = surface !== "settings";
+      document.getElementById("workspace").classList.toggle("dimmed", surface !== "composer");
+      for (const b of document.querySelectorAll("#surface-row button")) {
+        b.setAttribute("aria-pressed", String(b.dataset.surface === surface));
+      }
+      for (const b of document.querySelectorAll("#model-row button")) {
+        b.setAttribute("aria-pressed", String(b.dataset.sel === current.id));
+      }
+    }
+
+    const modelRow = document.getElementById("model-row");
+    for (const s of SELECTIONS) {
+      const b = document.createElement("button");
+      b.type = "button";
+      b.dataset.sel = s.id;
+      b.innerHTML = `${DATA[s.provider].label}<span class="tag">${s.pill.split(" · ")[0]}</span>`;
+      b.addEventListener("click", () => { current = s; apply(); });
+      modelRow.appendChild(b);
+    }
+    for (const b of document.querySelectorAll("#surface-row button")) {
+      b.addEventListener("click", () => { surface = b.dataset.surface; apply(); });
+    }
+    document.getElementById("model-pill").addEventListener("click", () => {
+      surface = surface === "menu" ? "composer" : "menu"; apply();
+    });
+    document.getElementById("usage-badge").addEventListener("click", () => { surface = "settings"; apply(); });
+
+    renderNotes();
+    apply();
+  </script>
+</body>
+</html>

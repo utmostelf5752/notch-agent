@@ -1,4 +1,5 @@
 import AppKit
+import ServiceManagement
 import SwiftUI
 import UniformTypeIdentifiers
 
@@ -216,6 +217,45 @@ struct NotchShape: Shape {
     }
 }
 
+// NotchShape's outline as an open path — left flare, side, bottom, side,
+// right flare — so the compact activity line can be stroked along the notch's
+// silhouette instead of drawn as a floating hairline.
+struct NotchContourShape: Shape {
+    var radius: CGFloat
+    var topRadius: CGFloat
+
+    func path(in rect: CGRect) -> Path {
+        let left = rect.minX + topRadius
+        let right = rect.maxX - topRadius
+        var p = Path()
+        p.move(to: CGPoint(x: rect.minX, y: rect.minY))
+        if topRadius > 0 {
+            p.addQuadCurve(
+                to: CGPoint(x: left, y: rect.minY + topRadius),
+                control: CGPoint(x: left, y: rect.minY)
+            )
+        }
+        p.addLine(to: CGPoint(x: left, y: rect.maxY - radius))
+        p.addQuadCurve(
+            to: CGPoint(x: left + radius, y: rect.maxY),
+            control: CGPoint(x: left, y: rect.maxY)
+        )
+        p.addLine(to: CGPoint(x: right - radius, y: rect.maxY))
+        p.addQuadCurve(
+            to: CGPoint(x: right, y: rect.maxY - radius),
+            control: CGPoint(x: right, y: rect.maxY)
+        )
+        if topRadius > 0 {
+            p.addLine(to: CGPoint(x: right, y: rect.minY + topRadius))
+            p.addQuadCurve(
+                to: CGPoint(x: rect.maxX, y: rect.minY),
+                control: CGPoint(x: right, y: rect.minY)
+            )
+        }
+        return p
+    }
+}
+
 // The diffusion layer of the frosted materials: a behind-window
 // NSVisualEffectView. Unlike the CGS window blur (a radius on the whole
 // window rectangle), this is an ordinary layer — it clips to the panel
@@ -305,11 +345,8 @@ struct NotchTargetView: View {
     private var radius: CGFloat {
         // Stealth mimics the bare hardware notch, so it keeps the stock 8.
         if state.notchStyle == .stealth { return 8 }
-        // Compact stays tight for hairlines, but the Done pill needs the wider
-        // wing radius so text and the drain sliver fit cleanly.
-        if state.notchStyle == .compact {
-            return state.notchMode == .completed ? 14 : 10
-        }
+        // Compact always hugs the notch contour, including completion.
+        if state.notchStyle == .compact { return 10 }
         switch state.notchMode {
         case .idle: return 10
         case .working, .completed: return 14
@@ -340,18 +377,112 @@ struct NotchTargetView: View {
         }
     }
 
-    // MARK: Compact — every background state is the same sweeping hairline
-    // under the notch; only the color says what's happening. White = working,
-    // amber = permission, blue = question. Completion breaks out of the
-    // hairline into the same Done / time / drain-sliver pill as standard.
+    // MARK: Compact — a 1pt line traces the notch's silhouette on the ring the
+    // grown window creates. Working sweeps a short grey band along it;
+    // permission/question hold a center-bright line that breathes on and off.
+    // Completion uses the same treatment in green for exactly three pulses.
     @ViewBuilder private var compactContent: some View {
         switch state.notchMode {
         case .idle: idleContent
-        case .working: compactSliver(.white)
-        case .permission: compactSliver(amber)
-        case .question: compactSliver(questionBlue)
-        case .completed: completedContent
+        case .working: compactContourWorking
+        case .permission: compactContourPulse(amber)
+        case .question: compactContourPulse(questionBlue)
+        case .completed:
+            compactContourPulse(green, anchor: state.completedStartedAt, count: 3)
         }
+    }
+
+    private var contourShape: NotchContourShape {
+        NotchContourShape(radius: radius, topRadius: state.notchTopRadius)
+    }
+
+    // Fades the line out toward the notch's outer edges so it dissolves
+    // before reaching the flare tips instead of ending hard.
+    private var contourEdgeFade: LinearGradient {
+        LinearGradient(stops: [
+            .init(color: .clear, location: 0),
+            .init(color: .white, location: 0.07),
+            .init(color: .white, location: 0.93),
+            .init(color: .clear, location: 1),
+        ], startPoint: .leading, endPoint: .trailing)
+    }
+
+    // cubic-bezier(1, 0, 0.05, 1): long gradual ramps on both ends — a slow
+    // build-up, a whip through the middle, a slow settle. x is monotonic, so
+    // bisect x(t) = u for t and evaluate y(t).
+    private func sweepEase(_ u: Double) -> Double {
+        func coord(_ t: Double, _ p1: Double, _ p2: Double) -> Double {
+            let mt = 1 - t
+            return 3 * mt * mt * t * p1 + 3 * mt * t * t * p2 + t * t * t
+        }
+        var lo = 0.0, hi = 1.0
+        for _ in 0..<24 {
+            let mid = (lo + hi) / 2
+            if coord(mid, 1.0, 0.05) < u { lo = mid } else { hi = mid }
+        }
+        return coord((lo + hi) / 2, 0, 1)
+    }
+
+    // Working: a short soft-edged band sweeps the contour in 1.8s, rests
+    // 0.25s off-screen, and repeats. Brightness 80/255: just above the
+    // wallpaper's noise floor — calibrated by eye against dark menu bars.
+    private var compactContourWorking: some View {
+        let color = Color(white: 80.0 / 255)
+        return TimelineView(.animation) { ctx in
+            let cycle = ctx.date.timeIntervalSinceReferenceDate
+                .truncatingRemainder(dividingBy: 2.05)
+            let progress = sweepEase(min(1, cycle / 1.8))
+            GeometryReader { geo in
+                let bandWidth: CGFloat = 70
+                ZStack {
+                    contourShape.stroke(color.opacity(0.22), lineWidth: 1)
+                    contourShape.stroke(color.opacity(0.95), lineWidth: 1)
+                        .mask(
+                            LinearGradient(stops: [
+                                .init(color: .clear, location: 0),
+                                .init(color: .white, location: 0.5),
+                                .init(color: .clear, location: 1),
+                            ], startPoint: .leading, endPoint: .trailing)
+                            .frame(width: bandWidth)
+                            .offset(x: (geo.size.width + bandWidth) * progress - bandWidth)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                        )
+                }
+                .mask(contourEdgeFade)
+                .padding(0.5)
+            }
+        }
+        .contentShape(Rectangle())
+        .onTapGesture { state.openNotchContent(takeKeyboard: true) }
+    }
+
+    // Permission/question breathe indefinitely on a 2.2s loop. Completion
+    // passes an anchor and count so the same contour performs exactly that
+    // many pulses across its notice duration, then disappears.
+    private func compactContourPulse(
+        _ color: Color, anchor: Date? = nil, count: Int? = nil
+    ) -> some View {
+        TimelineView(.animation) { ctx in
+            let elapsed = anchor.map { max(0, ctx.date.timeIntervalSince($0)) }
+                ?? ctx.date.timeIntervalSinceReferenceDate
+            let pulseDuration = count.map {
+                state.completedDuration / Double(max(1, $0))
+            } ?? 2.2
+            let stopped = count.map { elapsed >= pulseDuration * Double($0) } ?? false
+            let phase = stopped ? 0 : (1 - cos(2 * .pi * elapsed / pulseDuration)) / 2
+            contourShape
+                .stroke(LinearGradient(stops: [
+                    .init(color: color.opacity(0), location: 0),
+                    .init(color: color.opacity(0.85), location: 0.35),
+                    .init(color: color, location: 0.5),
+                    .init(color: color.opacity(0.85), location: 0.65),
+                    .init(color: color.opacity(0), location: 1),
+                ], startPoint: .leading, endPoint: .trailing), lineWidth: 1)
+                .opacity(stopped ? 0 : 0.08 + 0.92 * phase)
+                .padding(0.5)
+        }
+        .contentShape(Rectangle())
+        .onTapGesture { state.openNotchContent(takeKeyboard: true) }
     }
 
     // One sweep per second: a bright band travels the dim track left to right.
@@ -618,7 +749,9 @@ struct NotchTargetView: View {
     }
 
     private var tokenText: String {
-        let toks = session.turnChars / 4
+        // Real cumulative usage once a turn has reported it; the chars/4
+        // estimate is only a placeholder until then (and all ChatGPT ever has).
+        let toks = session.sessionTokens > 0 ? session.sessionTokens : session.turnChars / 4
         if toks < 1000 { return "\(toks) tok" }
         return String(format: "%.1fk tok", Double(toks) / 1000)
     }
@@ -723,6 +856,7 @@ struct ChatRootView: View {
     @ObservedObject var session: AgentSession
     @ObservedObject private var chatStore = ChatArchiveStore.shared
     @ObservedObject private var chatgptWeb = ChatGPTWeb.shared
+    @ObservedObject private var usageStore = ProviderUsageStore.shared
     @FocusState private var inputFocused: Bool
     @State private var inspectedStep: ChatMessage?
     @State private var followsLatestMessage = true
@@ -1725,9 +1859,22 @@ struct ChatRootView: View {
             HStack(spacing: 6) {
                 attachButton
                 contextMenus
-                stealthEyeButton
+                contextRing
                 Spacer(minLength: 4)
                 sendButton
+            }
+            // Plan usage is per account, not per chat, so it refreshes when the
+            // composer appears and when the provider changes. A finished turn is
+            // the moment the number actually moved, so that one bypasses the
+            // store's reuse window.
+            // Every provider, not just the selected one: the model menu lists
+            // all four, so all four need their numbers before it opens.
+            .onAppear { usageStore.refreshAll() }
+            .onChange(of: session.provider) { _ in
+                usageStore.refreshAll()
+            }
+            .onChange(of: session.isRunning) { running in
+                if !running { usageStore.refresh(session.provider, force: true) }
             }
         }
     }
@@ -1884,19 +2031,73 @@ struct ChatRootView: View {
         inputFocused = true
     }
 
-    // Eye next to the model/permissions chip: enters stealth from normal
-    // mode, exits it from stealth (where this composer row is the only
-    // always-reachable control).
-    private var stealthEyeButton: some View {
-        Button { state.toggleStealth() } label: {
-            Image(systemName: state.stealthMode ? "eye" : "eye.slash")
-                .font(.system(size: 11 * s, weight: .medium))
-                .foregroundStyle(.white.opacity(0.55))
+    // Context-fill ring next to the model chip: how much of the model's
+    // context window the last request consumed. Replaced the stealth eye
+    // (stealth is toggled in Settings). Hidden for ChatGPT, which never
+    // reports usage.
+    @ViewBuilder private var contextRing: some View {
+        if let window = session.contextWindowTokens, window > 0 {
+            let fraction = min(1, Double(session.contextTokens) / Double(window))
+            HStack(spacing: 4 * s) {
+                ZStack {
+                    Circle()
+                        .stroke(Color.white.opacity(0.18), lineWidth: 2 * s)
+                    Circle()
+                        .trim(from: 0, to: max(fraction, 0.001))
+                        .stroke(
+                            fraction > 0.85 ? amber : Color.white.opacity(0.8),
+                            style: StrokeStyle(lineWidth: 2 * s, lineCap: .round)
+                        )
+                        .rotationEffect(.degrees(-90))
+                        .opacity(session.contextTokens > 0 ? 1 : 0)
+                }
+                .frame(width: 10 * s, height: 10 * s)
+                .animation(.easeOut(duration: 0.3), value: fraction)
+                // The ring alone says "somewhat full"; the figures say how much
+                // room is actually left. Stealth keeps the bare ring.
+                if !state.stealthMode {
+                    Text(session.contextTokens > 0
+                         ? "\(Self.tokenLabel(session.contextTokens))/\(Self.tokenLabel(window))"
+                         : Self.tokenLabel(window))
+                        .font(.system(size: 10 * s, weight: .medium))
+                        .monospacedDigit()
+                        .lineLimit(1)
+                        .foregroundStyle(.white.opacity(0.45))
+                }
+            }
+            .padding(1 * s)
+            .help(session.contextTokens > 0
+                  ? "Context: \(Self.tokenLabel(session.contextTokens)) of \(Self.tokenLabel(window)) (\(Int((fraction * 100).rounded()))%)"
+                  : "Context window: \(Self.tokenLabel(window))")
         }
-        .buttonStyle(.plain)
-        .help(state.stealthMode
-              ? "Exit stealth mode"
-              : "Stealth mode — silent notch, dim notch-width panel")
+    }
+
+    // Plan usage for the selected model: the model's own metered bucket when it
+    // has one, else the shortest window the provider reports ("49% 5hr",
+    // "0% 7d", "12% cursor"). Nil when usage is off, when the provider reports
+    // nothing (ChatGPT), or when the account can't be read.
+    private var currentUsageWindow: UsageWindow? {
+        guard state.usageStatsEnabled else { return nil }
+        return usageStore.badgeWindow(
+            for: session.provider,
+            modelValue: session.modelChoice[session.provider],
+            modelShort: modelPillText
+        )
+    }
+
+    private func usageHelp(_ window: UsageWindow) -> String {
+        var parts = ["\(session.provider.label) · \(window.name) · \(window.percent)% used"]
+        if let reset = window.resetLabel { parts.append(reset) }
+        return parts.joined(separator: " · ")
+    }
+
+    private static func tokenLabel(_ tokens: Int) -> String {
+        if tokens >= 1_000_000 {
+            let m = Double(tokens) / 1_000_000
+            return m == m.rounded() ? "\(Int(m))M" : String(format: "%.1fM", m)
+        }
+        if tokens >= 1000 { return "\(Int((Double(tokens) / 1000).rounded()))K" }
+        return "\(tokens)"
     }
 
     // P4 "composer morph": the composer becomes the approval while the agent
@@ -2223,6 +2424,7 @@ struct ChatRootView: View {
             Menu("Model") {
                 ForEach(AgentProvider.allCases) { provider in
                     Menu(provider.label) {
+                        usageMenuRows(for: provider)
                         let groups = session.modelMenuGroups(for: provider)
                         if groups.isEmpty {
                             menuItem("Web", checked: session.provider == provider) {
@@ -2277,10 +2479,13 @@ struct ChatRootView: View {
                         }
                     }
                 }
+                // Mode holds the two things that change how the model works
+                // rather than which model it is: how fast it runs, and whether
+                // it may edit.
                 let speedVersions = session.speedVersions(for: session.provider)
-                let contextVersions = session.contextVersions(for: session.provider)
-                if !speedVersions.isEmpty || !contextVersions.isEmpty {
-                    Menu("Version") {
+                let planModes = session.planModes(for: session.provider)
+                if !speedVersions.isEmpty || !planModes.isEmpty {
+                    Menu("Mode") {
                         ForEach(speedVersions) { version in
                             menuItem(
                                 version.label,
@@ -2292,9 +2497,24 @@ struct ChatRootView: View {
                                 }
                             }
                         }
-                        if !speedVersions.isEmpty && !contextVersions.isEmpty {
+                        if !speedVersions.isEmpty && !planModes.isEmpty {
                             Divider()
                         }
+                        ForEach(planModes) { mode in
+                            menuItem(
+                                mode.label,
+                                checked: session.isPlanMode(session.provider) == (mode.value == "plan")
+                            ) {
+                                session.setPlanMode(mode.value == "plan", for: session.provider)
+                            }
+                        }
+                    }
+                }
+                // Cursor's 250K/1M split is a property of the model, not a mode,
+                // so it keeps its own entry.
+                let contextVersions = session.contextVersions(for: session.provider)
+                if !contextVersions.isEmpty {
+                    Menu("Context") {
                         ForEach(contextVersions) { version in
                             menuItem(
                                 version.label,
@@ -2331,10 +2551,35 @@ struct ChatRootView: View {
                 }
             }
         } label: {
-            menuPill(sessionPillText)
+            // Usage rides on the model pill as one more segment after effort,
+            // because it describes the same choice: this model, on this plan,
+            // has this much headroom left.
+            menuPill(sessionPillText, usage: state.stealthMode ? nil : currentUsageWindow)
         }
     }
 
+    // Plan usage at the top of each provider's model list, as disabled rows —
+    // the reason you'd switch provider is often the number, so it belongs
+    // beside the choice rather than a window away.
+    @ViewBuilder
+    private func usageMenuRows(for provider: AgentProvider) -> some View {
+        let windows = state.usageStatsEnabled ? usageStore.menuWindows(for: provider) : []
+        if !windows.isEmpty {
+            ForEach(windows) { window in
+                Button(Self.usageMenuTitle(window)) {}
+                    .disabled(true)
+            }
+            Divider()
+        }
+    }
+
+    private static func usageMenuTitle(_ window: UsageWindow) -> String {
+        var title = "\(window.percent)% \(window.key)"
+        if let reset = window.resetLabel { title += " · \(reset)" }
+        return title
+    }
+
+    @ViewBuilder
     private func modelMenuItem(
         _ variant: AgentModelVariant, provider: AgentProvider, title: String
     ) -> some View {
@@ -2345,6 +2590,14 @@ struct ChatRootView: View {
         ) {
             session.provider = provider
             session.modelChoice[provider] = variant.option.value
+        }
+        // Models that meter on their own (Codex Spark, Claude's per-model
+        // weekly) report a bucket the provider-wide rows don't cover.
+        if state.usageStatsEnabled, let scoped = usageStore.scopedWindow(
+            forModelValue: variant.option.value, short: variant.option.short, provider: provider
+        ) {
+            Button("     " + Self.usageMenuTitle(scoped)) {}
+                .disabled(true)
         }
     }
 
@@ -2373,6 +2626,9 @@ struct ChatRootView: View {
         var parts = [modelPillText]
         if let effort = currentEffort { parts.append(effort.short) }
         if let version = currentVersion { parts.append(version.short) }
+        // Build is the default way to work and needs no label; Plan is the
+        // state worth announcing, so it shows only when it's on.
+        if session.isPlanMode(session.provider) { parts.append("Plan") }
         return parts.joined(separator: " · ")
     }
 
@@ -2381,7 +2637,9 @@ struct ChatRootView: View {
         let effortLabel = session.effortMenuLabel(for: session.provider)
         let effort = currentEffort.map { " · \(effortLabel): \($0.label)" } ?? ""
         let version = currentVersion.map { " · Version: \($0.label)" } ?? ""
-        return "Model: \(modelPillText)\(effort)\(version) · Permissions: \(currentMode.label)"
+        let usage = currentUsageWindow.map { " · \(usageHelp($0))" } ?? ""
+        let mode = session.isPlanMode(session.provider) ? " · Mode: Plan" : ""
+        return "Model: \(modelPillText)\(effort)\(version)\(mode) · Permissions: \(currentMode.label)\(usage)"
     }
 
     private var folderMenu: some View {
@@ -2465,19 +2723,38 @@ struct ChatRootView: View {
 
     // The HStack proposes the available composer width, so long labels still
     // truncate while short labels keep their natural width beside the icon.
-    private func menuPill(_ text: String) -> some View {
+    private func menuPill(_ text: String, usage: UsageWindow? = nil) -> some View {
+        // The model name is the part worth keeping when the panel narrows, so
+        // the usage segment drops whole rather than truncating and leaving a
+        // stub where the model name should be.
+        ViewThatFits(in: .horizontal) {
+            if let usage {
+                menuPillRow(text, usage: usage)
+            }
+            menuPillRow(text, usage: nil)
+        }
+        .padding(.horizontal, 4 * s)
+        .padding(.vertical, 4 * s)
+        .contentShape(Rectangle())
+    }
+
+    private func menuPillRow(_ text: String, usage: UsageWindow?) -> some View {
         HStack(spacing: 3) {
             Text(text)
                 .font(.system(size: 11 * s, weight: .medium))
                 .lineLimit(1)
+            if let usage {
+                Text("· \(usage.percent)% \(usage.key)")
+                    .font(.system(size: 11 * s, weight: .medium))
+                    .monospacedDigit()
+                    .lineLimit(1)
+                    .fixedSize()
+            }
             Image(systemName: "chevron.down")
                 .font(.system(size: 6.5 * s, weight: .semibold))
                 .opacity(0.55)
         }
         .foregroundStyle(.white.opacity(0.75))
-        .padding(.horizontal, 4 * s)
-        .padding(.vertical, 4 * s)
-        .contentShape(Rectangle())
     }
 
     @ViewBuilder
@@ -2726,6 +3003,9 @@ struct SettingsView: View {
     @ObservedObject var state: AppState
     @ObservedObject private var updater = Updater.shared
     @ObservedObject private var changelogStore = Changelog.Store.shared
+    @ObservedObject private var usageStore = ProviderUsageStore.shared
+    @State private var openAtLogin = SMAppService.mainApp.status == .enabled
+    @State private var openAtLoginError: String?
 
     private let accent = Color(nsColor: .controlAccentColor)
 
@@ -2765,6 +3045,7 @@ struct SettingsView: View {
             .padding(.vertical, 12)
         }
         .frame(width: 380, height: 430)
+        .onAppear { refreshOpenAtLogin() }
     }
 
     private func tab<Content: View>(@ViewBuilder _ content: () -> Content) -> some View {
@@ -2793,6 +3074,20 @@ struct SettingsView: View {
             Divider().padding(.vertical, 4)
 
             sectionHeader("General")
+
+            Toggle("Open at login", isOn: Binding(
+                get: { openAtLogin },
+                set: { setOpenAtLogin($0) }
+            ))
+            .font(.system(size: 12.5))
+            .toggleStyle(.switch)
+
+            if let openAtLoginError {
+                Text(openAtLoginError)
+                    .font(.system(size: 10.5))
+                    .foregroundStyle(.red)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
 
             HStack(spacing: 12) {
                 Text("Toggle panel")
@@ -2864,6 +3159,28 @@ struct SettingsView: View {
         }
     }
 
+    private func setOpenAtLogin(_ enabled: Bool) {
+        do {
+            if enabled {
+                try SMAppService.mainApp.register()
+            } else {
+                try SMAppService.mainApp.unregister()
+            }
+            refreshOpenAtLogin()
+            if enabled && SMAppService.mainApp.status == .requiresApproval {
+                openAtLoginError = "Allow Eave in System Settings > General > Login Items."
+            }
+        } catch {
+            refreshOpenAtLogin()
+            openAtLoginError = "Couldn’t update Open at Login: \(error.localizedDescription)"
+        }
+    }
+
+    private func refreshOpenAtLogin() {
+        openAtLogin = SMAppService.mainApp.status == .enabled
+        openAtLoginError = nil
+    }
+
     private var appearance: some View {
         Group {
             VStack(alignment: .leading, spacing: 6) {
@@ -2919,6 +3236,27 @@ struct SettingsView: View {
 
     private var agents: some View {
         Group {
+            sectionHeader("Usage")
+
+            Toggle(isOn: $state.usageStatsEnabled) {
+                VStack(alignment: .leading, spacing: 1) {
+                    Text("Show plan usage").font(.system(size: 12.5))
+                    Text("How much of each plan is left, on the model pill and here. Claude and Cursor read the credentials their CLIs store in your login keychain, so macOS may ask you to allow access the first time. Codex reports over the app-server Eave already runs. ChatGPT's web app reports nothing.")
+                        .font(.system(size: 10.5))
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            .toggleStyle(.switch)
+
+            if state.usageStatsEnabled {
+                usageSection
+            }
+
+            Divider().padding(.vertical, 4)
+
+            sectionHeader("Approvals")
+
             Toggle(isOn: $state.cursorApprovalsEnabled) {
                 VStack(alignment: .leading, spacing: 1) {
                     Text("Ask before Cursor runs commands").font(.system(size: 12.5))
@@ -2931,6 +3269,103 @@ struct SettingsView: View {
             }
             .toggleStyle(.switch)
         }
+    }
+
+    // The comprehensive view the composer badge links to: every window each
+    // provider reports, including the per-model buckets the badge can only
+    // show one at a time.
+    private var usageSection: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            ForEach(AgentProvider.allCases) { provider in
+                VStack(alignment: .leading, spacing: 6) {
+                    HStack(spacing: 6) {
+                        Text(provider.label)
+                            .font(.system(size: 12, weight: .medium))
+                        Spacer()
+                        if let plan = usageStore.usage[provider]?.plan {
+                            Text(plan)
+                                .font(.system(size: 10))
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                    usageProviderBody(provider)
+                }
+            }
+
+            HStack {
+                if let updated = usageStore.usage.values.compactMap(\.fetchedAt).max() {
+                    Text("Updated \(Self.relativeLabel(updated))")
+                        .font(.system(size: 10.5))
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                Button("Refresh") { usageStore.refreshAll(force: true) }
+                    .controlSize(.small)
+                    .disabled(usageStore.isRefreshing)
+            }
+        }
+        .onAppear { usageStore.refreshAll() }
+    }
+
+    @ViewBuilder
+    private func usageProviderBody(_ provider: AgentProvider) -> some View {
+        let entry = usageStore.usage[provider]
+        if provider == .chatgpt {
+            Text("Not reported by the ChatGPT web app.")
+                .font(.system(size: 10.5))
+                .foregroundStyle(.secondary)
+        } else if let failure = entry?.failure {
+            Text(failure)
+                .font(.system(size: 10.5))
+                .foregroundStyle(.secondary)
+        } else {
+            let windows = usageStore.allWindows(for: provider)
+            if windows.isEmpty {
+                Text(entry == nil ? "Loading…" : "No limits reported.")
+                    .font(.system(size: 10.5))
+                    .foregroundStyle(.secondary)
+            } else {
+                ForEach(windows) { window in
+                    usageBar(window)
+                }
+            }
+        }
+    }
+
+    private func usageBar(_ window: UsageWindow) -> some View {
+        VStack(alignment: .leading, spacing: 3) {
+            HStack(spacing: 6) {
+                Text(window.name)
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                Spacer()
+                Text("\(window.percent)%")
+                    .font(.system(size: 11, weight: .medium))
+                    .monospacedDigit()
+            }
+            GeometryReader { geo in
+                ZStack(alignment: .leading) {
+                    Capsule().fill(Color.primary.opacity(0.1))
+                    Capsule()
+                        .fill(Color.primary.opacity(0.6))
+                        .frame(width: max(2, geo.size.width * Double(window.percent) / 100))
+                }
+            }
+            .frame(height: 4)
+            if let reset = window.resetLabel {
+                Text(reset)
+                    .font(.system(size: 9.5))
+                    .foregroundStyle(.tertiary)
+            }
+        }
+    }
+
+    private static func relativeLabel(_ date: Date) -> String {
+        let elapsed = Int(Date().timeIntervalSince(date))
+        if elapsed < 60 { return "just now" }
+        if elapsed < 3600 { return "\(elapsed / 60)m ago" }
+        return "\(elapsed / 3600)h ago"
     }
 
     private var updateStatusLine: (text: String, color: Color)? {

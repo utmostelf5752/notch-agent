@@ -403,6 +403,12 @@ struct ChatArchive: Identifiable, Codable {
     var pendingAttachmentPaths: [String]?
     // Queues belong to the conversation, not whichever chat is visible.
     var queuedMessages: [QueuedMessage]?
+    // Cumulative real token usage for the chat. Optional so archives written
+    // before this field decode (nil -> starts at 0 on restore).
+    var sessionTokens: Int?
+    // Context-window fill after the last completed turn (the input+output
+    // size of the most recent request). Optional for the same reason.
+    var contextTokens: Int?
     let date: Date
 }
 
@@ -415,6 +421,7 @@ struct ChatSettings: Codable, Equatable {
     var effort: String?
     var fastMode: Bool?
     var contextVersion: String?
+    var planMode: Bool?
 }
 
 struct QueuedMessage: Identifiable, Codable, Equatable {
@@ -1063,6 +1070,22 @@ final class AgentSession: ObservableObject {
     @Published var turnStartedAt: Date?
     @Published var turnChars = 0
     @Published var lastTurnDuration: TimeInterval = 0
+    // Cumulative real token usage for this chat (input + output + cache),
+    // summed across turns from each provider's own usage reporting. The pill
+    // shows this once it's non-zero and falls back to the turnChars/4 estimate
+    // until the first turn reports usage. Persisted per chat, reset with the
+    // conversation. ChatGPT (web) never reports usage, so it stays on the
+    // estimate.
+    @Published var sessionTokens = 0
+    // Current context-window fill: the token size of the most recent request
+    // (prompt + history + cache reads + output). Unlike sessionTokens this is
+    // set, not summed — each turn's per-invocation usage *is* the context
+    // size, since every request resends the whole conversation. Drops when
+    // the provider compacts. ChatGPT reports nothing, so it stays 0 there.
+    @Published var contextTokens = 0
+    // Codex may report the model's context window alongside token usage;
+    // preferred over the built-in fallback constant when present.
+    private var codexReportedContextWindow: Int?
     var silentTurn = false
     var multipleChoiceTurn = false
     @Published var usageLimit: ProviderLimitNotice?
@@ -1103,6 +1126,13 @@ final class AgentSession: ObservableObject {
     @Published var fastModeChoice: [AgentProvider: Bool] = [:] {
         didSet { persist(fastModeChoice, key: Self.fastModeChoiceDefaultsKey) }
     }
+    // Plan mode: research and propose, don't edit. Every CLI provider has its
+    // own switch for it (Claude's plan permission mode, Codex's collaboration
+    // mode, Cursor's --mode plan), so this is one flag mapped three ways.
+    // Missing key = build mode, which is the normal way to work.
+    @Published var planModeChoice: [AgentProvider: Bool] = [:] {
+        didSet { persist(planModeChoice, key: Self.planModeChoiceDefaultsKey) }
+    }
     @Published private(set) var cursorModelFamilies = CursorModelFamily.build(
         from: AgentProvider.cursor.models
     )
@@ -1123,6 +1153,7 @@ final class AgentSession: ObservableObject {
     private static let modeChoiceDefaultsKey = "Eave.modeChoice"
     private static let effortChoiceDefaultsKey = "Eave.effortChoice"
     private static let fastModeChoiceDefaultsKey = "Eave.fastModeChoice"
+    private static let planModeChoiceDefaultsKey = "Eave.planModeChoice"
     private static let cursorContextDefaultsKey = "Eave.cursorContextChoice"
     private static let workingDirectoryDefaultsKey = "Eave.workingDirectory"
     // The history entry the live session was restored from, if any. Keeps a
@@ -1160,6 +1191,9 @@ final class AgentSession: ObservableObject {
         )
         fastModeChoice = Self.savedChoices(
             from: defaults, key: Self.fastModeChoiceDefaultsKey, fallback: fastModeChoice
+        )
+        planModeChoice = Self.savedChoices(
+            from: defaults, key: Self.planModeChoiceDefaultsKey, fallback: planModeChoice
         )
         if let savedPath = defaults.string(forKey: Self.workingDirectoryDefaultsKey) {
             let savedURL = URL(fileURLWithPath: savedPath, isDirectory: true).standardizedFileURL
@@ -1313,6 +1347,25 @@ final class AgentSession: ObservableObject {
               !speedVersions(for: provider).isEmpty
         else { return }
         fastModeChoice[provider] = value == "fast"
+    }
+
+    // Build is the unnamed normal state; only Plan is worth labelling, so the
+    // composer shows nothing at all in build mode.
+    func planModes(for provider: AgentProvider) -> [AgentOption] {
+        guard provider.hasCLIOptions else { return [] }
+        return [
+            AgentOption(label: "Build", short: "Build", value: "build"),
+            AgentOption(label: "Plan", short: "Plan", value: "plan"),
+        ]
+    }
+
+    func isPlanMode(_ provider: AgentProvider) -> Bool {
+        planModeChoice[provider] == true
+    }
+
+    func setPlanMode(_ enabled: Bool, for provider: AgentProvider) {
+        guard provider.hasCLIOptions else { return }
+        planModeChoice[provider] = enabled
     }
 
     func contextVersions(for provider: AgentProvider) -> [AgentOption] {
@@ -1684,7 +1737,8 @@ final class AgentSession: ObservableObject {
             mode: modeChoice[provider],
             effort: effortChoice[provider],
             fastMode: fastModeChoice[provider],
-            contextVersion: effectiveContextVersion(for: provider)
+            contextVersion: effectiveContextVersion(for: provider),
+            planMode: planModeChoice[provider]
         )
 
         // Only an ordinary user send touches history ordering. Permission
@@ -1774,7 +1828,11 @@ final class AgentSession: ObservableObject {
         if let effort = effectiveEffort(for: .claude) { args += ["--effort", effort] }
         let fastMode = effectiveFastMode(for: .claude)
         args += ["--settings", "{\"fastMode\":\(fastMode)}"]
-        if let mode = modeChoice[.claude] {
+        // Plan is itself a Claude permission mode, so it replaces the chosen one
+        // for as long as it's on rather than layering onto it.
+        if isPlanMode(.claude) {
+            args += ["--permission-mode", "plan"]
+        } else if let mode = modeChoice[.claude] {
             args += ["--permission-mode", mode]
             if mode == "bypassPermissions" { args.append("--allow-dangerously-skip-permissions") }
         }
@@ -1986,6 +2044,12 @@ final class AgentSession: ObservableObject {
             ]
             if let model = self.modelChoice[.codex] { turnParams["model"] = model }
             if let effort = self.effectiveEffort(for: .codex) { turnParams["effort"] = effort }
+            // The app-server's collaboration mode carries its own settings
+            // block, and `model` is required inside it.
+            turnParams["collaborationMode"] = [
+                "mode": self.isPlanMode(.codex) ? "plan" : "default",
+                "settings": ["model": self.modelChoice[.codex] ?? "gpt-5.5"],
+            ]
             self.codexServer.startTurn(turnParams) { [weak self] turnID, error in
                 guard let self else { return }
                 if let error {
@@ -2162,6 +2226,7 @@ final class AgentSession: ObservableObject {
         ]
         if let cursorSessionID { args += ["--resume", cursorSessionID] }
         if let model = resolvedCursorModelID() { args += ["--model", model] }
+        if isPlanMode(.cursor) { args += ["--mode", "plan"] }
         switch modeChoice[.cursor] {
         case "force":
             args.append("--force")
@@ -2300,6 +2365,9 @@ final class AgentSession: ObservableObject {
             )
         case "result":
             if let id = event["session_id"] as? String { cursorSessionID = id }
+            if let usage = event["usage"] as? [String: Any] {
+                addTokenUsage(Self.cursorUsageTotal(usage))
+            }
             if event["is_error"] as? Bool == true,
                let result = event["result"] as? String,
                !result.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
@@ -2444,6 +2512,12 @@ final class AgentSession: ObservableObject {
             codexActiveTurnID = nil
             pendingPermission = nil
             if let failureMessage { presentProviderFailure(failureMessage, provider: .codex) }
+        case .tokenUsage(let cumulativeTotal, let lastTurnTotal, let contextWindow):
+            setCumulativeTokenUsage(cumulativeTotal)
+            if let lastTurnTotal, lastTurnTotal > 0 { contextTokens = lastTurnTotal }
+            if let contextWindow, contextWindow > 0 { codexReportedContextWindow = contextWindow }
+        case .rateLimits(let snapshot):
+            ProviderUsageStore.shared.applyCodexSnapshot(snapshot)
         case .serverError(let message):
             presentProviderFailure(message, provider: .codex)
         case .approvalRequest(let kind, let payload, let respond):
@@ -2627,6 +2701,8 @@ final class AgentSession: ObservableObject {
         transcriptEpoch += 1
         currentArchiveID = nil
         lastRunSettings = nil
+        sessionTokens = 0
+        contextTokens = 0
         messages.removeAll()
         attachments.removeAll()
         queuedMessages.removeAll()
@@ -2656,6 +2732,8 @@ final class AgentSession: ObservableObject {
         queuedMessageBeingEditedID = nil
         queuePaused = !queuedMessages.isEmpty
         queueDrainSuspended = !queuedMessages.isEmpty
+        sessionTokens = chat.sessionTokens ?? 0
+        contextTokens = chat.contextTokens ?? 0
         provider = chat.provider
         usageLimit = nil
         claudeSessionID = chat.claudeSessionID
@@ -2670,6 +2748,7 @@ final class AgentSession: ObservableObject {
             apply(settings.mode, into: &modeChoice)
             apply(settings.effort, into: &effortChoice)
             apply(settings.fastMode, into: &fastModeChoice)
+            apply(settings.planMode, into: &planModeChoice)
             if provider == .cursor,
                !contextVersions(for: provider).isEmpty {
                 setContextVersion(settings.contextVersion ?? "regular", for: provider)
@@ -2726,11 +2805,14 @@ final class AgentSession: ObservableObject {
                 mode: modeChoice[provider],
                 effort: effortChoice[provider],
                 fastMode: fastModeChoice[provider],
-                contextVersion: effectiveContextVersion(for: provider)
+                contextVersion: effectiveContextVersion(for: provider),
+                planMode: planModeChoice[provider]
             ),
             draft: draft.isEmpty ? nil : draft,
             pendingAttachmentPaths: attachments.isEmpty ? nil : attachments.map(\.path),
             queuedMessages: queuedMessages.isEmpty ? nil : queuedMessages,
+            sessionTokens: sessionTokens > 0 ? sessionTokens : nil,
+            contextTokens: contextTokens > 0 ? contextTokens : nil,
             date: lastTouchedAt
         )
         ChatArchiveStore.shared.upsert(archive)
@@ -2837,6 +2919,9 @@ final class AgentSession: ObservableObject {
         case "result":
             // Resumed runs get a fresh session id; always track the latest.
             if let id = event["session_id"] as? String { claudeSessionID = id }
+            if let usage = event["usage"] as? [String: Any] {
+                addTokenUsage(Self.claudeUsageTotal(usage))
+            }
             if event["is_error"] as? Bool == true,
                let result = event["result"] as? String,
                !result.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
@@ -2995,6 +3080,57 @@ final class AgentSession: ObservableObject {
         } else {
             messages.append(ChatMessage(role: .assistant, text: text))
         }
+    }
+
+    // MARK: - Token usage
+
+    // Providers that run one process per turn (Claude, Cursor) report
+    // per-invocation usage; we sum it into the chat total. The same
+    // per-invocation total is also the size of the request that produced it,
+    // i.e. the current context fill.
+    private func addTokenUsage(_ tokens: Int) {
+        guard tokens > 0 else { return }
+        sessionTokens += tokens
+        contextTokens = tokens
+    }
+
+    // Approximate context-window capacity for the provider's selected model,
+    // shown as the composer ring's denominator. nil hides the ring (ChatGPT
+    // never reports usage). Claude and Codex windows are fixed per model;
+    // Cursor's is whichever size the user picked for the family.
+    var contextWindowTokens: Int? {
+        switch provider {
+        case .claude:
+            let model = modelChoice[.claude] ?? ""
+            return model.contains("haiku") ? 200_000 : 1_000_000
+        case .codex:
+            return codexReportedContextWindow ?? 272_000
+        case .cursor:
+            return effectiveContextVersion(for: .cursor) == "1m" ? 1_000_000 : 250_000
+        case .chatgpt:
+            return nil
+        }
+    }
+
+    // Codex reports a thread-cumulative total on every update, so we take the
+    // max rather than adding (guards against the transient lower value the
+    // app-server emits while replaying a resumed thread's history).
+    private func setCumulativeTokenUsage(_ total: Int) {
+        if total > sessionTokens { sessionTokens = total }
+    }
+
+    // Claude's result usage keeps cache tokens in separate fields from
+    // input_tokens, so all four must be summed for the true tokens processed.
+    private static func claudeUsageTotal(_ usage: [String: Any]) -> Int {
+        let keys = ["input_tokens", "output_tokens",
+                    "cache_read_input_tokens", "cache_creation_input_tokens"]
+        return keys.reduce(0) { $0 + ((usage[$1] as? Int) ?? 0) }
+    }
+
+    // Cursor's result usage, same shape with camelCase keys.
+    private static func cursorUsageTotal(_ usage: [String: Any]) -> Int {
+        let keys = ["inputTokens", "outputTokens", "cacheReadTokens", "cacheWriteTokens"]
+        return keys.reduce(0) { $0 + ((usage[$1] as? Int) ?? 0) }
     }
 
     // Streaming: replace the trailing assistant bubble with the full text.

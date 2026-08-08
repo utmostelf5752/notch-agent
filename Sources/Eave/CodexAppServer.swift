@@ -16,6 +16,12 @@ final class CodexAppServer {
         case approvalRequest(kind: ApprovalKind, payload: JSON, respond: (String) -> Void)
         case turnStarted(String)                 // turn id
         case turnCompleted(turnID: String?, failureMessage: String?)
+        // cumulativeTotal is thread-cumulative; lastTurnTotal is the latest
+        // turn's request size (the current context fill); contextWindow is
+        // the model's capacity when the server reports one.
+        case tokenUsage(cumulativeTotal: Int, lastTurnTotal: Int?, contextWindow: Int?)
+        // Sparse rolling plan-usage update; merge, don't replace.
+        case rateLimits(JSON)
         case serverError(String)
     }
 
@@ -164,6 +170,12 @@ final class CodexAppServer {
         }
     }
 
+    // Account-wide plan usage: the shared bucket plus one per separately
+    // metered model. Cheap enough to run on a throwaway server.
+    func readRateLimits(completion: @escaping (JSON?, String?) -> Void) {
+        request("account/rateLimits/read", [:], completion: completion)
+    }
+
     // MARK: - Thread / turn API
 
     // Opens (or resumes) a thread, then calls completion with the codex
@@ -290,6 +302,20 @@ final class CodexAppServer {
             let turn = params["turn"] as? JSON
             let failure = (turn?["error"] as? JSON)?["message"] as? String
             onEvent?(.turnCompleted(turnID: turn?["id"] as? String, failureMessage: failure))
+        case "thread/tokenUsage/updated":
+            // `total` is cumulative for the whole thread and survives resume
+            // (the app-server replays prior turns' usage), so we set rather
+            // than add. `last` is this turn only — which, because every turn
+            // resends the whole conversation, is also the context fill.
+            let usage = params["tokenUsage"] as? JSON
+            if let total = (usage?["total"] as? JSON)?["totalTokens"] as? Int {
+                let last = (usage?["last"] as? JSON)?["totalTokens"] as? Int
+                let window = (usage?["modelContextWindow"] as? Int)
+                    ?? (params["modelContextWindow"] as? Int)
+                onEvent?(.tokenUsage(cumulativeTotal: total, lastTurnTotal: last, contextWindow: window))
+            }
+        case "account/rateLimits/updated":
+            if let limits = params["rateLimits"] as? JSON { onEvent?(.rateLimits(limits)) }
         case "error":
             if let message = (params["error"] as? JSON)?["message"] as? String {
                 onEvent?(.serverError(message))

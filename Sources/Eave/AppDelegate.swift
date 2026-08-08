@@ -18,18 +18,6 @@ final class FirstMouseHostingView<Content: View>: NSHostingView<Content> {
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 }
 
-// A small filled dot overlaid on the status-bar icon when a background chat has
-// finished unseen. A subview (not a template-image composite) so the glyph
-// stays adaptive white while the dot keeps its own color.
-final class UnreadDotView: NSView {
-    override var isFlipped: Bool { false }
-    override func draw(_ dirtyRect: NSRect) {
-        NSColor.systemBlue.setFill()
-        NSBezierPath(ovalIn: bounds).fill()
-    }
-    override func hitTest(_ point: NSPoint) -> NSView? { nil } // clicks fall through to the button
-}
-
 final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuDelegate {
     private struct HotKeyID {
         static let toggle: UInt32 = 1
@@ -42,7 +30,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     private var runningObserver: AnyCancellable?
     private var shortcutObserver: AnyCancellable?
     private var unreadObserver: AnyCancellable?
-    private weak var unreadDot: UnreadDotView?
+    private var statusRunning = false
+    private var statusHasUnread = false
     private weak var appState: AppState?
     private static let unreadItemTag = 7701
 
@@ -114,6 +103,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     //   chats                             write history list to /tmp/eave-chats.txt
     //   restore:<index>                   reopen a past chat from the history list
     //   cfg                               write current provider settings to /tmp/eave-settings.txt
+    //   usage                             refresh plan usage, write it to /tmp/eave-usage.txt
+    //   plan:<on|off>                     toggle plan mode for the current provider
     //   update                            run a user-initiated Sparkle update check
     //   model:<id|default>                set the current provider's model
     // With no command file, USR2 just logs geometry.
@@ -167,6 +158,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                 mode=\(session.modeChoice[p] ?? "-")
                 effort=\(session.effortChoice[p] ?? "-")
                 fast=\(session.fastModeChoice[p].map(String.init) ?? "-")
+                plan=\(session.isPlanMode(p))
                 cwd=\(session.workingDirectory.path)
                 """
                 try? out.write(toFile: "/tmp/eave-settings.txt", atomically: true, encoding: .utf8)
@@ -229,6 +221,35 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                 AppState.shared.openSettings()
             } else if cmd == "about" {
                 AppState.shared.openSettings(tab: .about)
+            } else if cmd.hasPrefix("plan:") {
+                session.setPlanMode(cmd.dropFirst(5) == "on", for: session.provider)
+            } else if cmd == "usage" {
+                let store = ProviderUsageStore.shared
+                store.refreshAll(force: true)
+                // Fetches are async; report after they have had time to land.
+                DispatchQueue.main.asyncAfter(deadline: .now() + 6) {
+                    var lines: [String] = []
+                    for provider in AgentProvider.allCases {
+                        let entry = store.usage[provider]
+                        lines.append("\(provider.rawValue): plan=\(entry?.plan ?? "-") "
+                            + "failure=\(entry?.failure ?? "-")")
+                        for window in store.allWindows(for: provider) {
+                            lines.append("  \(window.percent)% \(window.key) — \(window.name)"
+                                + (window.resetLabel.map { " (\($0))" } ?? ""))
+                        }
+                        // Per model, because which window the badge picks depends
+                        // on the model's own metered bucket.
+                        for model in session.models(for: provider) {
+                            let badge = store.badgeWindow(
+                                for: provider, modelValue: model.value, modelShort: model.short
+                            )
+                            lines.append("  badge(\(model.short)): "
+                                + (badge.map { "\($0.percent)% \($0.key) — \($0.name)" } ?? "hidden"))
+                        }
+                    }
+                    try? lines.joined(separator: "\n")
+                        .write(toFile: "/tmp/eave-usage.txt", atomically: true, encoding: .utf8)
+                }
             } else if cmd == "update" {
                 Updater.shared.checkForUpdates()
             } else if cmd == "collapse" {
@@ -278,14 +299,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     private func setUpStatusItem(state: AppState) {
         appState = state
         let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
-        Self.configureStatusButton(item.button, running: false)
-
-        if let button = item.button {
-            let dot = UnreadDotView(frame: .zero)
-            dot.isHidden = true
-            button.addSubview(dot)
-            unreadDot = dot
-        }
+        Self.configureStatusButton(item.button, running: false, hasUnread: false)
 
         let menu = NSMenu()
         menu.delegate = self
@@ -320,7 +334,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                 // Silent screenshot turns keep the status bar appearance idle
                 // so there is no visible "working" indicator anywhere.
                 let silent = state.silentTurn
-                Self.configureStatusButton(self?.statusItem?.button, running: running && !silent)
+                self?.statusRunning = running && !silent
+                self?.refreshStatusButton()
             }
         shortcutObserver = state.$toggleShortcut
             .receive(on: DispatchQueue.main)
@@ -330,16 +345,41 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         unreadObserver = state.$unreadChats
             .receive(on: DispatchQueue.main)
             .sink { [weak self] chats in
-                self?.updateUnreadDot(hasUnread: !chats.isEmpty)
+                self?.statusHasUnread = !chats.isEmpty
+                self?.refreshStatusButton()
             }
     }
 
-    private static func configureStatusButton(_ button: NSStatusBarButton?, running: Bool) {
+    private func refreshStatusButton() {
+        Self.configureStatusButton(statusItem?.button, running: statusRunning, hasUnread: statusHasUnread)
+    }
+
+    private static func configureStatusButton(_ button: NSStatusBarButton?, running: Bool, hasUnread: Bool) {
         guard let button else { return }
-        let image = Bundle.main.url(forResource: "MenuBarIcon", withExtension: "png")
+        let size = NSSize(width: 18, height: 18)
+        let base = Bundle.main.url(forResource: "MenuBarIcon", withExtension: "png")
             .flatMap(NSImage.init(contentsOf:))
             ?? NSImage(systemSymbolName: "terminal", accessibilityDescription: nil)
-        image?.size = NSSize(width: 18, height: 18)
+        base?.size = size
+        var image = base
+        if hasUnread, let base {
+            // Composite the unread dot into the template image (only alpha
+            // matters) so it renders in the adaptive menu bar color alongside
+            // the glyph — white on dark, black on light — with a knocked-out
+            // gap separating it from the glyph.
+            image = NSImage(size: size, flipped: false) { rect in
+                base.draw(in: rect)
+                let dot: CGFloat = 5.5
+                let gap: CGFloat = 1.5
+                let dotRect = NSRect(x: rect.maxX - dot, y: rect.maxY - dot, width: dot, height: dot)
+                NSGraphicsContext.current?.compositingOperation = .destinationOut
+                NSBezierPath(ovalIn: dotRect.insetBy(dx: -gap, dy: -gap)).fill()
+                NSGraphicsContext.current?.compositingOperation = .sourceOver
+                NSColor.black.setFill()
+                NSBezierPath(ovalIn: dotRect).fill()
+                return true
+            }
+        }
         image?.isTemplate = true
         let beta = Updater.shared.isBetaBuild
         image?.accessibilityDescription = running
@@ -358,17 +398,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
 
     private static func menuHint(toggle: GlobalShortcut) -> String {
         "Press \(toggle.displayName) or hover notch"
-    }
-
-    private func updateUnreadDot(hasUnread: Bool) {
-        guard let button = statusItem?.button, let dot = unreadDot else { return }
-        let size: CGFloat = 6
-        let bounds = button.bounds
-        // Top-right of the button, tucked just inside the edge (non-flipped, so
-        // maxY is the top).
-        dot.frame = NSRect(x: bounds.maxX - size - 1, y: bounds.maxY - size - 2,
-                           width: size, height: size)
-        dot.isHidden = !hasUnread
     }
 
     // Rebuild the unread shortcut rows each time the menu opens: prune expired
@@ -393,6 +422,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             it.tag = Self.unreadItemTag
             menu.insertItem(it, at: index); index += 1
         }
+        let clear = NSMenuItem(title: "Clear All", action: #selector(clearAllUnread), keyEquivalent: "")
+        clear.target = self
+        clear.tag = Self.unreadItemTag
+        menu.insertItem(clear, at: index); index += 1
         let separator = NSMenuItem.separator()
         separator.tag = Self.unreadItemTag
         menu.insertItem(separator, at: index)
@@ -401,6 +434,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     @objc private func openUnreadChat(_ sender: NSMenuItem) {
         guard let id = sender.representedObject as? UUID else { return }
         appState?.openUnreadChat(id)
+    }
+
+    @objc private func clearAllUnread() {
+        appState?.clearAllUnread()
     }
 
     // Full-screen screenshots fade the status button without removing its

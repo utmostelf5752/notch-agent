@@ -181,8 +181,8 @@ final class AppState: ObservableObject {
 
     // How the notch narrates background activity.
     //   standard — live text, tokens, and buttons around the notch.
-    //   compact  — hairline sliver while working/alerting; Done expands into
-    //              wings with elapsed time and a draining bottom bar.
+    //   compact  — a 1pt line hugging the notch outline while working or
+    //              alerting; completion pulses that contour green 3 times.
     //   stealth  — silent while working; a permission/question announces
     //              itself with a brief 2-sweep dark sliver and then hides;
     //              the panel becomes a near-black overlay at the notch's
@@ -258,6 +258,21 @@ final class AppState: ObservableObject {
                 applyCoreGraphicsHardening()
             } else {
                 clearCoreGraphicsHardening()
+            }
+        }
+    }
+
+    // Reading plan usage means reading each CLI's stored credentials, so it is
+    // opt-in rather than something Eave does on its own the first time you
+    // open the panel.
+    @Published var usageStatsEnabled: Bool {
+        didSet {
+            guard oldValue != usageStatsEnabled else { return }
+            UserDefaults.standard.set(usageStatsEnabled, forKey: "usageStatsEnabled")
+            if usageStatsEnabled {
+                ProviderUsageStore.shared.refreshAll(force: true)
+            } else {
+                ProviderUsageStore.shared.clear()
             }
         }
     }
@@ -506,8 +521,8 @@ final class AppState: ObservableObject {
     private var activeSessionCancellables: Set<AnyCancellable> = []
     private var backgroundObserversStarted = false
 
-    // A brief "Done" pill shown after a turn finishes while collapsed, then it
-    // dismisses itself. completedStartedAt anchors the draining progress bar.
+    // A brief completion notice shown after a turn finishes while collapsed,
+    // then dismissed. The anchor drives each style's finite animation.
     var completedStartedAt = Date()
     let completedDuration: TimeInterval = 5
     private var completedTimer: Timer?
@@ -600,6 +615,7 @@ final class AppState: ObservableObject {
         if h > 0 { panelHeightOverride = CGFloat(h) }
         screenShareProtectionEnabled = defaults.bool(forKey: "screenShareProtectionEnabled")
         autoHideOnScreenShare = defaults.bool(forKey: "autoHideOnScreenShare")
+        usageStatsEnabled = defaults.bool(forKey: "usageStatsEnabled")
         coreGraphicsHardeningEnabled = defaults.bool(forKey: "coreGraphicsHardeningEnabled")
         let observer = NotificationCenter.default.addObserver(
             forName: Notification.Name("NSWindowDidBecomeVisibleNotification"),
@@ -718,9 +734,8 @@ final class AppState: ObservableObject {
         if candidate !== session || !expanded {
             noteBackgroundUnread(for: candidate)
         }
-        // The "Done" pill is a glance-notification for when the panel is closed.
-        // If the panel is already open the user is present, and queuing the pill
-        // would just replay the Done animation when they later collapse the notch.
+        // Completion is a glance-notification for when the panel is closed. If
+        // the panel is open, queuing it would replay the animation on collapse.
         guard !expanded else { return }
         enqueueAttention(for: candidate, kind: .completed, signalID: nil)
     }
@@ -743,6 +758,11 @@ final class AppState: ObservableObject {
     func clearUnread(_ id: UUID?) {
         guard let id, unreadChats.contains(where: { $0.id == id }) else { return }
         unreadChats.removeAll { $0.id == id }
+    }
+
+    func clearAllUnread() {
+        guard !unreadChats.isEmpty else { return }
+        unreadChats = []
     }
 
     // Prune expired entries lazily and hand back the current list (newest first,
@@ -1281,16 +1301,17 @@ final class AppState: ObservableObject {
                 return NSSize(width: base.width, height: base.height + 3)
             }
         }
-        // Compact: hairline for working/alerts; Done grows into wings like
-        // standard so "Done", elapsed time, and the drain sliver can fit.
+        // Compact: the notch grows 1pt on left, right, and bottom while active,
+        // and every status — including completion — is drawn on that ring.
         if notchStyle == .compact {
             switch notchMode {
             case .idle:
                 return base
-            case .completed:
-                return NSSize(width: min(base.width + 200, maxPanelWidth), height: base.height + 6)
             default:
-                return NSSize(width: base.width, height: base.height + 3)
+                // 1pt out per side and 2pt down: enough to clear the physical
+                // glass edge (the auxiliary areas measure the usable menu-bar
+                // strip, which runs slightly narrower) — calibrated by eye.
+                return NSSize(width: base.width + 2, height: base.height + 2)
             }
         }
         switch notchMode {
